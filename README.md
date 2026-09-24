@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.1.1-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.0-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -587,6 +587,54 @@ socks5  9.9.9.9  1080  u1  p1       空格分隔（常见面板导出格式）
 > 老实现只认 IPv4 字面量，`socks5h://proxy.example.com:1080` 这种完全合法的
 > 写法会被拒；现在主机名、IPv4、IPv6 都接受。
 
+### 代理可以在账号导入后随时改
+
+「账号管理」列表的「代理」列提供了 **设代理 / 改代理 / 清空(改直连)** 三个动作，
+不必删掉账号重新导入。编辑框里的代理地址与协议下拉就地校验，写错立刻拒绝并说明原因：
+
+```
+代理格式不正确：不认识的代理协议「socks9」；支持 http, https, socks, socks4, socks4a, socks5, socks5h
+代理格式不正确：SOCKS4 不支持用户名/密码认证，请改用 socks5
+代理格式不正确：代理端口不正确：(空)
+```
+
+改完会提示去点「测试」验证连通性 —— **配置改成功不等于代理通了**，这两件事要分开确认。
+代理属于敏感配置，每次变更都写入审计日志（谁、什么时候、改了哪个账号）。
+
+> **这里修掉了一个静默降级的缺陷。** 早先的写法是
+> `ptype = PROXY_SCHEMES.get(scheme, ptype)`：协议名不认识时**回退到下拉框的值**，
+> 于是把 `socks5` 拼成 `socks9`、或者写成 `ftp://`，都会被当成 HTTP/HTTPS 代理存下去。
+> 配置界面上显示「成功」，真正的报错要等到创建实例、去调 GCP API 时才炸出来，
+> 排查时离现场已经很远。现在未知协议直接拒绝并在报错里列出所有可用协议。
+>
+> 另一个坑：代理编辑框**不能**回填服务端返回的打码值 ——
+> `/api/accounts` 只回 `socks5h://user:***@host:1080`，若把它当成初值填回输入框，
+> 用户点一下保存就把 `***` 当密码存进库了。所以编辑框一律留空，要求重新输入。
+
+### 创建页：目标账号只显示「备注 + 已有机器数」
+
+创建实例页选账号时，真正影响判断的只有两件事：这个账号是谁、它名下已经有几台机器。
+因此该表只有这两列（外加一个勾选框）：
+
+| 列 | 内容 |
+|---|---|
+| 备注 | 优先显示账号备注；没填备注时回退显示邮箱（过长可展开）；密钥文件缺失时带红色徽章 |
+| 已有机器 | 该账号在 GCP 里的实例数量，点「⟳ 查询机器数」实时查询 |
+
+- 数量是**向 GCP 实时查询**得到的，不依赖本地记录，因此手工建的实例也算得进去。
+- 逐账号串行查询会让页面像卡死，所以按账号并发（默认 8 并发），
+  并在响应里返回 `elapsed_ms` 便于实测。
+- 响应同时给出两个口径，**不合并**：`inst_count_live`（GCP 实时，查询失败为
+  `null`）与 `inst_count_local`（本工具创建并记录的）。语义不同就不能混着显示，
+  否则「本工具建了 0 台」会被误读成「这个账号没有机器」。
+- 单个账号查询失败（凭证失效、网络不通）只记录在 `errors` 里，不影响其它账号显示。
+
+> 同样修掉一个缺陷：这一列原来是 `{{ a.proxy }}`，而 `/api/accounts` 为防泄露
+> 早已把 `proxy` 字段 `pop` 掉了 —— 所以那列**永远显示 `-`**，是个死列。
+> 现在改为显示机器数，并有用例锁住「不得再引用被接口抹掉的字段」。
+> 「密钥文件缺失」的警告被保留成徽章：带着缺失的密钥去创建必定失败，
+> 这个提示不能因为精简列而被丢掉。
+
 ---
 
 ## 六、创建后自动安装
@@ -912,6 +960,8 @@ GET /api/inspect?account_id=&sections=&region=&zone=&fresh=1&quick=1
 | POST | `/api/accounts/upload` | account | 上传 JSON 密钥导入 |
 | POST | `/api/accounts/import_dir` | account | 按目录批量导入 |
 | POST | `/api/accounts/{id}/test` | view | 测试连通性并统计实例数 |
+| PATCH | `/api/accounts/{id}` | account | 改账号：备注 / 代理 / 代理协议（代理就地校验，变更写审计） |
+| GET | `/api/accounts/instance_counts` | view | 每个账号的实例数（GCP 实时、并发；缓存 5 分钟） |
 | GET | `/api/instances?sync=true` | view | 同步拉取全部实例 |
 | POST | `/api/refresh` | view | 刷新实例 |
 | POST | `/api/create` | operate | 提交创建任务（支持 `dry_run` 预检） |
@@ -1012,8 +1062,10 @@ gcp-manager-web/
 │   ├── fe_verify.py        备注/费用/密码/代理/安装预设的浏览器实测
 │   ├── _fixtures.py        测试夹具共享（管理员密码、展示用假数据）
 │   ├── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
+│   ├── smoke_proxy_counts.py 接口冒烟：账号改代理（含非法值拒绝）与机器数统计
+│   ├── verify_proxy_ui.py  浏览器实测：创建页账号列精简 + 账号页改代理
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（474 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（515 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -1025,7 +1077,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 474 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 515 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -1057,6 +1109,17 @@ python3 tests_e2e.py
   账号接口不外发明文代理、前端各列与交互存在性、nps 已换源 sysuahb 且不再引用 ehang-io、版本号固定、随机名反查逻辑、面板端口为实测值；禁止 `curl|sh </dev/null` 反例写法、`_run_remote` 助手存在且被全部预设使用；
   favicon 路由、`CreateRequest` 必须声明 `note`/`installs`（pydantic 会静默丢弃
   未声明字段）、dry-run 端到端确认安装脚本真的拼进 `post_command`
+
+- **O. 账号代理可改 / 账号列精简 / 每账号机器数**（41 项）：
+  未知代理协议被拒（附可选协议列表）、协议名大小写不敏感、
+  `PATCH /api/accounts/{id}` 可改代理/清空为直连、非法值被拒且不破坏原配置、
+  SOCKS4 带认证被拒、账号接口仍不外发明文代理密码、备注改动不被代理逻辑带坏、
+  备注超长与空 PATCH 被拒、改不存在的账号 404、代理变更写审计、
+  `count_instances_per_account` 并发且单账号失败隔离、live/local 两口径不合并、
+  查询失败为 `null` 而非冒充 0、`/api/accounts` 也带机器数、
+  创建页账号表只剩「备注/已有机器」两列、不再引用被接口抹掉的 `a.proxy`、
+  保留密钥缺失警告、代理编辑框不回填打码值（否则把 `***` 当密码存进去）、
+  提供「清空(改直连)」、改完提示去测连通性、机器数查询不挂在 loadAccounts 上
 
 - **M. 版本号 / 导航分组 / 按钮排序**（42 项）：版本号符合语义化格式且 ≥1.0.1、
   FastAPI 元数据与 version 模块一致、`/api/version` 匿名可读且不泄露账号信息、

@@ -590,6 +590,13 @@ pre.log.big{max-height:520px}
 .note-cell .tx:hover{border-bottom-color:var(--line)}
 .note-cell .tx.empty{color:var(--muted-2)}
 .note-cell input{padding:4px 7px;font-size:11.5px;max-width:160px}
+/* 创建页账号表：备注 + 已有机器数 */
+.acc-line > .em.solo{flex:1;min-width:0}
+.cnt{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink-2)}
+.cnt small{font-weight:400}
+/* 账号页代理就地编辑 */
+.proxy-edit{display:flex;flex-direction:column;gap:5px;min-width:0}
+.proxy-edit input,.proxy-edit select{max-width:290px;font-size:11.5px;padding:4px 7px}
 .note-cell .sv{flex:none;font-size:10.5px;color:var(--brand);cursor:pointer}
 
 /* ══════════ 长邮箱折叠 ══════════ */
@@ -916,19 +923,41 @@ pre.log.big{max-height:520px}
                 <span class="br"></span>
                 <button class="sm" @click="selectAllAccounts(true)">全选</button>
                 <button class="sm" @click="selectAllAccounts(false)">全不选</button>
+                <span class="br"></span>
+                <button class="sm" @click="loadAccountCounts(true)"
+                        :disabled="countLoading">{{ countLoading ? '查询中…' : '⟳ 查询机器数' }}</button>
                 <span class="hint" v-if="!accounts.length">还没有账号，请到「账号管理」导入 GCP 服务账号 JSON</span>
               </div>
               <div class="tw" style="max-height:210px">
                 <table class="resp" v-if="accounts.length">
-                  <thead><tr><th style="width:42px"></th><th>邮箱</th><th>Project</th><th>代理</th><th>密钥文件</th></tr></thead>
+                  <!-- 只显示「备注」与「已有机器数」：选账号时这两项才是有用的判断依据。
+                       邮箱仅在没填备注时作为兜底标识；密钥缺失做成徽章留在备注格内，
+                       因为用它创建一定失败，这个警告不能因为精简列而丢掉。 -->
+                  <thead><tr><th style="width:42px"></th><th>备注</th><th>已有机器</th></tr></thead>
                   <tbody>
                     <tr v-for="a in accounts" :key="a.id">
                       <td data-l="选择"><input type="checkbox" :value="a.id" v-model="checkedAccountIds"></td>
-                      <td data-l="邮箱" class="mono">{{ a.email }}</td>
-                      <td data-l="Project" class="mono">{{ a.project_id }}</td>
-                      <td data-l="代理" class="mono">{{ a.proxy || '-' }}</td>
-                      <td data-l="密钥" class="mono">{{ a.key_file }}
-                        <span class="badge r" v-if="!a.key_exists">缺失</span></td>
+                      <td data-l="备注">
+                        <div class="acc-line">
+                          <span class="lb" v-if="a.label" :title="a.label">{{ a.label }}</span>
+                          <span class="em" :class="{solo:!a.label}">
+                            <span class="mail" :class="{open:expandedMail['ck'+a.id]}"
+                                  :title="a.email">{{ a.email }}</span>
+                            <button class="mail-tg" v-if="(a.email||'').length>26"
+                                    @click="expandedMail['ck'+a.id]=!expandedMail['ck'+a.id]">
+                              {{ expandedMail['ck'+a.id] ? '收起' : '展开' }}</button>
+                          </span>
+                          <span class="badge r" v-if="!a.key_exists"
+                                title="密钥文件不存在，用该账号创建必定失败">密钥缺失</span>
+                        </div>
+                      </td>
+                      <td data-l="已有机器">
+                        <span class="cnt" v-if="a.inst_count_live!==null && a.inst_count_live!==undefined">
+                          {{ a.inst_count_live }} 台</span>
+                        <span class="cnt" v-else-if="a.inst_count_local">
+                          {{ a.inst_count_local }} 台<small class="hint"> 本地记录</small></span>
+                        <span class="hint" v-else>—</span>
+                      </td>
                     </tr>
                   </tbody>
                 </table>
@@ -1143,12 +1172,33 @@ pre.log.big{max-height:520px}
                   </td>
                   <td data-l="Project" class="mono">{{ a.project_id }}</td>
                   <td data-l="代理">
-                    <template v-if="a.proxy_set">
-                      <div class="mono" style="font-size:11.5px">{{ a.proxy_display }}</div>
-                      <span class="badge proxy" :title="a.proxy_type_label">{{ a.proxy_type }}</span>
-                      <span class="badge r" v-if="!a.proxy_ok" :title="a.proxy_error">配置有误</span>
+                    <!-- 编辑态：就地改代理，省得删了账号重导 -->
+                    <div v-if="editingProxy===a.id" class="proxy-edit">
+                      <input v-model.trim="proxyDraft" class="mono" maxlength="300"
+                             placeholder="1.2.3.4:8080 或 socks5h://user:pass@host:1080"
+                             @keyup.enter="saveAccProxy(a)" @keyup.esc="editingProxy=null">
+                      <select v-model="proxyTypeDraft">
+                        <option value="HTTPS">HTTPS 代理（HTTP CONNECT）</option>
+                        <option value="HTTP">HTTP 代理</option>
+                        <option value="SOCKS5H">SOCKS5（代理端解析 DNS，推荐）</option>
+                        <option value="SOCKS4">SOCKS4（仅 IPv4，无认证）</option>
+                      </select>
+                      <div class="row" style="margin-top:5px">
+                        <button class="sm p" @click="saveAccProxy(a)">保存</button>
+                        <button class="sm" @click="editingProxy=null">取消</button>
+                        <button class="sm d" v-if="a.proxy_set" @click="clearAccProxy(a)">清空(改直连)</button>
+                      </div>
+                    </div>
+                    <template v-else>
+                      <template v-if="a.proxy_set">
+                        <div class="mono" style="font-size:11.5px">{{ a.proxy_display }}</div>
+                        <span class="badge proxy" :title="a.proxy_type_label">{{ a.proxy_type }}</span>
+                        <span class="badge r" v-if="!a.proxy_ok" :title="a.proxy_error">配置有误</span>
+                      </template>
+                      <span class="hint" v-else>直连（未用代理）</span>
+                      <button class="mail-tg" v-if="can('account')" @click="startEditProxy(a)">
+                        {{ a.proxy_set ? '改代理' : '设代理' }}</button>
                     </template>
-                    <span class="hint" v-else>直连（未用代理）</span>
                   </td>
                   <td data-l="密钥" class="mono">{{ a.key_file }}
                     <span class="badge r" v-if="!a.key_exists">文件缺失</span></td>
@@ -1924,6 +1974,10 @@ const __APP_REF__ = createApp({
     noteDraft:'',
     editingAcc:null,             // 正在编辑备注的账号 id
     accNoteDraft:'',
+    editingProxy:null,           // 正在编辑代理的账号 id
+    proxyDraft:'',               // 代理输入框草稿（明文只在本地，不回显服务端值）
+    proxyTypeDraft:'HTTPS',
+    countLoading:false,          // 「查询机器数」进行中
     expandedMail:{},             // 长邮箱展开状态
 
     opts:{count:1, concurrency:3, account_workers:1, retry_count:2,
@@ -2257,7 +2311,13 @@ const __APP_REF__ = createApp({
     /* ───────── 导航 ───────── */
     go(id){ this.tab = id; this.onEnter(id); },
     onEnter(id){
-      if(id==='instances') this.loadInstances(false);
+      // 机器数只在「创建实例」页显示，因此只在进入该页时查询 ——
+      // 放在 loadAccounts 里会让每次打开控制台都向 GCP 打一轮统计
+      if(id==='create'){
+        if(!this.accounts.length) this.loadAccounts();
+        else this.loadAccountCounts(false);
+      }
+      else if(id==='instances') this.loadInstances(false);
       else if(id==='accounts') this.loadAccounts();
       else if(id==='tasks'){ this.loadTasks(); this.loadLogsTail(); }
       else if(id==='users' && this.can('user')){ this.loadUsers(); this.loadSessions(); this.loadAudit(); }
@@ -2327,6 +2387,55 @@ const __APP_REF__ = createApp({
     hidePwd(name){ delete this.revealedPwd[name]; delete this.pwdShownAt[name]; },
 
     /* ───────── 账号备注 ───────── */
+    /* ───────── 代理：改 / 清空 ───────── */
+    startEditProxy(a){
+      if(!this.can('account')) return;
+      this.editingProxy = a.id;
+      // 服务端只回打码后的值，所以编辑框一律**留空**，
+      // 让用户重新输入。回填打码串会导致保存时把 *** 当密码存进去。
+      this.proxyDraft = '';
+      this.proxyTypeDraft = a.proxy_type || 'HTTPS';
+    },
+    async saveAccProxy(a){
+      if(this.editingProxy !== a.id) return;
+      const raw = (this.proxyDraft || '').trim();
+      if(!raw) return this.toast('请输入代理地址，或点「清空(改直连)」', 'a');
+      const r = await this.patch('/api/accounts/' + a.id,
+                                 {proxy:raw, proxy_type:this.proxyTypeDraft});
+      if(r && r.ok){
+        this.editingProxy = null; this.proxyDraft = '';
+        this.toast('代理已更新，建议点「测试」验证连通性', 'g');
+        await this.loadAccounts();
+      } else this.fail(r);
+    },
+    async clearAccProxy(a){
+      const r = await this.patch('/api/accounts/' + a.id, {proxy:'', proxy_type:'HTTPS'});
+      if(r && r.ok){
+        this.editingProxy = null;
+        this.toast('已改为直连（不使用代理）', 'g');
+        await this.loadAccounts();
+      } else this.fail(r);
+    },
+
+    /* ───────── 每个账号已有几台机器 ───────── */
+    async loadAccountCounts(fresh){
+      if(this.countLoading) return;
+      this.countLoading = true;
+      try{
+        const r = await this.api(fresh ? '/api/accounts/instance_counts?fresh=1'
+                                       : '/api/accounts/instance_counts');
+        if(r && r.ok && r.counts){
+          const m = {};
+          r.counts.forEach(c => { m[String(c.account_id)] = c.inst_count_live; });
+          this.accounts.forEach(a => {
+            if(m[String(a.id)] !== undefined) a.inst_count_live = m[String(a.id)];
+          });
+          if(r.errors && r.errors.length)
+            this.toast(r.errors.length + ' 个账号查询失败（其余已显示）', 'a');
+        }
+      } finally { this.countLoading = false; }
+    },
+
     async saveAccNote(a){
       if(this.editingAcc !== a.id) return;
       this.editingAcc = null;
@@ -2362,6 +2471,7 @@ const __APP_REF__ = createApp({
         // 否则 ws 会带着 since_id=0 请求，把已在页面上的历史日志重复追加一遍。
         await this.loadLogsTail();
         this.connectWS();
+        if(this.tab === 'create') this.loadAccountCounts(false);
         setInterval(()=>this.loadStatus(), 10000);
         setInterval(()=>{ if(this.tab==='tasks') this.loadTasks(); }, 6000);
       } catch(e){

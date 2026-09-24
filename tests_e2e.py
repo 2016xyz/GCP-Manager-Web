@@ -1913,6 +1913,148 @@ if _run:
     check("★ run.sh 语法检查通过", rc.returncode == 0, rc.stderr[:200])
     check("★ run.sh 优先复用 install.sh 建的 .venv", ".venv/bin/python" in _run)
 
+# ══════════ O. 账号可改代理 / 创建页账号列精简 / 每账号机器数 ══════════
+print("\n── O. 账号代理可改 · 账号列精简 · 机器数 ──")
+
+login("admin", admin_pw)
+_accs = client.get("/api/accounts").json()["accounts"]
+_acc = _accs[0] if _accs else None
+_aid = _acc["id"] if _acc else None
+_orig_label = (_acc or {}).get("label") or ""
+_orig_proxy = None  # 只记「有没有」，明文不回显
+
+if _aid is None:
+    check("★ 账号列表非空（后续断言依赖）", False, "库中无账号")
+else:
+    # ── 未知协议必须被拒（本轮修掉的真实缺陷）──────────────────
+    # 老实现 `PROXY_SCHEMES.get(scheme, ptype)` 在协议名不认识时静默回退，
+    # 拼错 socks5 → socks9 会被当成 HTTP 代理存下去，直到调 GCP 才炸。
+    for _raw, _why in [("socks9://1.2.3.4:1080", "拼错 socks5"),
+                       ("ftp://1.2.3.4:1080", "根本不支持的协议"),
+                       ("1.2.3.4:1080:u:p", None)]:
+        _r = _pp(_raw)
+        if _why:
+            check(f"★ 未知协议被拒（{_why}）",
+                  _r["ok"] is False and _r.get("error"),
+                  str(_r))
+    check("★ 未知协议的报错里列出可用协议（便于自查）",
+          "socks5" in (_pp("socks9://1.2.3.4:1080").get("error") or ""),
+          str(_pp("socks9://1.2.3.4:1080").get("error")))
+    check("★ 协议名大小写不敏感（SOCKS5:// 合法）",
+          _pp("SOCKS5://1.2.3.4:1080")["ok"] is True)
+
+    # ── PATCH /api/accounts/{id} 支持改代理 ─────────────────
+    _r = client.patch(f"/api/accounts/{_aid}",
+                      json={"proxy": "socks5h://u:pw@127.0.0.1:1080", "proxy_type": "SOCKS5"})
+    check("★ 已导入账号可事后改代理（PATCH 接口）",
+          _r.status_code == 200 and _r.json().get("ok"), _r.text[:120])
+    _a = [x for x in client.get("/api/accounts").json()["accounts"] if x["id"] == _aid][0]
+    check("★ 改完后代理生效", _a["proxy_set"] is True, str(_a.get("proxy_set")))
+    check("★ 类型归一化为 SOCKS5H", _a["proxy_type"] == "SOCKS5H", str(_a.get("proxy_type")))
+    check("★ 账号接口仍不外发明文代理密码",
+          "pw@" not in json.dumps(_a) and "***" in (_a.get("proxy_display") or ""),
+          _a.get("proxy_display"))
+
+    # 非法代理必须被拒，且不能破坏已有的代理
+    _r = client.patch(f"/api/accounts/{_aid}", json={"proxy": "socks9://1.2.3.4:1080"})
+    check("★ 改代理时非法值被拒（不是静默存进去）", _r.status_code == 400, str(_r.status_code))
+    check("★ 拒绝后给出可读原因", "协议" in _r.json().get("detail", ""), _r.text[:120])
+    _a = [x for x in client.get("/api/accounts").json()["accounts"] if x["id"] == _aid][0]
+    check("★ 非法值被拒后原代理未被破坏", _a["proxy_type"] == "SOCKS5H", str(_a.get("proxy_type")))
+    _r = client.patch(f"/api/accounts/{_aid}", json={"proxy": "socks4://u:p@1.2.3.4:1080"})
+    check("★ 改代理时 SOCKS4 带认证同样被拒", _r.status_code == 400, str(_r.status_code))
+
+    # 清空 → 直连
+    _r = client.patch(f"/api/accounts/{_aid}", json={"proxy": ""})
+    check("★ 可清空代理改为直连", _r.status_code == 200, _r.text[:120])
+    _a = [x for x in client.get("/api/accounts").json()["accounts"] if x["id"] == _aid][0]
+    check("★ 清空后 proxy_set=False（前端据此显示「直连」）",
+          _a["proxy_set"] is False, str(_a.get("proxy_set")))
+
+    # 备注改动别被代理逻辑带坏 + 超长拒绝
+    _r = client.patch(f"/api/accounts/{_aid}", json={"label": "O段测试备注"})
+    _a = [x for x in client.get("/api/accounts").json()["accounts"] if x["id"] == _aid][0]
+    check("★ 改代理的新逻辑没带坏改备注", _a["label"] == "O段测试备注", str(_a.get("label")))
+    _r = client.patch(f"/api/accounts/{_aid}", json={"label": "x" * 101})
+    check("★ 账号备注超长被拒", _r.status_code == 400, str(_r.status_code))
+    _r = client.patch(f"/api/accounts/{_aid}", json={})
+    check("★ 空 PATCH 被拒（没有要改的字段）", _r.status_code == 400, str(_r.status_code))
+    _r = client.patch("/api/accounts/999999", json={"label": "x"})
+    check("★ 改不存在的账号 → 404", _r.status_code == 404, str(_r.status_code))
+    client.patch(f"/api/accounts/{_aid}", json={"label": _orig_label})
+
+    # 代理变更要留审计（敏感配置改动）
+    _ad = client.get("/api/audit?limit=100").json().get("audit", [])
+    check("★ 代理变更写入审计日志",
+          any(x.get("action") == "update_account_proxy" for x in _ad), str(len(_ad)))
+
+    # ── 每账号机器数 ─────────────────────────────────────
+    check("★ tasks 提供并发统计（不逐账号串行拖慢页面）",
+          "def count_instances_per_account" in _lt_src
+          and "ThreadPoolExecutor" in _lt_src)
+    check("★ 统计区分 live 与 local 两个口径（不合并、不取最大值）",
+          "inst_count_live" in _lt_src and "inst_count_local" in _lt_src)
+    check("★ 单账号查询失败不影响其它账号",
+          "errors.append" in _lt_src.split("def count_instances_per_account", 1)[1][:3000])
+    _r = client.get("/api/accounts/instance_counts")
+    check("★ /api/accounts/instance_counts 可用", _r.status_code == 200, str(_r.status_code))
+    _j = _r.json()
+    check("★ 统计返回 counts + 耗时 + 缓存标记",
+          isinstance(_j.get("counts"), list) and "elapsed_ms" in _j and "cached" in _j,
+          str(sorted(_j.keys())))
+    if _j.get("counts"):
+        _row = _j["counts"][0]
+        check("★ 每条含 account_id / live / local",
+              all(k in _row for k in ("account_id", "inst_count_live", "inst_count_local")),
+              str(sorted(_row.keys())))
+        check("★ 查询失败时 live 为 None 而非冒充 0",
+              _row["inst_count_live"] is None or isinstance(_row["inst_count_live"], int),
+              repr(_row["inst_count_live"]))
+    _a = [x for x in client.get("/api/accounts").json()["accounts"] if x["id"] == _aid][0]
+    check("★ /api/accounts 也带机器数（表格可直接渲染）",
+          "inst_count_local" in _a and "inst_count_live" in _a)
+    check("★ 无备注时 label 回空串（前端 v-if 依赖）",
+          isinstance(_a.get("label"), str), repr(_a.get("label")))
+
+# ══════════ 创建页账号列 / 账号页代理编辑入口（前端）══════════
+_ct5 = client.get("/static/console.html").text
+# 创建页账号表：只要 备注 + 已有机器
+check("★ 创建页账号表头只剩「备注」「已有机器」",
+      "<th>备注</th><th>已有机器</th>" in _ct5)
+# 注意：不能在整个文件里 grep "<th>Project</th>" —— 账号管理页的表头
+# 合法地也有这几列。这里按创建页原先那整行表头精确匹配，只断言它被换掉了。
+check("★ 创建页不再有 邮箱/Project/代理/密钥文件 列",
+      '<th style="width:42px"></th><th>邮箱</th><th>Project</th><th>代理</th>'
+      '<th>密钥文件</th>' not in _ct5,
+      "创建页旧表头仍在")
+# 顺带锁住一个真实缺陷：旧列渲染 `{{ a.proxy }}`，但 /api/accounts 为防泄露
+# 已经把 proxy 字段 pop 掉了 → 那一列永远显示 "-"，是死的
+check("★ 创建页账号表不再引用被接口抹掉的 a.proxy（否则永远显示 -）",
+      "{{ a.proxy ||" not in _ct5 and "{{ a.proxy }}" not in _ct5)
+check("★ 创建页账号表保留密钥缺失警告",
+      "密钥缺失" in _ct5 and "!a.key_exists" in _ct5)
+check("★ 创建页可手动查询机器数",
+      "loadAccountCounts" in _ct5 and "查询机器数" in _ct5)
+# 机器数只在创建页显示，就不该在每次打开控制台时都向 GCP 打一轮统计
+_la = _ct5.split("async loadAccounts(){", 1)[1].split("},", 1)[0]
+check("★ 机器数查询不挂在 loadAccounts 上（避免每次开控制台都打 GCP）",
+      "loadAccountCounts" not in _la, _la[:120])
+check("★ 进入创建页时才自动查机器数",
+      "id==='create'" in _ct5 and "loadAccountCounts(false)" in _ct5)
+
+# 账号页：可改代理
+check("★ 账号页有「设代理/改代理」入口",
+      "'设代理'" in _ct5 or "设代理" in _ct5)
+check("★ 账号页代理可就地编辑（输入框 + 协议下拉）",
+      'class="proxy-edit"' in _ct5 and 'v-model.trim="proxyDraft"' in _ct5)
+check("★ 账号页代理编辑框不回填打码值（否则把 *** 当密码存进去）",
+      "this.proxyDraft = ''" in _ct5)
+check("★ 账号页提供「清空(改直连)」", "清空(改直连)" in _ct5 and "clearAccProxy" in _ct5)
+check("★ 改代理后提示去测连通性（改了不等于通了）",
+      "建议点「测试」验证连通性" in _ct5)
+check("★ 代理编辑走 PATCH 专用助手（不是两参 api()）",
+      "this.patch('/api/accounts/'" in _ct5)
+
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:

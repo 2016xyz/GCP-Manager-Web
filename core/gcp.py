@@ -74,8 +74,17 @@ def parse_proxy_input(proxy_text, fallback_proxy_type="HTTPS"):
     if "://" in raw:
         scheme, _, rest = raw.partition("://")
         scheme = scheme.strip().lower()
+        # 协议名不认识时**必须报错**，不能回退到下拉框的默认值。
+        # 早先写成 `PROXY_SCHEMES.get(scheme, ptype)`：用户把 socks5 拼成
+        # socks9、或写成 ftp://，都会被静默当成 HTTP/HTTPS 代理去连 ——
+        # 配置表面上"成功"，直到调 GCP API 才失败，离现场很远。
+        if scheme not in PROXY_SCHEMES:
+            return {"ok": False, "proxy_url": "", "proxy_type": ptype,
+                    "host": "", "port": "",
+                    "error": (f"不认识的代理协议「{scheme}」；"
+                              f"支持 {', '.join(sorted(set(PROXY_SCHEMES)))}")}
         # 支持 socks5h:// 这类带 h 后缀的写法
-        ptype = PROXY_SCHEMES.get(scheme, ptype)
+        ptype = PROXY_SCHEMES[scheme]
         if "@" in rest:
             cred, _, hostport = rest.rpartition("@")
             if ":" in cred:

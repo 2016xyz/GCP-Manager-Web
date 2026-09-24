@@ -818,6 +818,26 @@ def api_accounts(request: Request):
         a["proxy_port"] = pinfo.get("port") or ""
         # 原始 proxy 字段（可能带明文密码）不外发
         a.pop("proxy", None)
+        # 无代理时必须回 ""，前端据此显示「直连」
+        a["label"] = a.get("label") or ""
+
+    # 每账号实例数：本地计数（即时、反映「本工具建的」）+
+    # 实时计数（取缓存，没有则为 None → 前端显示「点刷新查询」）。
+    # 两个数语义不同，都给出，不合并。
+    local_cnt = {}
+    for vm in store.get_all_vms():
+        k = str(vm.get("account_id") or "")
+        if k:
+            local_cnt[k] = local_cnt.get(k, 0) + 1
+    cached = tm.cached_instance_counts()
+    live_map = {}
+    if cached:
+        for c in cached.get("counts", []):
+            live_map[str(c["account_id"])] = c.get("inst_count_live")
+    for a in accounts:
+        k = str(a["id"])
+        a["inst_count_local"] = local_cnt.get(k, 0)
+        a["inst_count_live"] = live_map.get(k)
     return {"ok": True, "accounts": accounts}
 
 
@@ -890,9 +910,73 @@ def api_delete_account(acc_id: int, request: Request):
 
 @app.patch("/api/accounts/{acc_id}")
 def api_update_account(acc_id: int, request: Request, payload: dict):
-    require(request, "account")
-    store.update_account(acc_id, **payload)
-    return {"ok": True}
+    """
+    改账号：备注 / 代理 / 代理协议。
+
+    代理要在这里校验，不能直接 **payload 透传给 store —— 代理写错
+    （端口缺失、协议名拼错）在导入时不报错，等真正创建实例才在 GCP
+    调用处炸，排查起来离现场很远。这里就地拒绝，错误信息直接回给用户。
+    """
+    user = require(request, "account")
+    acc = store.get_account(acc_id)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+
+    fields = dict(payload)
+
+    if "label" in fields:
+        label = (fields.get("label") or "").strip()
+        if len(label) > 100:
+            raise HTTPException(400, "备注过长（上限 100 字）")
+        fields["label"] = label
+
+    # 代理：支持「清空代理」（传空串）与「改代理」两种意图
+    if "proxy" in fields or "proxy_type" in fields:
+        raw = (fields.get("proxy") if "proxy" in fields else acc.get("proxy")) or ""
+        ptype = (fields.get("proxy_type") if "proxy_type" in fields
+                 else acc.get("proxy_type")) or "HTTPS"
+        if raw.strip():
+            pinfo = gcp_mod.parse_proxy_input(raw.strip(), ptype)
+            if not pinfo.get("ok"):
+                raise HTTPException(400, f"代理格式不正确：{pinfo.get('error') or '无法解析'}")
+            # 存归一化后的 URL，避免同一个代理存成多种写法
+            fields["proxy"] = pinfo.get("proxy_url") or raw.strip()
+            fields["proxy_type"] = pinfo.get("proxy_type") or ptype
+        else:
+            # 清空代理 → 直连
+            fields["proxy"] = ""
+            fields["proxy_type"] = ptype
+        # 代理属于敏感配置，变更要留痕（谁在什么时候改了哪个账号）
+        users_store.audit(user["username"], client_ip(request), "update_account_proxy",
+                          target=str(acc_id),
+                          detail=("清空代理(直连)" if not fields["proxy"]
+                                  else gcp_mod.mask_proxy(fields["proxy"])))
+
+    if not fields:
+        raise HTTPException(400, "没有要修改的字段")
+    store.update_account(acc_id, **fields)
+    return {"ok": True, "updated": sorted(k for k in fields if k != "key_path")}
+
+
+@app.get("/api/accounts/instance_counts")
+def api_account_instance_counts(request: Request, account_ids: str = ""):
+    """
+    每个账号名下的实例数（GCP 实时查询，并发）。
+
+    给「创建实例」页选账号用：用户需要知道哪个账号已经有几台机器，
+    避免把实例全堆在一个账号上。默认走缓存（5 分钟内），
+    `fresh=1` 强制重新查询。
+    """
+    require(request, "view")
+    ids = [x.strip() for x in (account_ids or "").split(",") if x.strip()]
+    cached = tm.cached_instance_counts()
+    if cached is not None and not ids:
+        cached = dict(cached)
+        cached["cached"] = True
+        return cached
+    res = tm.count_instances_per_account(ids or None)
+    res["cached"] = False
+    return res
 
 
 @app.post("/api/accounts/{acc_id}/test")

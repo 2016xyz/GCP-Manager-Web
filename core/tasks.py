@@ -789,6 +789,87 @@ class TaskManager:
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True, "task_id": task_id}
 
+    def count_instances_per_account(self, account_ids=None, max_workers=8):
+        """
+        统计每个账号名下**实际存在于 GCP** 的实例数。
+
+        为什么要并发：这个接口是给「创建实例」页选账号用的，用户改一下
+        选中账号就可能刷新一次。逐账号串行调用 list_instances，账号一多
+        就要等十几秒，页面像是卡死了。这里按账号并发，并把整体耗时打到
+        返回里，便于实测。
+
+        与本地记录（vm_passwords.account_id）计数的差异：
+          本地只统计「本工具创建的」实例；这里是向 GCP 实时查询，
+          能统计到用户手工建的实例。两者语义不同，因此返回里同时给出
+          两个数，不合并、不取最大值 —— 免得把「本工具建了 0 台」
+          误显示成「该账号没有机器」。
+
+        单个账号查询失败只记录错误，不影响其它账号（凭证失效、
+        网络不通都很常见，不该让整页统计全灭）。
+        """
+        accounts = self.store.get_accounts()
+        wanted = [str(x) for x in (account_ids or [])]
+        if wanted:
+            accounts = [a for a in accounts if str(a["id"]) in wanted]
+
+        # 本地记录计数（无需网络，先算好兜底）
+        local = {}
+        for vm in self.store.get_all_vms():
+            key = str(vm.get("account_id") or "")
+            if key:
+                local[key] = local.get(key, 0) + 1
+
+        live, errors = {}, []
+        t0 = time.time()
+
+        def probe(acc):
+            gcp = self.account_service(acc)
+            return acc["id"], len(gcp.list_instances())
+
+        if accounts:
+            workers = max(1, min(int(max_workers), len(accounts)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(probe, a): a for a in accounts}
+                for fut in as_completed(futs):
+                    acc = futs[fut]
+                    try:
+                        acc_id, n = fut.result()
+                        live[str(acc_id)] = n
+                    except Exception as exc:
+                        errors.append({"account": acc["email"], "error": str(exc)})
+
+        counts = []
+        for acc in accounts:
+            key = str(acc["id"])
+            counts.append({
+                "account_id": acc["id"],
+                "email": acc["email"],
+                "label": acc.get("label") or "",
+                # live：GCP 实时数量（查询失败为 None，不是 0）
+                "inst_count_live": live.get(key),
+                "inst_count_local": local.get(key, 0),
+            })
+
+        result = {
+            "ok": True,
+            "counts": counts,
+            "errors": errors,
+            "elapsed_ms": round((time.time() - t0) * 1000),
+        }
+        # 缓存给 /api/accounts 用，避免同一个数字在两个接口不一致
+        self._inst_count_cache = (time.time(), result)
+        return result
+
+    def cached_instance_counts(self, max_age=300):
+        """取上次统计结果（默认 5 分钟内有效），没有就返回 None"""
+        c = getattr(self, "_inst_count_cache", None)
+        if not c:
+            return None
+        ts, result = c
+        if time.time() - ts > max_age:
+            return None
+        return result
+
     def list_all_instances(self, account_ids=None):
         """
         同步拉取所有账号实例（供页面刷新）。
