@@ -79,7 +79,7 @@ FREE_TIER_REGIONS = ["us-west1", "us-central1", "us-east1"]
 # ---------------------------------------------------------------------------
 MACHINE_TYPES = {
     # ---- E2 通用型（免费额度机型所在系列）----
-    "e2-micro":     {"family": "E2", "vcpu": 2, "mem_gb": 1.0,  "hourly_usd": 0.008411, "arch": "x86_64", "free_tier": True,  "note": "GCP 永久免费机型（每月 1 台，限 us-west1/us-central1/us-east1）"},
+    "e2-micro":     {"family": "E2", "vcpu": 2, "mem_gb": 1.0,  "hourly_usd": 0.008376, "arch": "x86_64", "free_tier": True,  "note": "GCP 永久免费机型。额度按时间计：三个免费区域所有 e2-micro 运行小时数合并，当月累计到当月总小时数为止免费（us-central1 按需 $0.008376/h，取自官方计算器）"},
     "e2-small":     {"family": "E2", "vcpu": 2, "mem_gb": 2.0,  "hourly_usd": 0.016823, "arch": "x86_64"},
     "e2-medium":    {"family": "E2", "vcpu": 2, "mem_gb": 4.0,  "hourly_usd": 0.033638, "arch": "x86_64"},
     "e2-standard-2":  {"family": "E2", "vcpu": 2,  "mem_gb": 8.0,   "hourly_usd": 0.067112, "arch": "x86_64"},
@@ -354,4 +354,179 @@ def catalog_payload(region=None, include_unavailable=False):
             "e2-micro + pd-standard 30GB 在 us-west1/us-central1/us-east1 可命中 GCP 永久免费额度",
             "原版 v7.6 硬编码：e2-micro + ubuntu-minimal-2204-lts + pd-standard 30GB",
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 11. 单台实例的费用与所在地（实例列表用）
+# ---------------------------------------------------------------------------
+# 说明：这里的单价是「参考价」，来自 MACHINE_TYPES / DISK_TYPES 里登记的
+# us-central1 按需单价，再乘 REGION_PRICE_INDEX 折算。真实计费以 GCP 账单为准。
+# 之所以在本地算而不是拉 Cloud Billing API，是因为：
+#   · Billing API 需要额外的 IAM 权限（本项目实测该项目上就没启用）
+#   · 计费数据有数小时延迟，界面上「已用费用」本来就是个估算
+# 因此界面上会明确标注「参考价」，不会假装这是账单数据。
+
+
+def region_label(region):
+    """区域 → 所在地（人类可读）。未登记的区域回退为区域名本身。"""
+    region = (region or "").strip()
+    if not region:
+        return ""
+    return ALL_REGIONS.get(region) or region
+
+
+def region_of_zone(zone):
+    """可用区 → 区域（us-central1-a → us-central1）"""
+    zone = (zone or "").strip()
+    if zone.count("-") >= 2:
+        return zone.rsplit("-", 1)[0]
+    return zone
+
+
+# GCP Always Free 额度 —— 依据与口径
+# 官方文档：https://cloud.google.com/free/docs/free-cloud-features
+# 磁盘价格：https://cloud.google.com/compute/disks-image-pricing
+#
+# 【重要】免费额度是「按时间」而不是「按实例」：
+#   "Your Free Tier e2-micro instance limit is by time, not by instance.
+#    Each month, eligible use of all of your e2-micro instances is free
+#    until you have used a number of hours equal to the total hours in the
+#    current month. Usage calculations are combined across the supported
+#    regions."
+# 也就是：同一账单账号下，三个区域里**所有** e2-micro 的运行小时数**合并计算**，
+# 当月累计到「当月总小时数」为止免费。当月 30 天=720h / 31 天=744h / 28 天=672h。
+#
+# 实务上的效果 ≈「一台 e2-micro 常驻免费」：一台跑满整月正好用掉全部额度，
+# 第二台跑满整月就有一半小时数要按量计费。但机制是时间相加，不是「前 1 台免费」——
+# 三台各跑 1/3 个月同样落在免费额度内。这一点很多资料写错，界面提示必须准确。
+#
+# 免费磁盘：30 GB-month pd-standard（同样限这三个区域）。
+# 免费出站：1 GB/月，北美 → 所有区域（排除中国大陆与澳大利亚）。
+
+FREE_TIER_DOC = "https://cloud.google.com/free/docs/free-cloud-features"
+
+
+def free_tier_hours_in_month(now=None):
+    """当月总小时数（30 天=720 / 31 天=744 / 28 天=672），即免费额度上限"""
+    import calendar as _cal
+    import time as _t
+    from datetime import datetime as _dt
+    d = _dt.fromtimestamp(now if now is not None else _t.time())
+    return _cal.monthrange(d.year, d.month)[1] * 24
+
+
+def free_tier_reason(machine_type, region, preemptible=False, disk_type=None,
+                     disk_size_gb=None):
+    """
+    判断**规格**是否落在 Always Free 额度内，返回 (是否落在额度内, 说明文字)。
+
+    判定条件（任一不满足即按量计费）：
+      1. 机型为 e2-micro
+      2. 区域属于 us-west1 / us-central1 / us-east1
+      3. 不是抢占式 / Spot（免费额度只覆盖标准按需实例）
+      4. 磁盘为 pd-standard 且 ≤ 30GB
+
+    ⚠ 请注意这里判的是「规格是否落在额度内」，**不是**「这个月一定不花钱」：
+    额度按时间合并计算，若同账号下有多台 e2-micro 同时运行，累计小时数会
+    超出当月总小时数，超出部分照常计费。界面要同时展示这两层含义。
+    """
+    mt = (machine_type or "").strip()
+    rg = region_of_zone(region)
+    dt = (disk_type or "").strip()
+    size = float(disk_size_gb or 0)
+
+    problems = []
+    if mt != "e2-micro":
+        problems.append(f"机型 {mt or '未知'} 不是 e2-micro")
+    if rg not in FREE_TIER_REGIONS:
+        problems.append(f"区域 {rg or '未知'} 不在 {'/'.join(FREE_TIER_REGIONS)}")
+    if preemptible:
+        problems.append("抢占式/Spot 实例不适用免费额度")
+    if dt and dt != "pd-standard":
+        problems.append(f"磁盘类型 {dt} 不是 pd-standard")
+    if size and size > 30:
+        problems.append(f"磁盘 {size:g}GB 超过免费额度 30GB")
+
+    if problems:
+        return False, "不免费：" + "；".join(problems)
+    return True, ("规格落在 Always Free 额度内：e2-micro + 免费区域 + ≤30GB 标准盘。"
+                  "额度按时间合并计算（当月总小时数），多台同时运行会超额度")
+
+
+def instance_cost(machine_type, disk_type, disk_size_gb, region,
+                  created_at=None, now=None, preemptible=False, spot=False,
+                  status="RUNNING"):
+    """
+    计算单台实例的费用（美元）。
+
+    返回：
+      hourly_usd   每小时合计（算力 + 磁盘）
+      daily_usd    每天合计（= hour × 24）
+      monthly_usd  每月合计（= hour × 730）
+      used_usd     已用费用（按 created_at 到现在的时长 × 每小时单价）
+      used_hours   已用小时数
+      free_tier    规格是否落在 Always Free 额度内
+      reason       免费/不免费的判定依据
+      priced       本地是否有机型单价（自定义机型可能查不到）
+      disclaimer   口径说明
+
+    关于「已用费用」的口径，有几个刻意选择：
+      · 关机（TERMINATED）的实例只收磁盘费、不收算力费 —— 这是 GCP 的真实规则，
+        停机后不再计 CPU/内存费。所以按状态分别算，而不是一刀切。
+      · 时长按「创建到现在」的墙钟时间算。实例若中途被停过，这个数会偏高，
+        界面标注「估算」。
+      · 没有 created_at（老记录）时 used_* 返回 None，而不是拿当前时间冒充 0，
+        免得显示一个看起来很确定的假数字。
+    """
+    import time as _t
+
+    mt = MACHINE_TYPES.get(machine_type or "", {})
+    dt = DISK_TYPES.get(disk_type or "", {})
+    rg = region_of_zone(region)
+    idx = REGION_PRICE_INDEX.get(rg, 1.0)
+
+    priced = bool(mt) and bool(dt)
+
+    compute_hourly = float(mt.get("hourly_usd", 0.0)) * idx
+    if preemptible:
+        compute_hourly *= 0.2
+    elif spot:
+        compute_hourly *= 0.35
+
+    disk_hourly = float(dt.get("hourly_usd_per_gb", 0.0)) * float(disk_size_gb or 0) * idx
+
+    # 停机只计磁盘
+    stopped = (status or "").upper() in ("TERMINATED", "STOPPED", "STOPPING", "SUSPENDED")
+    hourly = disk_hourly if stopped else (compute_hourly + disk_hourly)
+
+    free, reason = free_tier_reason(machine_type, rg, preemptible or spot,
+                                   disk_type, disk_size_gb)
+
+    now = float(now if now is not None else _t.time())
+    used_hours = used_usd = None
+    if created_at:
+        try:
+            used_hours = max(0.0, (now - float(created_at)) / 3600.0)
+            used_usd = used_hours * hourly
+        except (TypeError, ValueError):
+            used_hours = used_usd = None
+
+    return {
+        "currency": "USD",
+        "hourly_usd": round(hourly, 6),
+        "compute_hourly_usd": round(compute_hourly, 6),
+        "disk_hourly_usd": round(disk_hourly, 6),
+        "daily_usd": round(hourly * 24, 4),
+        "monthly_usd": round(hourly * 730, 2),
+        "used_usd": None if used_usd is None else round(used_usd, 4),
+        "used_hours": None if used_hours is None else round(used_hours, 2),
+        "region_price_index": idx,
+        "stopped": stopped,
+        "free_tier": free,
+        "free_tier_reason": reason,
+        "free_tier_hours_cap": free_tier_hours_in_month(now) if free else None,
+        "free_tier_doc": FREE_TIER_DOC,
+        "priced": priced,
+        "disclaimer": "参考价：us-central1 按需单价 × 区域系数，未计网络流量，实际以 GCP 账单为准",
     }

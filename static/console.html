@@ -567,6 +567,75 @@ pre.log.big{max-height:520px}
   *{animation-duration:.01ms!important;transition-duration:.01ms!important}
 }
 @media print{.sidebar,.topbar,.toasts{display:none}.main{margin:0}}
+
+/* ══════════ 安装预设选择卡 ══════════ */
+.pk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:8px}
+.pk{display:flex;flex-direction:column;gap:3px;padding:9px 11px;border:1.5px solid var(--line);
+  border-radius:var(--r-s);background:#fff;cursor:pointer;position:relative;
+  transition:border-color .15s,background .15s,box-shadow .15s}
+.pk:hover{border-color:#c7d2fe;background:#f8fbff}
+.pk input{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+.pk.on{border-color:var(--brand);background:#f2f7ff;box-shadow:0 0 0 3px rgba(26,115,232,.10)}
+.pk .nm{font-size:12.5px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px}
+.pk .nm .ck{width:14px;height:14px;border:1.5px solid var(--line);border-radius:4px;flex:none;
+  display:grid;place-items:center;font-size:10px;color:#fff;background:#fff}
+.pk.on .nm .ck{background:var(--brand);border-color:var(--brand)}
+.pk .de{font-size:11px;color:var(--muted);line-height:1.4}
+.pk .vf{font-size:10px;color:var(--muted-2);font-family:var(--mono)}
+
+/* ══════════ 备注单元格（点击就地编辑）══════════ */
+.note-cell{display:flex;align-items:center;gap:5px;min-width:0}
+.note-cell .tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:text;border-bottom:1px dashed transparent;padding-bottom:1px}
+.note-cell .tx:hover{border-bottom-color:var(--line)}
+.note-cell .tx.empty{color:var(--muted-2)}
+.note-cell input{padding:4px 7px;font-size:11.5px;max-width:160px}
+.note-cell .sv{flex:none;font-size:10.5px;color:var(--brand);cursor:pointer}
+
+/* ══════════ 长邮箱折叠 ══════════ */
+.mail{display:inline-block;max-width:210px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;vertical-align:bottom}
+.mail.open{max-width:none;white-space:normal;word-break:break-all;vertical-align:top}
+.mail-tg{font-size:10.5px;color:var(--brand);background:none;border:0;cursor:pointer;
+  padding:0 3px;flex:none}
+
+/* ══════════ Root 密码单元格 ══════════ */
+.pwd-cell{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pwd-mask{font-family:var(--mono);letter-spacing:2px;color:var(--muted-2);font-size:12px}
+.pwd-val{font-family:var(--mono);color:var(--ink);cursor:pointer;word-break:break-all}
+.pwd-val:hover{color:var(--brand)}
+
+/* ══════════ 费用单元格 ══════════ */
+.cost-cell{line-height:1.5;font-size:11px;white-space:nowrap}
+.cost-cell .r{display:flex;justify-content:space-between;gap:8px}
+.cost-cell .r span{color:var(--muted)}
+.cost-cell .r b{font-family:var(--mono);color:var(--ink-2);font-weight:600}
+.cost-cell .tot{border-top:1px solid var(--line);margin-top:3px;padding-top:3px}
+.cost-cell .tot b{color:var(--brand)}
+.badge.free{background:#dcfce7;color:#15803d}
+.badge.paid{background:#eef2f7;color:#64748b}
+.badge.proxy{background:#eef2ff;color:#4338ca}
+
+/* 所在地小字 */
+.loc{display:block;font-size:10.5px;color:var(--muted);margin-top:1px}
+
+/* 账号列的备注优先显示 */
+.acc-line{display:flex;flex-direction:column;gap:1px;min-width:0}
+.acc-line .lb{font-size:12px;color:var(--ink);font-weight:600;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.acc-line .em{font-size:10.5px;color:var(--muted)}
+
+@media (max-width:768px){
+  .pk-grid{grid-template-columns:1fr}
+  .note-cell input{max-width:none}
+  /* 这几类内容天然是「一整串不可见得有空格」的机器可读串：
+     邮箱、代理 URL、实例名、镜像标识。窄屏下如果不断行，
+     它们会把整个表格顶宽 —— 实测 360px 手机上账号页横向溢出 56px。
+     用 overflow-wrap:anywhere 允许在任意字符处折行。 */
+  .mail,.mail.open,.acc-line .lb,.acc-line .em{white-space:normal;overflow-wrap:anywhere}
+  td .mono,td .pwd-val,td .pwd-mask,.loc,.cost-cell{overflow-wrap:anywhere}
+  table.resp td{overflow-wrap:anywhere}
+}
 </style>
 </head>
 <body>
@@ -866,6 +935,35 @@ pre.log.big{max-height:520px}
                 <div v-else class="empty"><span class="ic">👤</span>暂无账号</div>
               </div>
 
+              <div class="grid g2" style="margin-top:13px">
+                <label class="f">机器备注（可选，创建后可在实例列表随时修改）
+                  <input v-model.trim="instNote" maxlength="200"
+                         placeholder="例如：给同事的测试机 / 客户 A 环境">
+                  <span class="hint">留空则不写。备注只存在本机数据库，不写入 GCP 资源。</span>
+                </label>
+                <div class="f">
+                  <span>创建后自动安装（可多选，SSH 就绪后按顺序执行）</span>
+                  <div class="pk-grid">
+                    <label class="pk" v-for="p in installPresets" :key="p.key"
+                           :class="{on:installPicked.includes(p.key)}"
+                           :title="p.note || ''">
+                      <span class="nm">
+                        <span class="ck">{{ installPicked.includes(p.key) ? '✓' : '' }}</span>
+                        {{ p.label }}
+                      </span>
+                      <span class="de">{{ p.desc }}</span>
+                      <span class="vf" v-if="p.version">{{ p.version }}</span>
+                      <input type="checkbox" :value="p.key" v-model="installPicked">
+                    </label>
+                  </div>
+                  <span class="hint" v-if="!installPresets.length">预设加载中…</span>
+                  <span class="hint" v-else-if="installPicked.length">
+                    已选 {{ installPicked.length }} 项。安装脚本会追加到下方「安装命令」之后执行；
+                    单项失败只记警告，不影响实例创建。
+                  </span>
+                </div>
+              </div>
+
               <div class="grid g4" style="margin-top:13px">
                 <label class="f">每账号创建数量<input type="number" min="1" max="100" v-model.number="opts.count"></label>
                 <label class="f">实例级并发<input type="number" min="1" max="30" v-model.number="opts.concurrency"></label>
@@ -942,7 +1040,9 @@ pre.log.big{max-height:520px}
                 <b>标签</b><span>{{ spec.tags.length?spec.tags.join(', '):'（无）' }}</span>
                 <b>登录</b><span>{{ loginMode==='root_password'?(pwdMode==='random'?'Root 密码（随机）':'Root 密码（自定义）'):'SSH 密钥' }}</span>
                 <b>规模</b><span>{{ checkedAccountIds.length }} 账号 × {{ opts.count }} 台，实例并发 {{ opts.concurrency }}</span>
-                <b>创建后</b><span>{{ (postCommand?'安装命令 ✓':'无') + (verifyCommand?' · 验证 ✓':'') }}</span>
+                <b>备注</b><span>{{ instNote || '（未填）' }}</span>
+                <b>创建后</b><span>{{ (postCommand?'安装命令 ✓':'无') + (verifyCommand?' · 验证 ✓':'')
+                  + (installPicked.length ? ' · 预设 '+installPicked.length+' 项' : '') }}</span>
               </div>
             </div>
 
@@ -982,10 +1082,16 @@ pre.log.big{max-height:520px}
             </label>
           </div>
           <div class="grid g3" style="margin-top:10px">
-            <label class="f">代理（可空，IP:PORT:USER:PASS 或 socks5://…）
-              <input v-model.trim="accForm.proxy" class="mono" placeholder="留空 = 直连"></label>
+            <label class="f">代理（可空）
+              <input v-model.trim="accForm.proxy" class="mono"
+                     placeholder="1.2.3.4:8080 或 socks5h://user:pass@1.2.3.4:1080"></label>
             <label class="f">代理协议
-              <select v-model="accForm.proxy_type"><option>HTTPS</option><option>SOCKS5</option></select></label>
+              <select v-model="accForm.proxy_type">
+                <option value="HTTPS">HTTPS 代理（HTTP CONNECT）</option>
+                <option value="HTTP">HTTP 代理</option>
+                <option value="SOCKS5H">SOCKS5（代理端解析 DNS，推荐）</option>
+                <option value="SOCKS4">SOCKS4（仅 IPv4，无认证）</option>
+              </select></label>
             <div class="row" style="align-items:flex-end">
               <button class="p" @click="uploadAccounts">⬆ 上传并导入</button>
               <span class="br"></span>
@@ -1006,16 +1112,44 @@ pre.log.big{max-height:520px}
           </div>
           <div class="tw" v-if="accounts.length">
             <table class="resp">
-              <thead><tr><th style="width:40px"></th><th>ID</th><th>邮箱</th><th>Project</th>
-                <th>代理</th><th>协议</th><th>密钥文件</th><th>连通性</th><th v-if="can('account')">操作</th></tr></thead>
+              <thead><tr><th style="width:40px"></th><th>ID</th><th>备注 / 邮箱</th><th>Project</th>
+                <th>代理</th><th>密钥文件</th><th>连通性</th><th v-if="can('account')">操作</th></tr></thead>
               <tbody>
                 <tr v-for="a in accounts" :key="a.id">
                   <td data-l="选择"><input type="checkbox" :value="a.id" v-model="checkedAccIds"></td>
                   <td data-l="ID">{{ a.id }}</td>
-                  <td data-l="邮箱" class="mono">{{ a.email }}</td>
+                  <td data-l="备注/邮箱">
+                    <div class="acc-line">
+                      <!-- 备注置顶：邮箱太长时它就是主要标识 -->
+                      <input v-if="editingAcc===a.id" v-model="accNoteDraft" maxlength="80"
+                             @keyup.enter="saveAccNote(a)" @keyup.esc="editingAcc=null"
+                             @blur="saveAccNote(a)" placeholder="账号备注…" class="mono"
+                             style="padding:4px 7px;font-size:11.5px">
+                      <span v-else>
+                        <span class="lb" v-if="a.label" :title="a.label">{{ a.label }}</span>
+                        <button class="mail-tg" v-if="can('account')"
+                                @click="editingAcc=a.id; accNoteDraft=a.label||''">
+                          {{ a.label ? '改备注' : '加备注' }}</button>
+                      </span>
+                      <!-- 邮箱过长折叠：默认省略号，可展开 -->
+                      <span class="em">
+                        <span class="mail" :class="{open:expandedMail['acc'+a.id]}"
+                              :title="a.email">{{ a.email }}</span>
+                        <button class="mail-tg" v-if="(a.email||'').length>26"
+                                @click="expandedMail['acc'+a.id]=!expandedMail['acc'+a.id]">
+                          {{ expandedMail['acc'+a.id] ? '收起' : '展开' }}</button>
+                      </span>
+                    </div>
+                  </td>
                   <td data-l="Project" class="mono">{{ a.project_id }}</td>
-                  <td data-l="代理" class="mono">{{ a.proxy || '-' }}</td>
-                  <td data-l="协议">{{ a.proxy_type || '-' }}</td>
+                  <td data-l="代理">
+                    <template v-if="a.proxy_set">
+                      <div class="mono" style="font-size:11.5px">{{ a.proxy_display }}</div>
+                      <span class="badge proxy" :title="a.proxy_type_label">{{ a.proxy_type }}</span>
+                      <span class="badge r" v-if="!a.proxy_ok" :title="a.proxy_error">配置有误</span>
+                    </template>
+                    <span class="hint" v-else>直连（未用代理）</span>
+                  </td>
                   <td data-l="密钥" class="mono">{{ a.key_file }}
                     <span class="badge r" v-if="!a.key_exists">文件缺失</span></td>
                   <td data-l="连通性">
@@ -1032,6 +1166,12 @@ pre.log.big{max-height:520px}
             </table>
           </div>
           <div v-else class="empty"><span class="ic">👤</span>暂无账号，请先导入服务账号 JSON</div>
+          <div class="hint" style="margin-top:7px">
+            备注用于给账号起个短名（邮箱太长时列表以备注为主标识）。代理支持
+            HTTP / HTTPS / SOCKS5 / SOCKS4，写法如 <code>1.2.3.4:8080:user:pass</code>、
+            <code>socks5h://user:pass@host:1080</code>；SOCKS5 一律按「代理端解析 DNS」
+            处理，避免本地 DNS 污染。代理密码在列表中已打码。
+          </div>
         </div>
       </template>
 
@@ -1059,23 +1199,77 @@ pre.log.big{max-height:520px}
           </div>
           <div class="tw" v-if="instances.length">
             <table class="resp">
-              <thead><tr><th style="width:36px"></th><th>实例名称</th><th>公网 IP</th><th>Zone</th>
-                <th>状态</th><th>机型</th><th>镜像</th><th>磁盘</th><th>Root密码</th><th>账号</th>
+              <thead><tr><th style="width:36px"></th><th>实例名称 / 备注</th><th>公网 IP / 所在地</th>
+                <th>状态</th><th>机型</th><th>镜像</th><th>磁盘</th><th>Root 密码</th>
+                <th>费用（每小时 / 每天 / 已用）</th><th>账号</th>
                 <th v-if="can('operate')">操作</th></tr></thead>
               <tbody>
                 <tr v-for="i in instances" :key="i.name">
                   <td data-l="选择"><input type="checkbox" :value="i.name" v-model="checkedInst"></td>
-                  <td data-l="名称" class="mono">{{ i.name }}</td>
-                  <td data-l="公网IP" class="mono cp" @click="copy(i.ip||'')"
-                      :title="i.ip?'点击复制':''">{{ i.ip || '-' }}</td>
-                  <td data-l="Zone">{{ (i.zone||'').replace('zones/','') }}</td>
+                  <td data-l="名称">
+                    <div class="mono">{{ i.name }}</div>
+                    <!-- 备注：有权限时点击即就地编辑 -->
+                    <div class="note-cell" v-if="can('operate')">
+                      <input v-if="editingNote===i.name" v-model="noteDraft" maxlength="200"
+                             @keyup.enter="saveNote(i)" @keyup.esc="editingNote=null"
+                             @blur="saveNote(i)" placeholder="备注…" autofocus>
+                      <span v-else class="tx" :class="{empty:!i.note}" @click="startNote(i)"
+                            :title="i.note||'点击添加备注'">{{ i.note || '点击添加备注' }}</span>
+                    </div>
+                    <div class="tx hint" v-else>{{ i.note || '-' }}</div>
+                    <div class="hint" v-if="i.installs && i.installs.length"
+                         :title="'创建后已安装：'+i.installs.join('、')">📦 {{ i.installs.join(' · ') }}</div>
+                  </td>
+                  <td data-l="公网IP">
+                    <span class="mono cp" @click="copy(i.ip||'')" :title="i.ip?'点击复制':''">{{ i.ip || '-' }}</span>
+                    <span class="loc">📍 {{ i.location || i.region || i.zone || '-' }}</span>
+                  </td>
                   <td data-l="状态"><span class="badge" :class="vmStatusClass(i.status)">{{ i.status }}</span></td>
-                  <td data-l="机型" class="mono">{{ i.machine_type || '-' }}</td>
-                  <td data-l="镜像" class="mono">{{ (i.spec&&i.spec.image_key) || '-' }}</td>
-                  <td data-l="磁盘" class="mono">{{ i.spec&&i.spec.disk_size_gb ? i.spec.disk_size_gb+'GB '+(i.spec.disk_type||'') : '-' }}</td>
-                  <td data-l="Root密码" class="mono cp" @click="copy(i.root_password||'')"
-                      :title="i.root_password?'点击复制':''">{{ i.root_password || '-' }}</td>
-                  <td data-l="账号" class="mono">{{ i.account_email || '-' }}</td>
+                  <td data-l="机型" class="mono">{{ i.machine_type || '-' }}
+                    <span class="badge" v-if="i.spot">Spot</span>
+                    <span class="badge" v-else-if="i.preemptible">抢占</span></td>
+                  <td data-l="镜像">
+                    <div class="mono">{{ i.image || (i.spec&&i.spec.image_key) || '-' }}</div>
+                    <div class="hint">{{ i.spec&&i.spec.image_key && i.image && i.spec.image_key!==i.image ? i.spec.image_key : '' }}</div>
+                  </td>
+                  <td data-l="磁盘" class="mono">{{ i.disk_size_gb ? i.disk_size_gb+' GB' : '-' }}
+                    <span class="hint">{{ i.disk_type || '' }}</span></td>
+                  <td data-l="Root密码">
+                    <template v-if="i.has_password">
+                      <div class="pwd-cell">
+                        <span v-if="revealedPwd[i.name]" class="pwd-val"
+                              @click="copy(revealedPwd[i.name])"
+                              :title="'点击复制 · ' + (pwdShownAt[i.name]||'')">{{ revealedPwd[i.name] }}</span>
+                        <span v-else class="pwd-mask">••••••••</span>
+                        <button class="sm gh" v-if="!revealedPwd[i.name]"
+                                @click="askReveal(i)" title="需重新输入你的登录密码">显示</button>
+                        <button class="sm gh" v-else @click="hidePwd(i.name)" title="重新隐藏">隐藏</button>
+                      </div>
+                    </template>
+                    <span v-else class="hint">无记录</span>
+                  </td>
+                  <td data-l="费用">
+                    <div class="cost-cell" v-if="i.cost">
+                      <div class="r"><span>每小时</span><b>${{ i.cost.hourly_usd.toFixed(4) }}</b></div>
+                      <div class="r"><span>每天</span><b>${{ i.cost.daily_usd.toFixed(3) }}</b></div>
+                      <div class="r tot"><span>已用</span>
+                        <b>{{ i.cost.used_usd===null ? '—' : '$'+i.cost.used_usd.toFixed(3) }}</b></div>
+                      <div class="hint" v-if="i.cost.used_hours!==null">{{ fmtHours(i.cost.used_hours) }}</div>
+                      <span class="badge free" v-if="i.cost.free_tier" :title="i.cost.free_tier_reason">免费机型</span>
+                      <span class="badge paid" v-else-if="i.cost.priced" :title="i.cost.free_tier_reason">计费</span>
+                      <span class="badge" v-else title="该机型未收录单价，无法估算">无单价</span>
+                    </div>
+                    <span v-else class="hint">-</span>
+                  </td>
+                  <td data-l="账号">
+                    <div class="acc-line">
+                      <span class="lb" v-if="i.account_label" :title="i.account_email">{{ i.account_label }}</span>
+                      <span class="em" :class="{mail:!expandedMail[i.name],open:expandedMail[i.name]}">{{ i.account_email || '-' }}</span>
+                      <button class="mail-tg" v-if="(i.account_email||'').length>26"
+                              @click="expandedMail[i.name]=!expandedMail[i.name]">
+                        {{ expandedMail[i.name] ? '收起' : '展开' }}</button>
+                    </div>
+                  </td>
                   <td data-l="" class="acts" v-if="can('operate')">
                     <button class="sm" @click="oneAction('start',i.name)">启</button>
                     <button class="sm" @click="oneAction('stop',i.name)">停</button>
@@ -1087,7 +1281,12 @@ pre.log.big{max-height:520px}
             </table>
           </div>
           <div v-else class="empty"><span class="ic">🖥</span>暂无实例，点击「同步云端实例」拉取</div>
-          <div class="hint" style="margin-top:7px">提示：点击 IP / Root密码 单元格即可复制到剪贴板。</div>
+          <div class="hint" style="margin-top:7px">
+            提示：点击 IP 即可复制；Root 密码默认以圆点显示，点「显示」需重新输入你的登录密码，
+            15 分钟后自动隐藏。费用为参考价（按需单价 × 区域系数），不含网络流量，实际以 GCP 账单为准；
+            「免费机型」只表示规格落在 Always Free 额度内 —— 该额度按时间合并计算，
+            同账号多台 e2-micro 同时运行会超出当月总小时数，超出部分照常计费。
+          </div>
         </div>
       </template>
 
@@ -1563,6 +1762,8 @@ pre.log.big{max-height:520px}
           <input :type="modal.field.type||'text'" v-model="modal.field.value"
                  :placeholder="modal.field.placeholder||''" class="mono"></label>
         <div class="hint" v-if="modal.field.hint" style="margin-top:5px">{{ modal.field.hint }}</div>
+        <div class="alert e on" v-if="modal.error" style="margin-top:10px">
+          <span>⚠</span><span>{{ modal.error }}</span></div>
       </div>
       <div class="row" style="margin-top:17px;justify-content:flex-end">
         <button @click="modal=null">关闭</button>
@@ -1713,6 +1914,18 @@ const __APP_REF__ = createApp({
     spec:EMPTY_SPEC(), familyFilter:'', machineTypeCustom:'',
     loginMode:'root_password', pwdMode:'random', rootPassword:'', sshPubKey:'',
     postCommand:'', verifyCommand:'',
+    /* ── 本轮新增 ── */
+    instNote:'',                 // 创建页：机器备注
+    installPresets:[],           // 创建页：可选安装预设
+    installPicked:[],            // 创建页：已勾选的预设 key
+    revealedPwd:{},              // 实例列表：已出示的 root 密码（仅内存，不落库）
+    pwdShownAt:{},               // 实例列表：出示时间，用于自动隐藏
+    editingNote:null,            // 正在编辑备注的实例名
+    noteDraft:'',
+    editingAcc:null,             // 正在编辑备注的账号 id
+    accNoteDraft:'',
+    expandedMail:{},             // 长邮箱展开状态
+
     opts:{count:1, concurrency:3, account_workers:1, retry_count:2,
           ssh_timeout:300, idle_timeout:180, command_timeout:1800, verify_timeout:180},
     est:{}, creating:false, savings:{items:[],enabled:0,total:0},
@@ -2062,6 +2275,76 @@ const __APP_REF__ = createApp({
       }catch(e){ /* 版本信息拿不到不影响使用，静默降级 */ }
     },
 
+    /* ───────── 安装预设 ───────── */
+    async loadPresets(){
+      try{
+        const r = await this.api('/api/install_presets');
+        if(r && r.ok) this.installPresets = r.presets || [];
+      }catch(e){ /* 预设拿不到不影响创建，只是少了个便利功能 */ }
+    },
+
+    /* ───────── 实例备注 ───────── */
+    startNote(i){ this.editingNote = i.name; this.noteDraft = i.note || ''; },
+    async saveNote(i){
+      // 回车与失焦都会触发，先校验本次编辑是否仍有效，避免重复提交
+      if(this.editingNote !== i.name) return;
+      this.editingNote = null;
+      const note = (this.noteDraft || '').trim();
+      if(note === (i.note || '')) return;
+      // 注意：this.api() 只接受一个 path，PATCH 必须用 this.patch()
+      const r = await this.patch('/api/instances/note', {name:i.name, note:note});
+      if(r && r.ok){ i.note = note; this.toast(note ? '备注已保存' : '备注已清空', 'g'); }
+      else this.fail(r);
+    },
+
+    /* ───────── Root 密码：二次验证后出示 ───────── */
+    askReveal(i){
+      this.modal = {
+        title:'显示 Root 密码',
+        sub:'实例 ' + i.name + '（' + (i.ip || '无公网 IP') + '）',
+        field:{label:'请输入你当前账号的登录密码以确认身份', type:'password',
+               value:'', placeholder:'登录密码',
+               hint:'密码只用于本次校验，不会保存；出示后 15 分钟自动隐藏。'},
+        okText:'确认显示',
+        onOk: async () => {
+          const pwd = this.modal.field.value;
+          if(!pwd){ this.modal.error = '请输入登录密码'; return; }
+          const r = await this.post('/api/instances/password', {name:i.name, password:pwd});
+          if(!r || !r.ok){
+            // 后端用 HTTPException，原因在 detail 里
+            this.modal.error = (r && (r.detail || r.error)) || '校验失败';
+            return;
+          }
+          this.revealedPwd[i.name] = r.root_password;
+          this.pwdShownAt[i.name] = this.fmtTime(Math.floor(Date.now()/1000));
+          this.modal = null;
+          this.toast('已显示，点击密码可复制', 'g');
+          // 15 分钟后自动收回，避免密码长期挂在屏幕上
+          setTimeout(()=>this.hidePwd(i.name), 15*60*1000);
+        },
+      };
+    },
+    hidePwd(name){ delete this.revealedPwd[name]; delete this.pwdShownAt[name]; },
+
+    /* ───────── 账号备注 ───────── */
+    async saveAccNote(a){
+      if(this.editingAcc !== a.id) return;
+      this.editingAcc = null;
+      const label = (this.accNoteDraft || '').trim();
+      if(label === (a.label || '')) return;
+      const r = await this.patch('/api/accounts/' + a.id, {label:label});
+      if(r && r.ok){ a.label = label; this.toast(label ? '备注已保存' : '备注已清空', 'g'); }
+      else this.fail(r);
+    },
+
+    /* ───────── 小工具 ───────── */
+    // 把小时数说成人话：不到一天按小时，超过按天
+    fmtHours(h){
+      if(h === null || h === undefined) return '';
+      if(h < 24) return '已运行 ' + h.toFixed(1) + ' 小时';
+      return '已运行 ' + (h/24).toFixed(1) + ' 天（' + Math.round(h) + ' 小时）';
+    },
+
     /* ───────── 启动 ───────── */
     async boot(){
       try{
@@ -2072,7 +2355,7 @@ const __APP_REF__ = createApp({
         this.permissions = me.permissions || [];
         // 版本信息与其余初始化并行拉取，互不阻塞
         await Promise.all([this.loadStatus(), this.loadCatalog(), this.loadAccounts(),
-                           this.loadConfig(), this.loadVersion()]);
+                           this.loadConfig(), this.loadVersion(), this.loadPresets()]);
         this.loadInstances(false);
         this.loadTasks();
         // 必须等日志尾部拉取完成（logSeq 推进到最新）再建立 WebSocket，
@@ -2301,6 +2584,8 @@ const __APP_REF__ = createApp({
         login_mode: this.loginMode,
         ssh_public_key: root ? '' : this.sshPubKey,
         root_password: (root && this.pwdMode==='custom') ? this.rootPassword : '',
+        note: this.instNote,
+        installs: this.installPicked,
         post_command: this.postCommand, verify_command: this.verifyCommand,
         concurrency: this.opts.concurrency, account_workers: this.opts.account_workers,
         retry_count: this.opts.retry_count, ssh_timeout: this.opts.ssh_timeout,

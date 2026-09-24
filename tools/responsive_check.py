@@ -33,7 +33,12 @@ VIEWPORTS = [
     ("phone-390", 390, 844, True),           # 手机 → 触控
 ]
 
-ADMIN = "admin"
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import _fixtures as FX  # noqa: E402
+
+ADMIN = FX.ADMIN_USER
 PW = "***REDACTED-PASSWORD***"
 LOGIN_URL = "http://127.0.0.1:8001/login"
 CONSOLE_URL = "http://127.0.0.1:8001/"   # 与夹具同源，便于继续读验证码
@@ -55,7 +60,7 @@ def login(page):
     page.wait_for_function("typeof refreshCaptcha === 'function'")
     code = probe_captcha(page)
     page.fill("#username", ADMIN)
-    page.fill("#password", PW)
+    page.fill("#password", FX.admin_password())
     page.fill("#captcha", code)
     page.evaluate("login()")
     page.wait_for_url(f"{CONSOLE_URL}*", timeout=20000)   # login() 跳同源首页

@@ -224,6 +224,8 @@ class TaskManager:
           root_password: "xxx"          # 空则随机生成
           post_command: "curl ... | bash"
           verify_command: "docker ps"
+          note: "这台机器的备注"        # 创建时填的备注，建完可在列表里改
+          installs: ["docker","nps"]   # 创建后自动安装的预设（见 install_presets）
           concurrency: 3                # 同时创建的实例数
           account_workers: 1            # 同时处理的账号数
           retry_count: 2
@@ -473,15 +475,15 @@ class TaskManager:
                     "zone": zone, "region": actual_region, "machine_type": spec["machine_type"],
                     "image": spec["image_label"], "disk": f"{spec['disk_type']} {spec['disk_size_gb']}GB",
                     "stage": "created"}
-            if login_mode == "root_password":
-                item["root_password"] = root_password
-                self.store.save_vm(name, ip, root_password, acc["id"], zone,
-                                   spec["machine_type"], spec["image_key"],
-                                   spec["disk_type"], spec["disk_size_gb"])
-            else:
-                self.store.save_vm(name, ip, "", acc["id"], zone,
-                                   spec["machine_type"], spec["image_key"],
-                                   spec["disk_type"], spec["disk_size_gb"])
+            # 备注与安装项来自本次任务参数；创建时间优先用 GCP 返回的真实时间
+            note = (payload.get("note") or "").strip()
+            installs = ",".join(payload.get("installs") or [])
+            created_ts = float(res.get("created_ts") or 0) or None
+            self.store.save_vm(name, ip,
+                               root_password if login_mode == "root_password" else "",
+                               acc["id"], zone, spec["machine_type"], spec["image_key"],
+                               spec["disk_type"], spec["disk_size_gb"],
+                               note=note, created_at=created_ts, installs=installs)
 
             with created_lock:
                 result["created"] += 1
@@ -517,6 +519,8 @@ class TaskManager:
                             f"[{lb}][{nm}] {t}", tid))
                     item["post_command_ok"] = ok_c
                     item["post_command_tail"] = (out_c or "")[-4000:]
+                    # 不传 note/created_at/installs —— save_vm 会保留原值，
+                    # 否则第二次保存会把用户填的备注冲成空
                     self.store.save_vm(name, ip, root_password or "", acc["id"], zone,
                                        spec["machine_type"], spec["image_key"],
                                        spec["disk_type"], spec["disk_size_gb"])
@@ -786,7 +790,15 @@ class TaskManager:
         return {"ok": True, "task_id": task_id}
 
     def list_all_instances(self, account_ids=None):
-        """同步拉取所有账号实例（供页面刷新）"""
+        """
+        同步拉取所有账号实例（供页面刷新）。
+
+        这里刻意**不返回 root 密码明文**，只回 has_password 标记。
+        原因：这个接口只需要 view 权限，而 viewer 是最低权限角色；
+        把全账号的 root 密码明文塞进列表响应，等于任何能登录的人都能
+        一次性拿到所有机器的 root。要看密码必须再走
+        POST /api/instances/password 二次验证登录密码。
+        """
         accounts = self.store.get_accounts()
         wanted = [str(x) for x in (account_ids or [])]
         if wanted:
@@ -794,6 +806,7 @@ class TaskManager:
         vms = {v["name"]: v for v in self.store.get_all_vms()}
         out = []
         errors = []
+        now = time.time()
         for acc in accounts:
             try:
                 gcp = self.account_service(acc)
@@ -801,12 +814,41 @@ class TaskManager:
                     vm = vms.get(inst["name"], {})
                     inst["account_email"] = acc["email"]
                     inst["account_id"] = acc["id"]
-                    inst["root_password"] = vm.get("password") or ""
+                    # 账号备注：邮箱很长时界面上优先展示它
+                    inst["account_label"] = acc.get("label") or ""
+                    inst["has_password"] = bool(vm.get("password"))
+                    inst["note"] = vm.get("note") or ""
+                    inst["installs"] = [x for x in (vm.get("installs") or "").split(",") if x]
+
+                    # 本地记录里有的字段优先（创建时的规格），GCP 实时数据兜底
+                    machine_type = vm.get("machine_type") or inst.get("machine_type") or ""
+                    disk_type = vm.get("disk_type") or inst.get("disk_type") or ""
+                    disk_size = vm.get("disk_size_gb") or inst.get("disk_size_gb") or 0
+                    inst["machine_type"] = machine_type
+                    inst["disk_type"] = disk_type
+                    inst["disk_size_gb"] = disk_size
+
+                    # 创建时间：优先用本地记录（创建时从 GCP 抓的），
+                    # 老记录没有就用 GCP 实时返回的 creation_timestamp
+                    created_ts = vm.get("created_at") or inst.get("created_ts") or 0
+                    inst["created_ts"] = created_ts
+
+                    # 费用估算（参考价，非账单）
+                    inst["cost"] = catalog.instance_cost(
+                        machine_type, disk_type, disk_size,
+                        inst.get("region") or inst.get("zone"),
+                        created_at=created_ts or None,
+                        now=now,
+                        preemptible=bool(inst.get("preemptible")),
+                        spot=bool(inst.get("spot")),
+                        status=inst.get("status"),
+                    )
+
                     inst["spec"] = {
-                        "machine_type": vm.get("machine_type") or inst.get("machine_type"),
+                        "machine_type": machine_type,
                         "image_key": vm.get("image_key"),
-                        "disk_type": vm.get("disk_type"),
-                        "disk_size_gb": vm.get("disk_size_gb"),
+                        "disk_type": disk_type,
+                        "disk_size_gb": disk_size,
                     }
                     out.append(inst)
             except Exception as exc:

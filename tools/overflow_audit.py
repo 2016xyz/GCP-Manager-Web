@@ -15,11 +15,15 @@
 用法：python3 tools/overflow_audit.py
 """
 import json
+import os
 import sys
 
 from playwright.sync_api import sync_playwright
 
-ADMIN, PW = "admin", "***REDACTED-PASSWORD***"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _fixtures as FX  # noqa: E402
+
+ADMIN, PW = FX.ADMIN_USER, FX.admin_password()
 LOGIN = "http://127.0.0.1:8001/login"
 CONSOLE = "http://127.0.0.1:8001/"
 
@@ -119,6 +123,22 @@ def main():
                     %s
                 }""".replace("%s", extra), [tab])
                 pg.wait_for_timeout(1100)
+                # 空表的窄屏表现和满数据的窄屏表现完全不同，
+                # 新列的破版只有填了数据才测得出来
+                if tab in ("instances", "accounts"):
+                    pg.evaluate("""async ([t, journal]) => {
+                        const vm = document.querySelector('#app').__vue_app__
+                                     ._container._vnode.component.proxy;
+                        if (t === 'instances') {
+                            vm.instances = JSON.parse(journal).instances;
+                            vm.instErrors = [];
+                        } else {
+                            vm.accounts = JSON.parse(journal).accounts;
+                        }
+                    }""", [tab, json.dumps({"instances": FX.FAKE_INSTANCES,
+                                            "accounts": FX.FAKE_ACCOUNTS},
+                                           ensure_ascii=False)])
+                    pg.wait_for_timeout(500)
                 r = pg.evaluate(AUDIT_JS)
                 r["视口"], r["页面"] = name, label
                 rows.append(r)

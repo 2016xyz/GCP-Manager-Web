@@ -22,53 +22,172 @@ DEFAULT_SUBNET = "regions/{region}/subnetworks/default"
 # ---------------------------------------------------------------------------
 # 代理解析（复用原版 v7.6 的格式生态）
 # ---------------------------------------------------------------------------
+# 支持的代理协议。
+#   http / https   —— 走 HTTP CONNECT，环境变量 HTTP_PROXY/HTTPS_PROXY
+#   socks5h        —— SOCKS5 且 DNS 在代理端解析（**推荐**）
+#   socks5         —— SOCKS5 但 DNS 在本地解析
+#   socks4         —— 老协议，只支持 IPv4、无认证
+# 说明：google-cloud-* 底层用 requests/urllib3，靠 PySocks 支持 socks。
+# 选 socks5 还是 socks5h 的差别很实际：socks5 会先在本地做 DNS，
+# 若本地 DNS 被污染或解析不了 compute.googleapis.com，连代理都发不出去；
+# socks5h 把域名交给代理解析，通常才是想要的行为。
+PROXY_SCHEMES = {
+    "http": "HTTP", "https": "HTTPS",
+    "socks4": "SOCKS4", "socks4a": "SOCKS4",
+    "socks5": "SOCKS5", "socks5h": "SOCKS5H", "socks": "SOCKS5H",
+}
+
+PROXY_TYPE_LABELS = {
+    "HTTP": "HTTP 代理",
+    "HTTPS": "HTTPS 代理（HTTP CONNECT）",
+    "SOCKS4": "SOCKS4（仅 IPv4，无认证）",
+    "SOCKS5": "SOCKS5（本地解析 DNS）",
+    "SOCKS5H": "SOCKS5（代理端解析 DNS，推荐）",
+}
+
+
 def parse_proxy_input(proxy_text, fallback_proxy_type="HTTPS"):
-    """把各种代理写法统一成 requests/环境变量可用的 URL"""
+    """
+    把各种代理写法统一成 requests / 环境变量可用的 URL。
+
+    支持的输入形式：
+        1.2.3.4:8080
+        1.2.3.4:8080:user:pass
+        http://1.2.3.4:8080
+        socks5://user:pass@1.2.3.4:1080
+        socks5h://proxy.example.com:1080
+        socks5   1.2.3.4 1080 user pass      （空格分隔，兼容常见面板导出格式）
+
+    返回 dict：ok / empty / proxy_url / proxy_type / proxy_type_label / host / port / has_auth
+    """
     raw = (proxy_text or "").strip()
     if not raw:
-        return {"ok": True, "empty": True, "proxy_url": "", "proxy_type": fallback_proxy_type}
+        return {"ok": True, "empty": True, "proxy_url": "", "proxy_type": fallback_proxy_type,
+                "proxy_type_label": PROXY_TYPE_LABELS.get(fallback_proxy_type, fallback_proxy_type)}
 
     ptype = (fallback_proxy_type or "HTTPS").upper()
+    if ptype == "SOCKS5":
+        ptype = "SOCKS5H"          # 老库里存的 SOCKS5 一律按推荐的 socks5h 处理
     user = pw = None
-    scheme = None
+    host = port = ""
 
     if "://" in raw:
         scheme, _, rest = raw.partition("://")
-        scheme = scheme.lower()
+        scheme = scheme.strip().lower()
+        # 支持 socks5h:// 这类带 h 后缀的写法
+        ptype = PROXY_SCHEMES.get(scheme, ptype)
         if "@" in rest:
             cred, _, hostport = rest.rpartition("@")
             if ":" in cred:
                 user, _, pw = cred.partition(":")
+            else:
+                user = cred
         else:
             hostport = rest
-        if scheme in ("socks5", "socks", "socks5h"):
-            ptype = "SOCKS5"
+        # hostport 是 "host:port" 一个整体，这里必须拆开 ——
+        # 早先把整串塞进 parts[0]，导致 parts[1] 不存在、端口永远为空。
+        # IPv6 写法 [::1]:8080 用 rpartition 取最后一段当端口。
+        if hostport.startswith("["):
+            host, _, port = hostport.rpartition("]:")
+            host = host.lstrip("[")
         else:
-            ptype = "HTTPS"
-        parts = [hostport]
+            host, _, port = hostport.rpartition(":")
+        parts = []
     else:
-        parts = raw.split(":")
-        head = parts[0].lower()
-        if head in ("http", "https", "socks", "socks5"):
-            ptype = "SOCKS5" if head in ("socks", "socks5") else "HTTPS"
-            parts = parts[1:]
+        # 空格分隔：socks5 1.2.3.4 1080 user pass
+        parts = raw.split()
+        if len(parts) == 1:
+            head = parts[0].strip().lower()
+            if head in PROXY_SCHEMES:
+                # 形如 "socks5:host:port:user:pass"
+                parts = parts[0].split(":")
+                ptype = PROXY_SCHEMES[head]
+                parts = parts[1:]
+            elif raw.startswith("["):
+                # 括号包起来的 IPv6：[::1]:8080[:user:pass]
+                host, _, rest2 = raw.partition("]:")
+                host = host.lstrip("[")
+                tail = rest2.split(":")
+                port = tail[0] if tail else ""
+                if len(tail) >= 3:
+                    user, pw = tail[1], tail[2]
+                parts = []
+            else:
+                parts = parts[0].split(":")
+        else:
+            head = parts[0].strip().lower()
+            if head in PROXY_SCHEMES:
+                ptype = PROXY_SCHEMES[head]
+                parts = parts[1:]
 
-    host = parts[0] if parts else ""
-    port = parts[1] if len(parts) > 1 else ""
-    if len(parts) >= 4:
-        user, pw = parts[2], parts[3]
+    if parts:
+        if len(parts) >= 1 and not host:
+            host = (parts[0] or "").strip()
+        if len(parts) >= 2 and not port:
+            port = (parts[1] or "").strip()
+        if len(parts) >= 4 and not user:
+            user, pw = parts[2].strip(), parts[3].strip()
+    host = (host or "").strip()
+    port = (port or "").strip()
 
-    if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host or ""):
-        return {"ok": False, "error": "代理 IP 格式不正确，应形如 1.2.3.4:8080:user:pass", "proxy_url": ""}
-    if not (port or "").isdigit():
-        return {"ok": False, "error": "代理端口不正确", "proxy_url": ""}
+    # 主机名与 IPv4/IPv6 都接受 —— 老实现只认 IPv4 字面量，
+    # 导致 socks5h://proxy.example.com:1080 这种完全合法的写法被拒。
+    if not host:
+        return {"ok": False, "error": "代理地址为空", "proxy_url": ""}
+    is_ipv4 = re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host)
+    is_host = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z]{2,}$", host)
+    is_ipv6 = ":" in host
+    if not (is_ipv4 or is_host or is_ipv6):
+        return {"ok": False, "proxy_url": "",
+                "error": f"代理地址格式不正确：{host}（应为 IP 或域名）"}
+    if is_ipv4 and any(int(x) > 255 for x in host.split(".")):
+        return {"ok": False, "proxy_url": "", "error": f"IPv4 段超出 0-255：{host}"}
+    if not port.isdigit() or not (0 < int(port) < 65536):
+        return {"ok": False, "proxy_url": "", "error": f"代理端口不正确：{port or '(空)'}"}
 
-    scheme = "socks5" if ptype == "SOCKS5" else "http"
+    if ptype == "SOCKS4":
+        if user:
+            # SOCKS4 只有 userId，没有密码。给了密码说明用户想用的是 SOCKS5
+            return {"ok": False, "proxy_url": "",
+                    "error": "SOCKS4 不支持用户名/密码认证，请改用 socks5"}
+        scheme = "socks4"
+    elif ptype in ("SOCKS5", "SOCKS5H"):
+        # 统一用 socks5h：让代理解析域名，避免本地 DNS 污染导致连不上
+        scheme = "socks5h"
+        # 输入写的是 socks5:// 也只能走代理端解析了，标签必须跟着改，
+        # 否则界面上显示「本地解析 DNS」而实际不是，属于误导。
+        ptype = "SOCKS5H"
+    else:
+        scheme = "http"
+
     if user:
-        proxy_url = f"{scheme}://{user}:{pw}@{host}:{port}"
+        from urllib.parse import quote as _q
+        cred = f"{_q(user, safe='')}:{_q(pw or '', safe='')}@"
     else:
-        proxy_url = f"{scheme}://{host}:{port}"
-    return {"ok": True, "empty": False, "proxy_url": proxy_url, "proxy_type": ptype}
+        cred = ""
+    # IPv6 地址在 URL 里必须用方括号包起来，否则 ::1:8080 无法被解析
+    hostpart = f"[{host}]" if (":" in host and not host.startswith("[")) else host
+    proxy_url = f"{scheme}://{cred}{hostpart}:{port}"
+
+    return {
+        "ok": True, "empty": False, "proxy_url": proxy_url, "proxy_type": ptype,
+        "proxy_type_label": PROXY_TYPE_LABELS.get(ptype, ptype),
+        "host": host, "port": port, "has_auth": bool(user),
+    }
+
+
+def mask_proxy(proxy_text):
+    """展示用：把代理里的密码打码，避免账号页面上直接看到明文密码"""
+    raw = (proxy_text or "").strip()
+    if not raw or "@" not in raw:
+        return raw
+    head, _, tail = raw.rpartition("@")
+    if "://" in head:
+        scheme, _, cred = head.partition("://")
+        if ":" in cred:
+            u, _, _ = cred.partition(":")
+            return f"{scheme}://{u}:***@{tail}"
+    return raw
 
 
 class ProxyEnvContext:
@@ -177,6 +296,83 @@ def build_instance_spec(user_spec):
     spec["no_resource_policy"] = bool(spec.get("no_resource_policy", True))
     spec["deletion_protection"] = bool(spec.get("deletion_protection", False))
     return spec
+
+
+
+def parse_instance(inst, zone, project_id="", account_email=""):
+    """
+    把 GCP 的 Instance 对象解析成前端要用的扁平字典。
+
+    抽成独立函数是为了能单测 —— 内联在 aggregated_list 的闭包里没法构造
+    假对象验证字段提取，而这个函数里每个字段都可能因为 proto 字段名写错
+    而静默拿到空值（最危险的一类 bug：界面显示空白而不是报错）。
+    """
+    ip = private_ip = ""
+    if inst.network_interfaces:
+        private_ip = inst.network_interfaces[0].network_i_p
+        if inst.network_interfaces[0].access_configs:
+            ip = inst.network_interfaces[0].access_configs[0].nat_i_p
+
+    mt = (inst.machine_type or "").rsplit("/", 1)[-1]
+    zname = (zone or "").lstrip("zones/")
+
+    # 引导盘：类型 / 容量 / 来源镜像
+    disk_type = ""
+    disk_size = 0
+    image_src = ""
+    if inst.disks:
+        boot = inst.disks[0]
+        disk_size = int(boot.disk_size_gb or 0)
+        params = getattr(boot, "initialize_params", None)
+        if params is not None:
+            disk_type = (params.disk_type or "").rsplit("/", 1)[-1]
+            image_src = params.source_image or ""
+            if not disk_size:
+                disk_size = int(params.disk_size_gb or 0)
+        # 已运行实例的 initialize_params 常为空，退而从 source / type_ 取
+        if not disk_type:
+            disk_type = (getattr(boot, "type_", "") or "").rsplit("/", 1)[-1]
+        if not image_src:
+            image_src = boot.source or ""
+
+    # 抢占式 / Spot：GCP 用两个不同字段表达，两个都要看
+    sched = inst.scheduling
+    preemptible = bool(getattr(sched, "preemptible", False)) if sched else False
+    provisioning = (getattr(sched, "provisioning_model", "") or "") if sched else ""
+    spot = provisioning.upper() == "SPOT"
+
+    # creation_timestamp 是 RFC3339（"2026-09-24T15:49:00.000-07:00"）
+    created_ts = 0.0
+    raw_created = inst.creation_timestamp or ""
+    if raw_created:
+        try:
+            from datetime import datetime as _dt
+            created_ts = _dt.fromisoformat(raw_created).timestamp()
+        except ValueError:
+            created_ts = 0.0
+
+    region = catalog.region_of_zone(zname)
+    return {
+        "name": inst.name,
+        "ip": ip,
+        "private_ip": private_ip,
+        "zone": zname,
+        "region": region,
+        # 所在地（人类可读，如 "us-central1 (爱荷华)"）
+        "location": catalog.region_label(region),
+        "status": inst.status,
+        "machine_type": mt,
+        "disk_type": disk_type,
+        "disk_size_gb": disk_size,
+        "image": image_src.rsplit("/", 1)[-1] if image_src else "",
+        "image_source": image_src,
+        "created": raw_created,
+        "created_ts": created_ts,
+        "preemptible": preemptible,
+        "spot": spot,
+        "project_id": project_id,
+        "account_email": account_email,
+    }
 
 
 class GCPService:
@@ -350,18 +546,30 @@ class GCPService:
 
             # 实例已插入成功。后续取 IP 属于「尽力而为」：
             # get 偶发失败（权限/瞬时错误）不应把已创建成功的实例报成失败。
-            ip = private_ip = ""
+            base = {"ip": "", "private_ip": "", "zone": zone,
+                    "machine_type": spec["machine_type"], "spec": spec}
             try:
                 info = self.instance_client.get(project=self.project_id, zone=zone, instance=name)
-                if info.network_interfaces and info.network_interfaces[0].access_configs:
-                    ip = info.network_interfaces[0].access_configs[0].nat_i_p
-                private_ip = info.network_interfaces[0].network_i_p if info.network_interfaces else ""
+                # get 回来的对象里带着磁盘、镜像、抢占标志、真实创建时间，
+                # 一次解析齐，省掉后面再查一次；created_ts 用来算「已用费用」。
+                detail = parse_instance(info, zone, self.project_id, self.email)
+                base.update({
+                    "ip": detail.get("ip", ""),
+                    "private_ip": detail.get("private_ip", ""),
+                    "disk_type": detail.get("disk_type", ""),
+                    "disk_size_gb": detail.get("disk_size_gb", 0),
+                    "image": detail.get("image", ""),
+                    "image_source": detail.get("image_source", ""),
+                    "location": detail.get("location", ""),
+                    "region": detail.get("region", ""),
+                    "created_ts": detail.get("created_ts", 0.0),
+                    "preemptible": detail.get("preemptible", False),
+                    "spot": detail.get("spot", False),
+                    "status": detail.get("status", ""),
+                })
             except Exception as get_err:
-                return True, {"ip": ip, "private_ip": private_ip, "zone": zone,
-                              "machine_type": spec["machine_type"], "spec": spec,
-                              "warning": f"实例已创建，但读取 IP 失败：{get_err}"}
-            return True, {"ip": ip, "private_ip": private_ip, "zone": zone,
-                          "machine_type": spec["machine_type"], "spec": spec}
+                base["warning"] = f"实例已创建，但读取详情失败：{get_err}"
+            return True, base
 
         try:
             return self._with_proxy(run)
@@ -402,23 +610,7 @@ class GCPService:
             res = []
             for zone, resp in self.instance_client.aggregated_list(project=self.project_id):
                 for inst in (resp.instances or []):
-                    ip = private_ip = ""
-                    if inst.network_interfaces:
-                        private_ip = inst.network_interfaces[0].network_i_p
-                        if inst.network_interfaces[0].access_configs:
-                            ip = inst.network_interfaces[0].access_configs[0].nat_i_p
-                    mt = (inst.machine_type or "").rsplit("/", 1)[-1]
-                    res.append({
-                        "name": inst.name,
-                        "ip": ip,
-                        "private_ip": private_ip,
-                        "zone": zone.lstrip("zones/") if zone else "",
-                        "status": inst.status,
-                        "machine_type": mt,
-                        "created": inst.creation_timestamp,
-                        "project_id": self.project_id,
-                        "account_email": self.email,
-                    })
+                    res.append(parse_instance(inst, zone, self.project_id, self.email))
             return res
 
         return self._with_proxy(run)

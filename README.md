@@ -1,10 +1,10 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.0.1-1a73e8)
+![版本](https://img.shields.io/badge/version-1.1.0-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
-> 当前版本 **v1.0.1** · 仓库 <https://github.com/2016xyz/GCP-Manager-Web> ·
+> 当前版本 **v1.1.0** · 仓库 <https://github.com/2016xyz/GCP-Manager-Web> ·
 > 反馈 <https://github.com/2016xyz/GCP-Manager-Web/issues>
 
 原版 `shenping1200/GCP-Manager-V3.4`（实为 v7.6 PyQt6 桌面版）的 **Web 化重构版**。
@@ -132,7 +132,7 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ## 版本号
 
-当前版本 **v1.0.1**，采用语义化版本 `MAJOR.MINOR.PATCH`：
+当前版本 **v1.1.0**，采用语义化版本 `MAJOR.MINOR.PATCH`：
 
 - `MAJOR` 不兼容改动
 - `MINOR` 向后兼容的功能新增
@@ -493,7 +493,200 @@ python3 tools/overflow_audit.py                # 4 视口 × 5 页面 的破版�
 
 ---
 
-## 五、与原版 v7.6 对照 + 需求功能落地
+## 五、实例备注 · 费用 · 密码 · 代理
+
+### 实例备注
+
+创建时填一次，之后在「实例列表」的名称下方点击即可就地改；回车保存、Esc 取消。
+备注只存在本机数据库（`vm_passwords.note`），**不写入 GCP 资源** —— 不污染云端元数据。
+
+> 一个容易忽略的点：创建流程里 `save_vm()` 会被调用**多次**（创建成功一次、
+> 安装命令执行后又一次）。如果第二次把字段写成 NULL，用户填的备注和 GCP 返回的
+> 创建时间就被冲掉了。所以 `save_vm()` 对 `note/created_at/installs` 的语义是
+> 「传 None 就保留原值」，并有一条测试专门锁住这个行为。
+
+### 费用估算
+
+实例列表的「费用」列给出每小时 / 每天 / 已用三个数字，外加是否落在免费额度的标记。
+
+口径上有几个刻意的选择：
+
+| 情形 | 处理 | 原因 |
+|---|---|---|
+| 停机（TERMINATED） | 只计磁盘费，不计算力费 | GCP 停机后不再收 CPU/内存费，一刀切会把数字算高 |
+| 抢占式 / Spot | 算力单价 × 0.2 / × 0.35 | 折扣波动大，取常见区间 |
+| 未收录的自定义机型 | 标记「无单价」，不显示 0 | 显示 0 会被误读成「免费」 |
+| 没有创建时间的旧记录 | 已用费用显示 `—` | 不拿当前时间冒充，免得给出一个看起来很确定的假数字 |
+
+**关于「免费机型」这个标记 —— 免费额度是按时间算的，不是按台数算的。**
+
+GCP 官方原文：*"Your Free Tier e2-micro instance limit is by time, not by instance.
+Each month, eligible use of all of your e2-micro instances is free until you have used
+a number of hours equal to the total hours in the current month. Usage calculations are
+combined across the supported regions."*
+
+也就是说：同一账单账号下，三个免费区域里**所有** e2-micro 的运行小时数**合并计算**，
+当月累计到「当月总小时数」（30 天 = 720h / 31 天 = 744h / 28 天 = 672h）为止免费。
+
+- 一台 e2-micro 常驻 → 正好用掉全部额度，免费
+- 两台 e2-micro 常驻 → 第二台有一半小时数要按量计费
+- 三台各跑 1/3 个月 → 合并仍不超额，同样免费
+
+所以界面上的「免费机型」只表示**规格落在额度内**，不代表这一定不花钱。
+很多资料把它写成「每月 1 台免费」，是不准确的。
+
+判定条件（四项同时满足）：`e2-micro` + 区域属于 `us-west1/us-central1/us-east1`
++ 非抢占式 + 磁盘是 `pd-standard` 且 ≤ 30GB。
+
+单价来源：`MACHINE_TYPES` / `DISK_TYPES` 里的 us-central1 按需价 × `REGION_PRICE_INDEX`
+区域系数。e2-micro 取 `$0.008376/h`（官方价格计算器实测值），pd-standard 取
+`$0.000054795/GiB·h`（官方磁盘价格页）。**未计网络流量**，界面明确标注是参考价。
+
+### Root 密码：默认看不见
+
+原来 `/api/instances` 直接把所有实例的 root 密码明文返回 —— 而这个接口只需要
+`view` 权限，也就是说任何一个只读账号登录后都能一次拿到全部机器的 root。
+
+现在改成：
+
+1. 列表接口只回 `has_password` 布尔值，密码显示为 `••••••••`
+2. 点「显示」弹窗要求**重新输入自己的登录密码**
+3. 校验走 `verify_login()`（含哈希比对与恒定耗时路径），并复用登录的
+   `LoginGuard` 限速 —— 否则这个接口就成了拿别人的会话暴力猜密码的现成 oracle
+4. 出示后 15 分钟自动收回；点「隐藏」立即收回
+5. 把每次出示都写进审计日志（用户、IP、目标实例）
+
+### 账号备注与代理
+
+- **备注**：`accounts.label` 字段（老库里早就存在但从没被用过）。邮箱很长时列表以备注为主标识，点「加备注 / 改备注」就地编辑。
+- **长邮箱**：默认省略号折叠，点「展开」换行显示全部。
+- **代理**：显示哪些账号走了代理、走的是哪种协议；**代理密码在列表里已打码**，原始 `proxy` 字段不再外发。
+
+支持的代理写法：
+
+```
+1.2.3.4:8080                        IP:端口
+1.2.3.4:8080:user:pass              带认证
+http://1.2.3.4:8080                 显式 HTTP
+socks5h://user:pass@host:1080       域名 + SOCKS5
+socks5  9.9.9.9  1080  u1  p1       空格分隔（常见面板导出格式）
+[2001:db8::1]:1080                  IPv6
+```
+
+| 协议 | 说明 |
+|---|---|
+| HTTP / HTTPS | 走 HTTP CONNECT，经 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量 |
+| SOCKS5H | SOCKS5 且 **DNS 在代理端解析**（默认走这个） |
+| SOCKS4 | 仅 IPv4、无认证；带用户名密码会被拒并提示改用 socks5 |
+
+> 为什么默认用 socks5h 而不是 socks5：socks5 会先在本地解析域名，
+> 本地 DNS 被污染或解析不了 `compute.googleapis.com` 时，连代理请求都发不出去。
+> 因此输入写 `socks5://` 也一律按 socks5h 处理，界面标签同步显示为
+> 「代理端解析 DNS」——标签与实际行为必须一致，否则就是误导。
+>
+> 老实现只认 IPv4 字面量，`socks5h://proxy.example.com:1080` 这种完全合法的
+> 写法会被拒；现在主机名、IPv4、IPv6 都接受。
+
+---
+
+## 六、创建后自动安装
+
+创建实例时勾选若干项，实例 **SSH 就绪后自动按顺序执行**安装脚本。可多选，
+单项失败只记警告，不影响实例创建本身。
+
+| 预设 | 版本 | 说明 |
+|---|---|---|
+| Docker CE + Compose | 装最新 | 官方 `get.docker.com` 便利脚本 |
+| 3x-ui 面板 | v3.8.5 | Xray 面板。**原 v2-ui 已不可用**，见下 |
+| nps 内网穿透 | v0.26.10 | ehang-io/nps 服务端 |
+| Hermes Agent | 滚动最新 | Nous Research 的 AI Agent 运行时 |
+| Ekko Studio | 0.7.24 | 自托管 Web 控制台（原 Hermes Studio） |
+
+### 关于 v2-ui：它已经装不了了
+
+原项目 `github.com/sprov/v2-ui` 的仓库现在返回 **404**（被删除或改名），
+官方一键脚本 `raw.githubusercontent.com/sprov/v2-ui/master/install.sh` 同样 **404**，
+最后一次更新约在 2021 年。这是实测结果，不是推测：
+
+```
+$ curl -o /dev/null -w '%{http_code}' https://github.com/sprov/v2-ui
+404
+$ curl -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/sprov/v2-ui/master/install.sh
+404
+```
+
+所以这里改用社区活跃替代 **3x-ui**（最新 v3.8.5），界面上的选项名保留
+「3x-ui（替代已停更的 v2-ui）」以便对照。**没有**伪造一个还能用的 v2-ui 安装命令。
+
+### 3x-ui 的非交互处理
+
+3x-ui 的官方安装脚本本身是交互式的，但它内置了非交互模式：
+
+```bash
+# 脚本第 46 行：stdin 不是终端时自动进入非交互
+if [[ "${XUI_NONINTERACTIVE:-0}" == "1" ]] || [[ ! -t 0 ]]; then
+```
+
+因此本工具显式设 `XUI_NONINTERACTIVE=1`，并用 `XUI_USERNAME` / `XUI_PASSWORD` /
+`XUI_WEB_BASE_PATH` 固定凭据（面板路径随机化），再显式 `XUI_DB_TYPE=sqlite`
+绕开 PostgreSQL 那条交互分支。装完从 `/etc/x-ui/install-result.env`
+（官方脚本落盘的权威凭据文件）读回真实地址与账号密码打印到日志。
+
+### 无人值守的两道保险
+
+自动安装是在没人盯着的情况下跑的，任何一处 `read` 提示都会把创建任务挂死。因此：
+
+1. 所有 `curl | bash` 与外部命令都接 `</dev/null` —— 万一上游日后新增了未守卫的
+   `read`，会立刻读到 EOF 返回，而不是永久挂住。
+2. 每个预设包在独立子 shell 里执行并记录退出码，单项失败不阻断后续项。
+
+> 核实方法：把 3x-ui 安装脚本的 21 处 `read -rp` 逐条回溯，确认每一处都在
+> `NONINTERACTIVE` 守卫分支内、或在非交互模式下不可达（例如 reloadcmd 分支
+> 需要 `setReloadcmd=y`，而该值非交互时被强制为 `n`）。
+
+### 自定义安装命令
+
+预设只是省去手写。自己填在「创建后执行的安装命令」里的内容优先级更高 ——
+勾选预设时，预设脚本会**追加**在你自己的命令之后，不会覆盖它。
+
+---
+
+## 七、可自定义的服务器配置项
+
+**机型**（33 种，按区域自动过滤可用性）
+
+- E2：`e2-micro`（免费机型）、`e2-small/medium`、`e2-standard-2/4/8/16/32`、`e2-highcpu-2/4/8`、`e2-highmem-2/4/8`
+- N1：`n1-standard-1/2/4/8/16`
+- N2：`n2-standard-2/4/8`、`n2-highmem-2`
+- T2D / T2A（ARM）：`t2d-standard-1/2/4`、`t2a-standard-1/2`
+- C2 / C3：`c2-standard-4`、`c3-standard-4/8`
+- M1：`m1-megamem-96`
+- GPU：`n1-standard-4-gpu-t4`
+
+目录里没有的机型可直接填「自定义机型」输入框，不做白名单校验，交给 GCP 判定。
+
+**镜像**（14 种）：Ubuntu 24.04 / 22.04 / Minimal 22.04 / 20.04、Debian 12 / 11、
+Rocky 9 / 8、AlmaLinux 9、CentOS Stream 9、Container-Optimized OS、FreeBSD 14、Windows Server 2022 / 2019。
+
+> Windows 镜像不会执行 bash `startup-script`，选择后 Root 密码模式无效（页面会明确提示）。
+
+**磁盘**（5 种）：`pd-standard`、`pd-balanced`、`pd-ssd`、`pd-extreme`、`hyperdisk-balanced`，容量 10–65536GB。
+
+**区域**：免费区 3 个（us-central1 / us-east1 / us-west1）+ 付费区 39 个。
+
+**网络与启动**：网络/子网（**从项目真实 VPC 列表下拉选择**，见「八、实测记录」）、
+STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
+是否放开全开放防火墙、是否禁用 Ops Agent、抢占式 / Spot、自定义网络标签。
+
+**区域与可用性**：区域列表、zone 列表、VPC 列表均来自 GCP 真实返回，
+不再依赖本地硬编码猜测（各 region 的 zone 后缀并不统一）。
+
+**登录方式**：Root 密码模式（随机或自定义，`startup-script` 自动改密并放开 Root SSH）
+或 SSH 密钥模式（粘贴公钥、读服务器公钥文件、在线生成密钥对）。
+
+---
+
+## 八、与原版 v7.6 对照 + 需求功能落地
 
 | 能力 | 原版 v7.6（PyQt6 桌面） | 本 Web 版 |
 |---|---|---|
@@ -546,42 +739,7 @@ python3 tools/overflow_audit.py                # 4 视口 × 5 页面 的破版�
 
 ---
 
-## 六、可自定义的服务器配置项
-
-**机型**（33 种，按区域自动过滤可用性）
-
-- E2：`e2-micro`（免费机型）、`e2-small/medium`、`e2-standard-2/4/8/16/32`、`e2-highcpu-2/4/8`、`e2-highmem-2/4/8`
-- N1：`n1-standard-1/2/4/8/16`
-- N2：`n2-standard-2/4/8`、`n2-highmem-2`
-- T2D / T2A（ARM）：`t2d-standard-1/2/4`、`t2a-standard-1/2`
-- C2 / C3：`c2-standard-4`、`c3-standard-4/8`
-- M1：`m1-megamem-96`
-- GPU：`n1-standard-4-gpu-t4`
-
-目录里没有的机型可直接填「自定义机型」输入框，不做白名单校验，交给 GCP 判定。
-
-**镜像**（14 种）：Ubuntu 24.04 / 22.04 / Minimal 22.04 / 20.04、Debian 12 / 11、
-Rocky 9 / 8、AlmaLinux 9、CentOS Stream 9、Container-Optimized OS、FreeBSD 14、Windows Server 2022 / 2019。
-
-> Windows 镜像不会执行 bash `startup-script`，选择后 Root 密码模式无效（页面会明确提示）。
-
-**磁盘**（5 种）：`pd-standard`、`pd-balanced`、`pd-ssd`、`pd-extreme`、`hyperdisk-balanced`，容量 10–65536GB。
-
-**区域**：免费区 3 个（us-central1 / us-east1 / us-west1）+ 付费区 39 个。
-
-**网络与启动**：网络/子网（**从项目真实 VPC 列表下拉选择**，见「八、实测记录」）、
-STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
-是否放开全开放防火墙、是否禁用 Ops Agent、抢占式 / Spot、自定义网络标签。
-
-**区域与可用性**：区域列表、zone 列表、VPC 列表均来自 GCP 真实返回，
-不再依赖本地硬编码猜测（各 region 的 zone 后缀并不统一）。
-
-**登录方式**：Root 密码模式（随机或自定义，`startup-script` 自动改密并放开 Root SSH）
-或 SSH 密钥模式（粘贴公钥、读服务器公钥文件、在线生成密钥对）。
-
----
-
-## 七、GCP 资源总览
+## 九、GCP 资源总览
 
 新增「🛰 GCP 资源」页，把服务账号能看到的项目信息尽量都摊开。
 **全部只读**（`get` / `list` / `aggregatedList`），不创建也不修改任何资源。
@@ -640,7 +798,24 @@ GET /api/inspect?account_id=&sections=&region=&zone=&fresh=1&quick=1
 
 ---
 
-## 八、REST API
+## 十、REST API
+
+本轮新增（详见「五、实例备注 · 费用 · 密码 · 代理」）：
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| `GET` | `/api/install_presets` | view | 可选安装预设清单（含版本与依据） |
+| `PATCH` | `/api/instances/note` | operate | 改实例备注（上限 200 字） |
+| `POST` | `/api/instances/password` | view + **重新验登录密码** | 二次验证后返回 root 密码；错误计入登录限速 |
+
+变更：
+
+- `GET /api/instances` **不再返回 root 密码明文**，改为 `has_password` 布尔值；
+  同时新增 `note` / `installs` / `location` / `region` / `image` / `disk_type` / `disk_size_gb` / `cost` / `account_label`
+- `GET /api/accounts` **不再外发原始 `proxy` 字段**（可能含明文密码），改为
+  `proxy_set` / `proxy_ok` / `proxy_type` / `proxy_type_label` / `proxy_display`（打码）
+- `GET /favicon.ico` 新增路由（此前在白名单里但从未注册，每个页面一个 404）
+
 
 基础地址 `http://<host>:<port>`，交互式文档 `/docs`。
 除公开接口外，全部需要登录（Cookie `gcp_sid`，也支持 `Authorization: Bearer <token>`）。
@@ -729,7 +904,7 @@ curl -b /tmp/cj -X POST http://127.0.0.1:8000/api/create \
 
 ---
 
-## 九、目录结构
+## 十一、目录结构
 
 ```
 gcp-manager-web/
@@ -738,6 +913,7 @@ gcp-manager-web/
 ├── requirements.txt
 ├── core/
 │   ├── version.py         版本号与仓库地址（单一事实来源）
+│   ├── install_presets.py 创建后自动安装的预设（含依据来源与风险说明）
 │   ├── inspect.py         GCP 资源只读勘察（17 个分区）
 │   ├── auth.py            密码哈希 / 会话 / 图形验证码 / 登录限速 / 权限矩阵
 │   ├── users.py           用户 / 会话 / 审计 存储层
@@ -766,20 +942,23 @@ gcp-manager-web/
 │   ├── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
 │   ├── responsive_check.py 多视口截图 + 布局指标
 │   ├── ui_verify.py        版本号/导航/按钮分组的实测校验
-│   └── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
-├── tests_e2e.py           端到端验证（343 项，无需真实 GCP 账号）
+│   ├── fe_verify.py        备注/费用/密码/代理/安装预设的浏览器实测
+│   ├── _fixtures.py        测试夹具共享（管理员密码、展示用假数据）
+│   ├── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
+│   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
+├── tests_e2e.py           端到端验证（446 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
 ---
 
-## 十、验证
+## 十二、验证
 
 ```bash
 python3 tests_e2e.py
 ```
 
-共 343 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 446 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -802,6 +981,14 @@ python3 tests_e2e.py
   语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
   `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
   16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
+- **N. 备注 / 费用 / root 密码 / 代理 / 安装预设**（103 项）：预设齐备与顺序稳定、
+  非法 key 过滤去重、全量脚本过 `bash -n`、每项带 stdin 兜底、单项失败不阻断、
+  v2-ui 已死且有替代依据、费用三项计算与停机只算磁盘、未知机型不冒充 0、
+  免费额度按时间计（含官方原文断言）、四类免费判定条件、代理解析 9 种合法写法 +
+  4 种非法拒绝、SOCKS5 走代理端 DNS、代理密码打码、老库迁移幂等、
+  备注二次保存不被冲掉、root 密码须二次验证且拒绝时不泄露、
+  账号接口不外发明文代理、前端各列与交互存在性、favicon 路由
+
 - **M. 版本号 / 导航分组 / 按钮排序**（42 项）：版本号符合语义化格式且 ≥1.0.1、
   FastAPI 元数据与 version 模块一致、`/api/version` 匿名可读且不泄露账号信息、
   `/api/status` 与之一致、更新日志首条与当前版本匹配、导航分组字段与顺序
@@ -845,7 +1032,7 @@ python3 tests_e2e.py
 
 ---
 
-## 十一、实测记录（真实 GCP 项目）
+## 十三、实测记录（真实 GCP 项目）
 
 用真实服务账号 `80717428802-compute@developer.gserviceaccount.com`
 （项目 `sincere-axon-354618`）端到端跑通，非 mock。
@@ -922,7 +1109,7 @@ inode 与时间戳完全不变。
 
 ---
 
-## 十二、安全说明
+## 十四、安全说明
 
 - **服务账号 JSON 与 Root 密码是高敏感数据**：`data/` 目录不要提交到公开仓库
   （`.gitignore` 已排除）。

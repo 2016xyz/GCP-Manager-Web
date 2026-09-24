@@ -1302,6 +1302,270 @@ check("★ 登录页未受影响",
       client.get("/login").status_code == 200
       and "wow-login-card" in client.get("/login").text)
 
+print("\n── N. 备注 / 费用 / root 密码 / 代理 / 安装预设 ──")
+
+import subprocess as _sp  # noqa: E402
+import tempfile as _tf  # noqa: E402
+
+from core import install_presets as _ip  # noqa: E402
+from core.gcp import parse_proxy_input as _pp, mask_proxy as _mp  # noqa: E402
+
+# ══════════ 安装预设 ══════════
+_pk = _ip.preset_payload()
+_keys = [x["key"] for x in _pk]
+check("★ 预设齐备：docker / 3x-ui / nps / hermes / ekko",
+      set(_keys) == {"docker", "3x-ui", "nps", "hermes", "ekko"}, str(_keys))
+check("★ 预设顺序稳定（执行顺序可预期）",
+      _keys == ["docker", "3x-ui", "nps", "hermes", "ekko"], str(_keys))
+check("★ 每项带 label/desc/docs/note（可追溯依据）",
+      all(x.get("label") and x.get("desc") and x.get("docs") and x.get("note")
+          for x in _pk))
+check("★ 默认不勾选任何预设（不自作主张装服务）",
+      all(not x["default"] for x in _pk))
+
+# v2-ui 已死这件事必须写清楚，不能假装还能装
+_src = open(os.path.join(BASE_DIR, "core", "install_presets.py"), encoding="utf-8").read()
+check("★ 明确记录 v2-ui 已不可用（仓库 404）",
+      "sprov/v2-ui" in _src and "404" in _src)
+check("★ v2-ui 用 3x-ui 替代并给出依据 URL",
+      "MHSanaei/3x-ui" in _src)
+
+# 归一化：过滤无效、去重、按固定顺序
+check("★ 非法 key 被过滤", _ip.normalize(["docker", "不存在的预设"]) == ["docker"])
+check("★ 去重", _ip.normalize(["nps", "nps", "docker"]) == ["docker", "nps"])
+check("★ 输出顺序与 PRESET_ORDER 一致",
+      _ip.normalize(["ekko", "docker", "nps"]) == ["docker", "nps", "ekko"])
+check("★ 支持逗号分隔字符串入参", _ip.normalize("docker,nps") == ["docker", "nps"])
+check("★ 空选择不生成脚本", _ip.build_script([]) == "")
+
+# 生成的脚本必须是合法 bash，且每项都有 stdin 兜底
+_script = _ip.build_script(list(_ip.INSTALL_PRESETS))
+with _tf.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8") as _f:
+    _f.write(_script)
+    _spath = _f.name
+_r = _sp.run(["bash", "-n", _spath], capture_output=True, text=True)
+os.unlink(_spath)
+check("★ 全量安装脚本通过 bash -n 语法检查", _r.returncode == 0, _r.stderr[:200])
+for _k in _ip.INSTALL_PRESETS:
+    _one = _ip.build_script([_k])
+    check(f"★ 预设 {_k} 的脚本带 </dev/null stdin 兜底（无人值守不会挂死）",
+          "</dev/null" in _one)
+check("★ 单项失败不阻断后续项（各自子 shell + 记录退出码）",
+      _script.count("结束，退出码") == len(_ip.INSTALL_PRESETS))
+check("★ 3x-ui 用官方非交互机制（XUI_NONINTERACTIVE）",
+      "XUI_NONINTERACTIVE" in _script and "XUI_DB_TYPE" in _script)
+check("★ 验证命令按勾选项拼接", "docker --version" in _ip.verify_command(["docker"]))
+
+# ══════════ 费用与免费额度 ══════════
+from core import catalog as _cat  # noqa: E402
+
+_c = _cat.instance_cost("e2-micro", "pd-standard", 30, "us-central1",
+                        created_at=1700000000, now=1700000000 + 86400 * 3)
+check("★ 每小时单价为正", _c["hourly_usd"] > 0)
+check("★ 每天 = 每小时 × 24",
+      abs(_c["daily_usd"] - _c["hourly_usd"] * 24) < 0.001, str(_c["daily_usd"]))
+check("★ 已用费用 = 已用小时 × 每小时",
+      abs(_c["used_usd"] - _c["used_hours"] * _c["hourly_usd"]) < 0.01, str(_c["used_usd"]))
+check("★ 已用 3 天 ≈ 72 小时", abs(_c["used_hours"] - 72) < 0.1, str(_c["used_hours"]))
+check("★ e2-micro + 免费区域 + 30GB 标准盘 → 免费机型", _c["free_tier"] is True)
+check("★ 自带口径说明（参考价而非账单）", "GCP 账单" in _c["disclaimer"])
+
+# 免费额度是「按时间」而非「按实例」—— 这一点必须判对
+_cat_src = open(os.path.join(BASE_DIR, "core", "catalog.py"), encoding="utf-8").read()
+check("★ 免费额度按时间计（当月总小时数），不是「前 1 台免费」",
+      "by time, not by instance" in _cat_src and "按时间" in _cat_src)
+_hours = _cat.free_tier_hours_in_month()
+check("★ 当月小时数在合理区间（28~31 天）",
+      28 * 24 <= _hours <= 31 * 24, str(_hours))
+check("★ 抢占式不享受免费额度",
+      _cat.free_tier_reason("e2-micro", "us-central1", True)[0] is False)
+check("★ 非免费区域不享受",
+      _cat.free_tier_reason("e2-micro", "asia-east1")[0] is False)
+check("★ 磁盘超 30GB 不享受",
+      _cat.free_tier_reason("e2-micro", "us-west1", False, "pd-standard", 50)[0] is False)
+check("★ 非 e2-micro 机型不享受",
+      _cat.free_tier_reason("e2-small", "us-central1")[0] is False)
+check("★ 免费地区清单与官方一致",
+      _cat.FREE_TIER_REGIONS == ["us-west1", "us-central1", "us-east1"],
+      str(_cat.FREE_TIER_REGIONS))
+check("★ 所处地有中文可读名",
+      "爱荷华" in _cat.region_label("us-central1"), _cat.region_label("us-central1"))
+check("★ zone 能归一化成 region",
+      _cat.region_of_zone("us-central1-a") == "us-central1")
+
+# 停机只算磁盘费
+_run = _cat.instance_cost("e2-micro", "pd-standard", 30, "us-central1", status="RUNNING")
+_stop = _cat.instance_cost("e2-micro", "pd-standard", 30, "us-central1", status="TERMINATED")
+check("★ 停机状态只计磁盘费（GCP 停机不收算力费）",
+      _stop["hourly_usd"] < _run["hourly_usd"] and _stop["compute_hourly_usd"] > 0
+      and _stop["hourly_usd"] == _stop["disk_hourly_usd"],
+      f"run={_run['hourly_usd']} stop={_stop['hourly_usd']}")
+check("★ 未知机型标记为无单价而不是当作 0",
+      _cat.instance_cost("未知机型-x", "pd-standard", 30, "us-central1")["priced"] is False)
+check("★ 无创建时间时 used 为 None（不拿当前时间冒充）",
+      _cat.instance_cost("e2-micro", "pd-standard", 30, "us-central1")["used_usd"] is None)
+
+# ══════════ 代理解析 ══════════
+_ok_cases = [
+    "1.2.3.4:8080", "1.2.3.4:8080:user:pass", "http://1.2.3.4:8080",
+    "https://1.2.3.4:8443", "socks5://user:pass@1.2.3.4:1080",
+    "socks5h://proxy.example.com:1080", "socks4://1.2.3.4:1080",
+    "socks5 9.9.9.9 1080 u1 p1", "[2001:db8::1]:1080",
+]
+for _raw in _ok_cases:
+    check(f"★ 代理解析接受：{_raw}", _pp(_raw)["ok"] is True, str(_pp(_raw)))
+_bad_cases = ["1.2.3.4:99999", "1.2.3.999:8080", "not-an-ip", "1.2.3.4"]
+for _raw in _bad_cases:
+    check(f"★ 代理解析拒绝非法：{_raw}", _pp(_raw)["ok"] is False)
+check("★ SOCKS5 统一走代理端解析 DNS（socks5h，避免本地 DNS 污染）",
+      _pp("socks5://1.2.3.4:1080")["proxy_url"].startswith("socks5h://"))
+check("★ SOCKS4 带认证被拒并提示改用 socks5",
+      _pp("socks4://u:p@1.2.3.4:1080")["ok"] is False
+      and "socks5" in _pp("socks4://u:p@1.2.3.4:1080")["error"])
+check("★ 支持域名（老实现只认 IPv4 字面量）",
+      _pp("socks5h://proxy.example.com:1080")["ok"] is True)
+check("★ 代理密码在展示时打码",
+      "***" in _mp("socks5h://user:secret@1.2.3.4:1080")
+      and "secret" not in _mp("socks5h://user:secret@1.2.3.4:1080"),
+      _mp("socks5h://user:secret@1.2.3.4:1080"))
+check("★ 类型标签不再误导（socks5 实为代理端解析）",
+      _pp("socks5://1.2.3.4:1080")["proxy_type"] == "SOCKS5H")
+
+# ══════════ 存储层 ══════════
+_cols = {r["name"] for r in appmod.store.conn.execute("PRAGMA table_info(vm_passwords)")}
+check("★ vm 表已加 note 列", "note" in _cols)
+check("★ vm 表已加 created_at 列（算已用费用用）", "created_at" in _cols)
+check("★ vm 表已加 installs 列（回溯装了什么）", "installs" in _cols)
+_acols = {r["name"] for r in appmod.store.conn.execute("PRAGMA table_info(accounts)")}
+check("★ accounts 表有 label 列（账号备注）", "label" in _acols)
+
+appmod.store.save_vm("vm-n-1", "1.2.3.4", "pw", 1, "us-central1-a", "e2-micro",
+              "ubuntu-2204-lts", "pd-standard", 30, note="备注A",
+              created_at=1700000000.0, installs="docker,nps")
+check("★ 备注/创建时间/安装项已写入",
+      appmod.store.get_vm("vm-n-1")["note"] == "备注A"
+      and appmod.store.get_vm("vm-n-1")["installs"] == "docker,nps"
+      and appmod.store.get_vm("vm-n-1")["created_at"] == 1700000000.0)
+# 关键：创建流程里 save_vm 会被调用多次，第二次不能把备注冲掉
+appmod.store.save_vm("vm-n-1", "1.2.3.4", "pw", 1, "us-central1-a", "e2-micro",
+              "ubuntu-2204-lts", "pd-standard", 30)
+check("★ 二次保存不覆盖已有备注（创建流程会存多次）",
+      appmod.store.get_vm("vm-n-1")["note"] == "备注A", repr(appmod.store.get_vm("vm-n-1")["note"]))
+check("★ 二次保存不覆盖创建时间",
+      appmod.store.get_vm("vm-n-1")["created_at"] == 1700000000.0)
+check("★ update_vm_note 命中判断正确",
+      appmod.store.update_vm_note("vm-n-1", "新备注") is True
+      and appmod.store.get_vm("vm-n-1")["note"] == "新备注")
+check("★ update_vm_note 未命中返回 False",
+      appmod.store.update_vm_note("不存在的实例-xyz", "x") is False)
+
+# 老库迁移：缺列的老表也要能升上来
+import sqlite3 as _sq  # noqa: E402
+_old = os.path.join(BASE_DIR, "data", "_mig_test.db")
+try:
+    os.unlink(_old)
+except OSError:
+    pass
+_cx = _sq.connect(_old)
+_cx.execute("""CREATE TABLE vm_passwords(name TEXT PRIMARY KEY, ip TEXT, password TEXT,
+   account_id TEXT, zone TEXT, machine_type TEXT, image_key TEXT, disk_type TEXT,
+   disk_size_gb INTEGER, updated_at REAL)""")
+_cx.execute("INSERT INTO vm_passwords VALUES('old-1','9.9.9.9','secret',1,'z','m','i','d',10,1.0)")
+_cx.commit(); _cx.close()
+from core.store import Store as _Store  # noqa: E402
+_st2 = _Store(_old)
+check("★ 老库能自动补齐新列（升级不丢数据）",
+      "note" in {r["name"] for r in _st2.conn.execute("PRAGMA table_info(vm_passwords)")}
+      and _st2.get_vm("old-1")["password"] == "secret")
+_Store(_old)   # 再开一次，迁移必须幂等
+check("★ 迁移幂等（重复启动不报错）", True)
+os.unlink(_old)
+
+# ══════════ 接口 ══════════
+_r = client.get("/api/install_presets")
+check("★ GET /api/install_presets 返回 5 项",
+      _r.status_code == 200 and len(_r.json()["presets"]) == 5)
+
+appmod.store.save_vm("vm-n-api", "1.2.3.4", "RootPw!9", 1, "us-central1-a", "e2-micro",
+              "ubuntu-2204-lts", "pd-standard", 30, note="接口备注")
+_r = client.patch("/api/instances/note", json={"name": "vm-n-api", "note": "改过"})
+check("★ PATCH /api/instances/note 可用",
+      _r.status_code == 200 and appmod.store.get_vm("vm-n-api")["note"] == "改过")
+check("★ 超长备注被拒", client.patch("/api/instances/note",
+      json={"name": "vm-n-api", "note": "x" * 201}).status_code == 400)
+check("★ 缺实例名被拒", client.patch("/api/instances/note",
+      json={"name": "", "note": "x"}).status_code == 400)
+
+# root 密码：必须二次验证登录密码
+_r = client.post("/api/instances/password", json={"name": "vm-n-api", "password": "错的"})
+check("★ 错误登录密码被拒（403）", _r.status_code == 403, str(_r.status_code))
+check("★ 拒绝时不泄露 root 密码", "RootPw!9" not in _r.text)
+check("★ 空密码被拒", client.post("/api/instances/password",
+      json={"name": "vm-n-api", "password": ""}).status_code == 400)
+_r = client.post("/api/instances/password", json={"name": "vm-n-api", "password": ADMIN_PW})
+check("★ 正确登录密码后返回 root 密码",
+      _r.status_code == 200 and _r.json()["root_password"] == "RootPw!9", str(_r.json()))
+check("★ 无密码记录的实例返回 404",
+      client.post("/api/instances/password",
+                  json={"name": "没有这个实例", "password": ADMIN_PW}).status_code == 404)
+
+# 实例列表接口不得直接吐明文密码
+_lt_src = open(os.path.join(BASE_DIR, "core", "tasks.py"), encoding="utf-8").read()
+check("★ list_all_instances 不再返回 root 密码明文",
+      '"root_password"] = vm.get("password")' not in _lt_src
+      and '"has_password"' in _lt_src)
+check("★ 实例列表带费用与所在地字段",
+      'inst["cost"] = catalog.instance_cost' in _lt_src and '"account_label"' in _lt_src)
+
+# 账号接口：备注、代理打码、不外发原始 proxy
+appmod.store.add_account("n-a@example.com", "p-n1", "/tmp/n1.json",
+                  "socks5://u:TopSecret@1.2.3.4:1080", "SOCKS5", "N段账号")
+_r = client.get("/api/accounts").json()
+_na = [a for a in _r["accounts"] if a["email"] == "n-a@example.com"]
+check("★ 账号接口返回备注", _na and _na[0]["label"] == "N段账号")
+check("★ 账号接口不外发明文代理密码",
+      _na and "TopSecret" not in json.dumps(_na[0], ensure_ascii=False))
+check("★ 账号接口给出代理类型标签与打码展示",
+      _na and _na[0]["proxy_type"] == "SOCKS5H" and "***" in _na[0]["proxy_display"])
+check("★ 账号接口不再外发原始 proxy 字段", _na and "proxy" not in _na[0])
+
+# ══════════ 前端 ══════════
+_ct4 = client.get("/static/console.html").text
+check("★ 创建页有机器备注输入", 'v-model.trim="instNote"' in _ct4)
+check("★ 创建页安装预设为多选（checkbox 绑定数组）",
+      'v-model="installPicked"' in _ct4 and "installPresets" in _ct4)
+check("★ 安装卡带选中态样式", 'class="pk"' in _ct4 and ".pk.on{" in _ct4)
+check("★ 提交创建时带上备注与安装项",
+      "note: this.instNote" in _ct4 and "installs: this.installPicked" in _ct4)
+
+check("★ 实例表含所在地列", "公网 IP / 所在地" in _ct4 and "i.location" in _ct4)
+check("★ 实例表含镜像名称列", "{{ i.image ||" in _ct4)
+check("★ 实例表含磁盘大小列", "i.disk_size_gb ? i.disk_size_gb+' GB'" in _ct4)
+check("★ Root 密码默认掩码显示",
+      "••••••••" in _ct4 and 'class="pwd-mask"' in _ct4)
+check("★ 显示密码走二次验证接口", "/api/instances/password" in _ct4 and "askReveal" in _ct4)
+check("★ 出示后 15 分钟自动隐藏", "15*60*1000" in _ct4)
+check("★ 实例表含费用列（每小时/每天/已用）",
+      "每小时" in _ct4 and "每天" in _ct4 and "已用" in _ct4)
+check("★ 免费机型有专门徽章", "免费机型" in _ct4 and ".badge.free{" in _ct4)
+check("★ 备注可就地编辑", "saveNote" in _ct4 and 'v-model="noteDraft"' in _ct4)
+
+check("★ 账号页可加/改备注", "saveAccNote" in _ct4 and "accNoteDraft" in _ct4)
+check("★ 账号页显示代理类型徽章", 'class="badge proxy"' in _ct4)
+check("★ 账号页区分「直连」与「用代理」", "直连（未用代理）" in _ct4)
+check("★ 长邮箱可折叠/展开", "expandedMail" in _ct4 and 'class="mail-tg"' in _ct4)
+check("★ 代理协议下拉含 HTTP/HTTPS/SOCKS5/SOCKS4",
+      all(x in _ct4 for x in ("SOCKS5H", "SOCKS4", "HTTP 代理")))
+check("★ 窄屏对长机器串允许折行（防表格被顶宽）",
+      "overflow-wrap:anywhere" in _ct4)
+# 又踩了一次「api() 只接一个参数」的坑，用断言锁住
+check("★ PATCH/POST 用专用助手而非两参 api()",
+      "this.patch('/api/instances/note'" in _ct4
+      and "this.post('/api/instances/password'" in _ct4)
+
+check("★ favicon 路由已注册（消除每页一个 404）",
+      client.get("/favicon.ico").status_code == 200)
+
 print("\n── M. 版本号 / 导航分组 / 按钮排序 ──")
 
 from core import version as ver_mod  # noqa: E402

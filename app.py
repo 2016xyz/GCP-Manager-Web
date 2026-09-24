@@ -28,6 +28,8 @@ sys.path.insert(0, BASE_DIR)
 
 from core import catalog                                   # noqa: E402
 from core import version as ver                            # noqa: E402
+from core import install_presets as presets                # noqa: E402
+from core import gcp as gcp_mod                            # noqa: E402
 from core import auth as auth_mod                          # noqa: E402
 from core.auth import (captcha_store, login_guard, PERMISSIONS, ROLE_ADMIN,  # noqa: E402
                        ROLE_LABELS, ROLES, ROLE_OPERATOR, ROLE_VIEWER,
@@ -645,6 +647,15 @@ def _norm_region(r):
     return r
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """站点图标。复用原版 v7.6 的 app_icon.ico，避免每次开页面一个 404。"""
+    path = os.path.join(STATIC_DIR, "favicon.ico")
+    if not os.path.exists(path):
+        raise HTTPException(404, "no favicon")
+    return FileResponse(path, media_type="image/x-icon")
+
+
 @app.get("/api/version")
 def api_version():
     """版本与仓库信息。刻意不要求登录 —— 登录页也要展示版本号。"""
@@ -782,6 +793,25 @@ def api_accounts(request: Request):
         a["key_exists"] = os.path.exists(a.get("key_path") or "")
         a["key_file"] = os.path.basename(a.get("key_path") or "")
         a.pop("key_path", None)
+        # 备注：邮箱很长时界面上优先显示它。老库里该字段可能为 NULL。
+        a["label"] = a.get("label") or ""
+
+        # 代理：解析出类型标签，并**把密码打码后再返回**。
+        # 账号页面只需要展示「用没用代理、是什么代理」，
+        # 把明文密码塞进列表响应没有任何必要。
+        raw_proxy = a.get("proxy") or ""
+        a["proxy_set"] = bool(raw_proxy.strip())
+        pinfo = gcp_mod.parse_proxy_input(raw_proxy, a.get("proxy_type") or "HTTPS")
+        a["proxy_ok"] = bool(pinfo.get("ok"))
+        a["proxy_error"] = pinfo.get("error") or ""
+        a["proxy_type"] = pinfo.get("proxy_type") or (a.get("proxy_type") or "HTTPS")
+        a["proxy_type_label"] = pinfo.get("proxy_type_label") or ""
+        a["proxy_has_auth"] = bool(pinfo.get("has_auth"))
+        a["proxy_display"] = gcp_mod.mask_proxy(raw_proxy)
+        a["proxy_host"] = pinfo.get("host") or ""
+        a["proxy_port"] = pinfo.get("port") or ""
+        # 原始 proxy 字段（可能带明文密码）不外发
+        a.pop("proxy", None)
     return {"ok": True, "accounts": accounts}
 
 
@@ -870,8 +900,13 @@ def api_test_account(acc_id: int, request: Request):
                          acc.get("proxy", ""), acc.get("proxy_type", "HTTPS"))
         t0 = time.time()
         insts = gcp.list_instances()
+        pinfo = gcp_mod.parse_proxy_input(acc.get("proxy") or "", acc.get("proxy_type") or "HTTPS")
         return {"ok": True, "instances": len(insts),
-                "latency_ms": round((time.time() - t0) * 1000), "instances_detail": insts}
+                "latency_ms": round((time.time() - t0) * 1000),
+                # 只回实例名，全量数据在 /api/instances；这里够证明连通性了
+                "instance_names": [i["name"] for i in insts][:50],
+                "via_proxy": bool(pinfo.get("proxy_url")),
+                "proxy_type": pinfo.get("proxy_type") or ""}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -912,6 +947,79 @@ def api_instances(request: Request, account_ids: str = "", sync: bool = True):
     return {"ok": True, "instances": store.get_all_vms()}
 
 
+@app.get("/api/install_presets")
+def api_install_presets(request: Request):
+    """创建后可自动安装的预设清单（docker / 3x-ui / nps / hermes / ekko）"""
+    require(request, "view")
+    return {"ok": True, "presets": presets.preset_payload()}
+
+
+@app.patch("/api/instances/note")
+def api_update_instance_note(request: Request, payload: dict):
+    """改实例备注。创建后才知道这台机器要干嘛，所以必须能改。"""
+    user = require(request, "operate")
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "缺少实例名")
+    note = (payload.get("note") or "").strip()
+    if len(note) > 200:
+        raise HTTPException(400, "备注过长（上限 200 字）")
+    if not store.update_vm_note(name, note):
+        # 本地没有记录时补一条，否则「GCP 上有、本地没记过」的实例改不了备注
+        store.save_vm(name, "", "", None, None, None, None, None, None, note=note)
+    users_store.audit(user["username"], client_ip(request), "instance_note",
+                      target=name, detail=note[:60], ok=True)
+    return {"ok": True, "name": name, "note": note}
+
+
+@app.post("/api/instances/password")
+def api_reveal_instance_password(request: Request, payload: dict):
+    """
+    二次验证用户登录密码后返回实例的 root 密码。
+
+    为什么要有这一步：实例列表只需要 view 权限，而 viewer 是只读角色。
+    如果列表接口直接把 root 密码明文吐出来，等于任何能登录的人（哪怕是
+    只读账号）都能一次性拿到全部机器的 root。所以列表只回 has_password，
+    要看明文必须重新输入**自己的登录密码**。
+
+    这里复用登录的 LoginGuard 做限速 —— 否则这个接口就成了一个
+    用别人的会话暴力猜密码的现成 oracle。
+    """
+    user = require(request, "view")
+    ip = client_ip(request)
+    name = (payload.get("name") or "").strip()
+    password = payload.get("password") or ""
+    if not name:
+        raise HTTPException(400, "缺少实例名")
+    if not password:
+        raise HTTPException(400, "请输入当前账号的登录密码")
+
+    ok, why = login_guard.check(user["username"], ip)
+    if not ok:
+        users_store.audit(user["username"], ip, "reveal_root_password",
+                          target=name, detail=why, ok=False)
+        raise HTTPException(429, why)
+
+    # 用登录验密函数校验（内部含哈希比对 + 失败计数 + 恒定耗时路径）
+    who, reason = users_store.verify_login(user["username"], password)
+    if not who:
+        login_guard.fail(user["username"], ip)
+        users_store.audit(user["username"], ip, "reveal_root_password",
+                          target=name, detail="密码校验失败", ok=False)
+        raise HTTPException(403, "登录密码不正确")
+
+    vm = store.get_vm(name)
+    pwd = (vm or {}).get("password") or ""
+    if not pwd:
+        users_store.audit(user["username"], ip, "reveal_root_password",
+                          target=name, detail="无密码记录", ok=False)
+        raise HTTPException(404, "该实例没有 root 密码记录（可能创建时用的是 SSH 密钥模式）")
+
+    users_store.audit(user["username"], ip, "reveal_root_password",
+                      target=name, detail="已出示", ok=True)
+    return {"ok": True, "name": name, "root_password": pwd}
+
+
 @app.post("/api/refresh")
 def api_refresh(request: Request, payload: dict | None = None):
     require(request, "view")
@@ -926,6 +1034,21 @@ def api_create(req: CreateRequest, request: Request):
     if req.spec is None:
         spec = store.get_setting(_cfg_key(user["user_id"]), {}) or {}
     payload["spec"] = build_instance_spec(spec)
+
+    # 勾选了「创建后自动安装」时，用预设模块生成安装脚本。
+    # 用户自己写的 post_command 优先级更高 —— 预设只是省去手写，
+    # 不该覆盖掉用户显式填的命令。
+    installs = presets.normalize(payload.get("installs"))
+    payload["installs"] = installs
+    if installs:
+        preset_script = presets.build_script(installs)
+        if preset_script:
+            own = (payload.get("post_command") or "").strip()
+            payload["post_command"] = (own + "\n\n" + preset_script) if own else preset_script
+        if not (payload.get("verify_command") or "").strip():
+            payload["verify_command"] = presets.verify_command(installs)
+        payload.setdefault("ssh_timeout", 300)
+
     if not payload.get("dry_run"):
         # 持久化客户端真正提供的字段（过滤 None，避免用 None 覆盖默认值），
         # 但**危险开关不写回默认配置**：
@@ -945,7 +1068,9 @@ def api_create(req: CreateRequest, request: Request):
                           detail=json.dumps({"count": payload.get("count"),
                                              "machine": spec.get("machine_type"),
                                              "image": spec.get("image_key"),
-                                             "accounts": len(payload.get("account_ids") or [])},
+                                             "accounts": len(payload.get("account_ids") or []),
+                                             "note": (payload.get("note") or "")[:40],
+                                             "installs": installs},
                                             ensure_ascii=False))
     return tm.submit_create(payload)
 

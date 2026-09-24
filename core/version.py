@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,20 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.1.0",
+        "date": "2026-09-25",
+        "notes": [
+            "实例备注：创建时可填，实例列表里点击就地修改",
+            "实例列表补全：IP 后显示所在地、镜像名称、磁盘大小与类型",
+            "实例费用：每小时 / 每天 / 已用费用估算，并标注是否落在 Always Free 额度内",
+            "Root 密码默认以圆点显示，点「显示」需重新输入登录密码，15 分钟自动隐藏",
+            "账号备注：可加可改；邮箱过长自动折叠，列表以备注为主标识",
+            "账号代理：显示哪个账号走了代理、走的是哪种协议；代理密码打码",
+            "代理支持 HTTP / HTTPS / SOCKS5 / SOCKS4，允许域名，SOCKS5 统一走代理端解析 DNS",
+            "创建后可自动安装：Docker / 3x-ui / nps / Hermes / Ekko，可多选，开机后自动执行",
+        ],
+    },
     {
         "version": "1.0.1",
         "date": "2026-09-25",
