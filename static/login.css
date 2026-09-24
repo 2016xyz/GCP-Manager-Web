@@ -1,0 +1,826 @@
+/* ════════════════════════════════════════════════════════════════════
+   GCP Manager Web · 登录页样式
+   ────────────────────────────────────────────────────────────────────
+   说明：本文件逐条提取自 https://github.com/2016xyz/sysuahb
+        的 web/static/css/style.css 中 login-page / wow-login-* 相关规则，
+        保持原有声明、顺序与 @media 断点不变，以保证视觉完全一致。
+
+   来源标记（原文件中的注释原文）：
+     Login & Register page beautification (psychology palette)
+     deep blue = trust & security / cyan = clarity & control
+     warm amber = welcoming (register) / glassmorphism card
+     Responsive: phone (<576) / tablet (<992) / desktop
+
+   提取范围：
+     · .login-page / .wow-login-* / .wow-input-* / .wow-verification
+       / .wow-remember / .wow-captcha-input / .wow-language-switch
+     · @keyframes wow-bg-shift / wow-float-a / wow-float-b / wow-rise
+     · 全部 @media 断点（576 / 600 / 380 / max-height:700 / reduced-motion）
+   刻意排除：
+     · body:not(.login-page) 开头的规则（那是后台面板样式，不属于登录页）
+     · 遗留的 .login-card / .loginColumns 规则（旧版布局，已不被引用）
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ════════════════════════════════════════════════════════════════════
+   按钮加载图标（对上游的一处主动修正，请留意）
+   ────────────────────────────────────────────────────────────────────
+   上游 sysuahb 的 style.css 里，隐藏 spinner 的规则写成了：
+       .login-page .login-card .btn-login .btn-spinner { display: none; }
+   但登录页实际用的容器类是 .wow-login-card，并不匹配 .login-card
+   —— 这是它从旧版二分栏布局（.login-columns / .login-card）迁移到
+   .wow-login-card 布局时漏改的一条选择器。
+
+   后果：上游登录按钮右侧的 circle-notch 图标常驻显示、且一直在转，
+   让按钮看起来永远停在"加载中"，用户会以为点不动。
+
+   这里补上对应的选择器，让 spinner 只在 .loading 时才出现。
+   若确实要连这个现象一起复刻，删掉下面这两条规则即可。
+   ════════════════════════════════════════════════════════════════════ */
+.wow-login-card .btn-login .btn-spinner { display: none; }
+.wow-login-card .btn-login.loading .btn-spinner { display: inline-block; }
+
+/* 原 style.css 中的通用辅助类（登录页用到了 block / full-width） */
+.block { display: block; }
+.full-width { width: 100% !important; }
+
+.login-page {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--bg-mid);
+}
+.login-page {
+    position: relative;
+    background: linear-gradient(135deg, #0b2545 0%, #123c6b 48%, #0e6ba8 100%);
+}
+.login-page .navbar-login {
+    z-index: 10;
+}
+.login-page .navbar-login .btn {
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.3);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    border-radius: 0.6rem;
+    transition: all 0.25s ease;
+}
+.login-page .navbar-login .btn:hover,
+.login-page .navbar-login .btn:focus {
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.26);
+    border-color: rgba(255, 255, 255, 0.45);
+}
+.login-page .login-card {
+    position: relative;
+    z-index: 1;
+    border-radius: 1.1rem;
+    box-shadow: 0 24px 60px rgba(3, 15, 35, 0.45), 0 6px 18px rgba(3, 15, 35, 0.25);
+    animation: loginCardIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.login-page .login-card .login-body {
+    background-color: rgba(255, 255, 255, 0.94);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+}
+.login-page .login-card .login-header {
+    background: linear-gradient(120deg, #11cdef 0%, #1171ef 70%, #0b5bd3 100%);
+}
+.login-page .login-card .login-header.register {
+    background: linear-gradient(120deg, #f6b26b 0%, #f59e6b 55%, #ef8060 100%);
+}
+.login-page .login-card .login-brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.85rem;
+}
+.login-page .login-card .login-brand .navbar-brand {
+    padding: 0;
+    margin: 0;
+    float: none;
+}
+.login-page .login-card .login-brand h1 {
+    margin: 0;
+    text-align: left;
+    line-height: 1.2;
+}
+.login-page .login-card .brand-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 3.1rem;
+    height: 3.1rem;
+    flex: 0 0 auto;
+    border-radius: 0.9rem;
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 6px 14px rgba(3, 15, 35, 0.2);
+}
+.login-page .login-card .brand-badge img {
+    width: 1.9rem;
+    height: 1.9rem;
+}
+.login-page .login-card .login-subtitle {
+    margin: 0.6rem 0 0;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.9rem;
+    letter-spacing: 0.06em;
+}
+.login-page .login-card .form-control {
+    background-color: var(--bg);
+    border-color: var(--border-color);
+    color: var(--color);
+    border-radius: 0.65rem;
+    box-shadow: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.login-page .login-card .form-control:focus {
+    border-color: #11cdef;
+    box-shadow: 0 0 0 0.22rem rgba(17, 205, 222, 0.22);
+}
+.login-page .login-card .input-icon {
+    color: #94a3b8;
+}
+.login-page .login-card .login-pwd {
+    padding-right: 2.9rem;
+}
+.login-page .login-card .pwd-toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.6rem;
+    transform: translateY(-50%);
+    height: 2.1rem;
+    width: 2.1rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    border-radius: 0.45rem;
+    line-height: 1;
+    transition: color 0.2s ease, background-color 0.2s ease;
+}
+.login-page .login-card .pwd-toggle:hover,
+.login-page .login-card .pwd-toggle:focus {
+    color: #1171ef;
+    background: rgba(17, 113, 239, 0.1);
+    outline: none;
+}
+.login-page .login-card .captcha-group img {
+    height: 3rem;
+    border-radius: 0.55rem;
+    border: 1px solid var(--border-color);
+    transition: transform 0.2s ease;
+}
+.login-page .login-card .captcha-container:hover img {
+    transform: scale(1.04);
+}
+.login-page .login-card .btn-login {
+    height: 3rem;
+    border: none;
+    border-radius: 0.65rem;
+    color: #fff;
+    background-image: linear-gradient(87deg, #11cdef 0%, #1171ef 100%);
+    box-shadow: 0 10px 22px rgba(17, 113, 239, 0.35);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+.login-page .login-card .btn-login:hover,
+.login-page .login-card .btn-login:focus {
+    color: #fff;
+    filter: brightness(1.06);
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px rgba(17, 113, 239, 0.45);
+}
+.login-page .login-card .btn-login:active {
+    transform: translateY(0);
+}
+.login-page .login-card .btn-login.btn-login-warm {
+    background-image: linear-gradient(87deg, #f6a94a 0%, #ef6f57 100%);
+    box-shadow: 0 10px 22px rgba(239, 111, 87, 0.35);
+}
+.login-page .login-card .btn-login.btn-login-warm:hover,
+.login-page .login-card .btn-login.btn-login-warm:focus {
+    box-shadow: 0 14px 28px rgba(239, 111, 87, 0.45);
+}
+.login-page .login-card .btn-login .btn-spinner {
+    display: none;
+}
+.login-page .login-card .btn-login.loading {
+    pointer-events: none;
+    filter: saturate(0.85) brightness(0.96);
+}
+.login-page .login-card .btn-login.loading .btn-label {
+    display: none;
+}
+.login-page .login-card .btn-login.loading .btn-spinner {
+    display: inline-block;
+}
+.login-page .login-card .login-alt a {
+    color: #1171ef;
+    font-weight: 600;
+    transition: color 0.2s ease;
+}
+.login-page .login-card .login-alt a:hover {
+    color: #0e6ba8;
+}
+.login-page .login-footer {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    padding: 1.1rem 1.5rem 1.4rem;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 0.85rem;
+}
+.login-page .login-footer a {
+    color: #7dd3fc;
+}
+.login-page .login-footer a:hover {
+    color: #ffffff;
+}
+html[theme="dark-mode"] .login-page {
+    background: linear-gradient(135deg, #081827 0%, #0d2340 50%, #0a3a52 100%);
+}
+html[theme="dark-mode"] .login-page .login-card {
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+html[theme="dark-mode"] .login-page .login-card .login-body {
+    background-color: rgba(30, 34, 42, 0.92);
+}
+html[theme="dark-mode"] .login-page .login-card .login-alt,
+html[theme="dark-mode"] .login-page .login-card .login-alt .text-muted {
+    color: var(--text) !important;
+}
+html[theme="dark-mode"] .login-page .login-card .login-alt a {
+    color: #38bdf8;
+}
+html[theme="dark-mode"] .login-page .login-card .input-icon {
+    color: #7c8aa0;
+}
+@media (min-width: 576px) and (max-width: 991.98px) {
+.login-page .login-card {
+        max-width: 400px;
+    }
+}
+@media (max-width: 575.98px) {
+.login-page .login-card {
+        margin: 0 0.9rem;
+        border-radius: 0.9rem;
+    }
+.login-page .login-card .login-header {
+        padding: 1.6rem 1.2rem;
+    }
+.login-page .login-card .login-brand {
+        gap: 0.7rem;
+    }
+.login-page .login-card .brand-badge {
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 0.75rem;
+    }
+.login-page .login-card .brand-badge img {
+        width: 1.6rem;
+        height: 1.6rem;
+    }
+.login-page .login-card .login-brand h1 {
+        font-size: 1.3rem !important;
+    }
+.login-page .login-card .login-subtitle {
+        font-size: 0.8rem;
+    }
+.login-page .login-card .btn-login {
+        height: 3.25rem;
+        font-size: 1.05rem;
+    }
+.login-page .login-footer {
+        font-size: 0.75rem;
+        padding: 0.9rem 1rem 1.1rem;
+    }
+.login-page .login-footer .float-right {
+        float: none !important;
+        display: block;
+        margin-top: 0.3rem;
+    }
+}
+@media (max-height: 700px) {
+.login-page {
+        padding-top: 4.5rem;
+    }
+.login-page .login-card .login-header {
+        padding: 1.2rem;
+    }
+.login-page .login-card .login-body {
+        padding: 1.2rem;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+.login-page .login-bg .blob {
+        animation: none;
+    }
+.login-page .login-card {
+        animation: none;
+    }
+.login-page .login-card .btn-login,
+    .login-page .login-card .form-control,
+    .login-page .login-card .captcha-group img {
+        transition: none;
+    }
+}
+.login-page {
+    min-width: 0;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    background: #5476c9;
+    font-family: "Helvetica Neue", Helvetica, "Microsoft YaHei", "Hiragino Sans GB", SimSun, sans-serif;
+}
+.wow-login-page {
+    position: relative;
+    min-height: 100vh;
+    overflow: hidden;
+    color: #191e2d;
+}
+.wow-login-background {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 0.26), transparent 30%), radial-gradient(circle at 86% 86%, rgba(52, 197, 180, 0.2), transparent 32%), linear-gradient(135deg, #1b3468 0%, #2d529a 32%, #466ab2 58%, #6f9bd1 80%, #93bde4 100%);
+    background-position: center;
+    background-size: 180% 180%;
+    transform: scale(1.02);
+    animation: wow-bg-shift 20s ease-in-out infinite alternate;
+}
+.wow-login-background:before,
+.wow-login-background:after {
+    position: absolute;
+    border-radius: 50%;
+    content: "";
+    filter: blur(2px);
+}
+.wow-login-background:before {
+    top: 10%;
+    left: 7%;
+    width: 22vw;
+    height: 22vw;
+    min-width: 180px;
+    min-height: 180px;
+    background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05) 60%, transparent 72%);
+    animation: wow-float-a 16s ease-in-out infinite;
+}
+.wow-login-background:after {
+    right: 7%;
+    bottom: 9%;
+    width: 28vw;
+    height: 28vw;
+    min-width: 220px;
+    min-height: 220px;
+    background: radial-gradient(circle at 40% 40%, rgba(46, 214, 190, 0.16), rgba(46, 214, 190, 0.06) 58%, transparent 72%);
+    animation: wow-float-b 19s ease-in-out infinite;
+}
+.wow-login-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 42px 20px 88px;
+    box-sizing: border-box;
+}
+.wow-login-header {
+    position: relative;
+    margin-bottom: 2px;
+    color: #fff;
+    text-align: center;
+    text-shadow: rgba(0, 0, 0, 0.2) 0 0 6px;
+}
+.wow-login-title {
+    margin: 0 0 10px;
+    color: #fff;
+    font-size: clamp(26px, 3vw, 38px);
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 12px;
+    text-indent: 12px;
+}
+.wow-login-subtitle {
+    margin: 0 0 28px;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: clamp(11px, 1.1vw, 13px);
+    font-weight: 400;
+    letter-spacing: 4px;
+    text-indent: 4px;
+    text-transform: uppercase;
+}
+.wow-login-card {
+    position: relative;
+    overflow: hidden;
+    width: 400px;
+    box-sizing: border-box;
+    padding: 40px 35px 20px;
+    border: 1px solid rgba(255, 255, 255, 0.52);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 24px 60px rgba(19, 43, 96, 0.28), 0 4px 12px rgba(19, 43, 96, 0.12);
+    animation: wow-rise 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.wow-login-card:before {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #3d53f5, #6f9bd1 45%, #2ec6b4);
+    content: "";
+}
+.wow-language-switch {
+    height: 20px;
+    margin-bottom: 30px;
+    text-align: right;
+}
+.wow-language-switch > button {
+    padding: 0 0 5px;
+    border: 0;
+    border-bottom: 2px solid #3d53f5;
+    outline: 0;
+    color: #191e2d;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+}
+.wow-language-switch .language-list {
+    display: inline-block;
+    padding: 0;
+    margin: 0 0 0 20px;
+    list-style: none;
+    vertical-align: top;
+}
+.wow-language-switch .language-list li {
+    display: inline-block;
+    padding-bottom: 5px;
+    color: #74777a;
+    font-size: 12px;
+    cursor: pointer;
+}
+.wow-language-switch .language-list li a {
+    color: inherit;
+    text-decoration: none;
+}
+.wow-language-switch .language-list li img {
+    display: none;
+}
+.wow-login-form .form-group {
+    margin-bottom: 20px;
+}
+.wow-input-group {
+    position: relative;
+    display: flex;
+    height: 50px;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    background: #fff;
+    transition: border-color 0.2s ease;
+}
+.wow-input-group:focus-within {
+    border-color: #3d53f5;
+    box-shadow: 0 0 0 3px rgba(61, 83, 245, 0.12);
+}
+.wow-input-group:focus-within .wow-input-icon {
+    color: #3d53f5;
+}
+.wow-input-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    flex: 0 0 48px;
+    color: #b8bec5;
+    font-size: 16px;
+}
+.wow-input-icon:after {
+    position: absolute;
+    top: 4px;
+    right: 0;
+    width: 1px;
+    height: 40px;
+    background: #dcdfe6;
+    content: "";
+    transform: scaleX(0.7);
+}
+.wow-input-group .form-control {
+    min-width: 0;
+    height: 48px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 0 4px 4px 0;
+    outline: 0;
+    box-shadow: none;
+    color: #191e2d;
+    font-size: 16px;
+}
+.wow-input-group .form-control:focus {
+    border: 0;
+    box-shadow: none;
+}
+.wow-input-group .form-control::placeholder {
+    color: #b8bec5;
+}
+.wow-input-group .pwd-toggle {
+    position: absolute;
+    top: 0;
+    right: 8px;
+    width: 34px;
+    height: 48px;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    color: #b8bec5;
+    background: transparent;
+    cursor: pointer;
+}
+.wow-input-group .pwd-toggle:hover,
+.wow-input-group .pwd-toggle:focus {
+    color: #3d53f5;
+}
+.wow-input-group .login-pwd {
+    padding-right: 40px;
+}
+.wow-verification {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 42px;
+    margin-top: 30px;
+    margin-bottom: 24px !important;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    color: #74777a;
+    background: #f8f9fb;
+    font-size: 13px;
+}
+.wow-verification-label {
+    pointer-events: none;
+}
+.wow-verification .captcha-container {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    margin-left: 10px;
+}
+.wow-verification .captcha-img {
+    display: block;
+    height: 36px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.wow-captcha-input {
+    min-width: 0;
+    flex: 1;
+    height: 40px;
+    padding: 0 12px;
+    border: 0;
+    outline: 0;
+    color: #191e2d;
+    background: transparent;
+    font-size: 13px;
+}
+.wow-captcha-input::placeholder {
+    color: #74777a;
+}
+.wow-login-card .btn-login {
+    height: auto;
+    min-height: 48px;
+    margin: 2px 0 18px;
+    padding: 13px 0;
+    border: 1px solid #3d53f5;
+    border-radius: 4px;
+    color: #fff;
+    background: linear-gradient(135deg, #3d53f5 0%, #4f6df5 60%, #5a7cf7 100%);
+    box-shadow: 0 6px 16px rgba(61, 83, 245, 0.28);
+    font-size: 16px;
+    font-weight: 400;
+    letter-spacing: 2px;
+    transition: box-shadow 0.25s ease, transform 0.25s ease, background 0.25s ease;
+}
+.wow-login-card .btn-login:hover,
+.wow-login-card .btn-login:focus {
+    color: #fff;
+    background: linear-gradient(135deg, #4f6df5 0%, #5a7cf7 50%, #2ec6b4 130%);
+    border-color: #5a7cf7;
+    transform: translateY(-1px);
+    box-shadow: 0 10px 24px rgba(61, 83, 245, 0.36);
+}
+.wow-login-card .btn-login:active {
+    transform: translateY(0);
+}
+.wow-remember {
+    display: flex;
+    align-items: center;
+    margin: 0 0 16px;
+    color: #515560;
+    font-size: 13px;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+.wow-remember input {
+    width: 14px;
+    height: 14px;
+    margin: 0 5px 0 0;
+    accent-color: #3d53f5;
+    vertical-align: -2px;
+}
+.wow-login-card .login-alt {
+    margin: 0 0 6px;
+    color: #74777a;
+}
+.wow-login-card .login-alt a {
+    color: #3d53f5;
+}
+.login-page .navbar-login,
+.login-page .login-bg {
+    display: none;
+}
+html[theme="dark-mode"] .login-page {
+    background: #5476c9;
+}
+@media (max-width: 600px) {
+.wow-login-content {
+        padding: calc(28px + env(safe-area-inset-top, 0px)) 16px calc(76px + env(safe-area-inset-bottom, 0px));
+    }
+.wow-login-logo {
+        width: min(260px, 72vw);
+    }
+.wow-login-title {
+        margin-bottom: 8px;
+        font-size: 24px;
+        letter-spacing: 7px;
+        text-indent: 7px;
+    }
+.wow-login-subtitle {
+        margin-bottom: 20px;
+        font-size: 10px;
+        letter-spacing: 3px;
+        text-indent: 3px;
+    }
+.wow-login-card {
+        width: min(400px, 100%);
+        padding: 30px 24px 16px;
+        border-radius: 12px;
+    }
+}
+@media (max-width: 380px) {
+.wow-login-title {
+        font-size: 21px;
+        letter-spacing: 5px;
+        text-indent: 5px;
+    }
+.wow-login-card {
+        padding: 26px 18px 14px;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+.wow-login-background,
+    .wow-login-background:before,
+    .wow-login-background:after,
+    .wow-login-card {
+        animation: none;
+    }
+}
+@keyframes wow-bg-shift {
+    0% {
+        background-position: 0% 0%;
+    }
+
+    100% {
+        background-position: 100% 100%;
+    }
+}
+@keyframes wow-float-a {
+    0%,
+    100% {
+        transform: translate(0, 0) scale(1);
+    }
+
+    50% {
+        transform: translate(3vw, 5vh) scale(1.08);
+    }
+}
+@keyframes wow-float-b {
+    0%,
+    100% {
+        transform: translate(0, 0) scale(1);
+    }
+
+    50% {
+        transform: translate(-3vw, -4vh) scale(1.06);
+    }
+}
+@keyframes wow-rise {
+    from {
+        opacity: 0;
+        transform: translateY(22px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+@media (max-height: 700px) and (min-width: 601px) {
+.wow-login-content {
+        padding-top: 20px;
+        padding-bottom: 72px;
+    }
+.wow-login-title {
+        margin-bottom: 18px;
+    }
+.wow-login-card {
+        padding-top: 26px;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   首次登录强制改密弹层
+   ────────────────────────────────────────────────────────────────────
+   上游 sysuahb 无此流程（它没有强制改密），故本节为本产品新增。
+   配色与控件样式沿用同一套设计令牌，保证与登录卡片视觉同源：
+     · 品牌蓝 #3d53f5（与 .wow-login-card:before 顶部渐变一致）
+     · 卡片白底 / 14px 圆角 / 同一阴影
+     · 输入框直接复用 .wow-input-group
+   ════════════════════════════════════════════════════════════════════ */
+.pw-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(19, 43, 96, 0.55);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+}
+.pw-mask[hidden] { display: none; }
+
+.pw-card {
+    position: relative;
+    overflow: hidden;
+    width: 400px;
+    max-width: 100%;
+    padding: 34px 35px 26px;
+    margin: 0;
+    border: 1px solid rgba(255, 255, 255, 0.52);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 24px 60px rgba(19, 43, 96, 0.28), 0 4px 12px rgba(19, 43, 96, 0.12);
+    animation: wow-rise 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+/* 顶部渐变条：与 .wow-login-card:before 完全一致 */
+.pw-card:before {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #3d53f5, #6f9bd1 45%, #2ec6b4);
+    content: "";
+}
+.pw-title {
+    margin: 0 0 6px;
+    color: #191e2d;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+.pw-sub {
+    margin: 0 0 22px;
+    color: #74777a;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.pw-bar {
+    height: 4px;
+    margin: -8px 0 6px;
+    border-radius: 2px;
+    background: #e5e7eb;
+    overflow: hidden;
+}
+.pw-bar i {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: 2px;
+    background: #e5e7eb;
+    transition: width 0.25s ease, background 0.25s ease;
+}
+.pw-tip {
+    min-height: 16px;
+    margin-bottom: 4px;
+    color: #74777a;
+    font-size: 12px;
+}

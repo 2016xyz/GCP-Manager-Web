@@ -8,6 +8,7 @@
    不再像原版那样把 `e2-micro + Ubuntu Minimal 22.04 + pd-standard 30GB` 硬编码在源码常量里。
 2. **Vue 3 响应式控制台** —— 手机 / 平板 / 电脑自适应，配色依据色彩心理学选型。
 3. **登录鉴权** —— 账号 + 密码 + 图形验证码，多角色权限，后台可改密、可加用户。
+   登录页视觉对齐 [2016xyz/sysuahb](https://github.com/2016xyz/sysuahb)（见「登录页设计」一节）。
 
 对齐 v7.4+ 的**极致省钱**默认行为：
 
@@ -172,7 +173,73 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ---
 
-## 二、响应式与视觉设计
+## 二、登录页设计（对齐 sysuahb）
+
+登录页的 DOM 结构、类名、CSS 与交互逐项对齐
+[2016xyz/sysuahb](https://github.com/2016xyz/sysuahb) 的
+`web/views/login/index.html` 与 `web/static/css/style.css`。
+
+### 复刻范围
+
+| 项 | 来源 | 本仓库位置 |
+|---|---|---|
+| 页面结构（`wow-login-*` 全套类名与层级） | 上游 `web/views/login/index.html` | `static/login.html` |
+| 登录相关全部 CSS（含 5 组断点） | 上游 `web/static/css/style.css` 提取 | `static/login.css` |
+| 字体图标 FontAwesome 5 Solid | 上游 `web/static/css/*` + `webfonts/` | `static/vendor/fontawesome/` |
+| Bootstrap 4 基线 | 上游 `web/static/css/bootstrap.min.css` | `static/vendor/bootstrap.min.css` |
+| jQuery 3.7.1 | 上游 `web/static/js/jquery-3.7.1.min.js` | `static/vendor/jquery-3.7.1.min.js` |
+| `showMsg` 居中提示遮罩 | 上游 `web/static/js/language.js` | `static/login.html` 内联 |
+| `togglePwd` 密码可见切换 | 上游同名函数 | `static/login.html` 内联 |
+
+资源**全部本地托管**，无 CDN 依赖，内网可用。
+
+### 保留的设计细节
+
+- 背景：`#1b3468 → #2d529a → #466ab2 → #6f9bd1 → #93bde4` 多段渐变 + 两个浮动光斑
+  （`wow-bg-shift` / `wow-float-a` / `wow-float-b` 三组动画）
+- 卡片：400px 宽、14px 圆角、顶部 3px 渐变色条 `#3d53f5 → #6f9bd1 → #2ec6b4`
+- 标题「统一协同平台」`letter-spacing: 12px`，副标题大写 + `letter-spacing: 4px`
+- 输入框：左侧图标 + 栅格分隔线、`:focus-within` 变品牌蓝、16px 字号
+- 按钮：`#3d53f5 → #4f6df5 → #5a7cf7` 渐变 + 字间距 2px
+- 断点：`576-991.98` / `≤600` / `≤380` / `max-height:700` / `prefers-reduced-motion`
+- 记住账号：沿用上游 `localStorage` 键名 `nps_login_username`
+- 语言切换：按上游方式由 `li[lang]` 驱动，按钮显示语言全名
+
+### 与上游的两处有意差异
+
+**1. 修掉了上游登录按钮的常驻加载圈**
+
+上游 `style.css` 里隐藏 spinner 的选择器写成了：
+
+```css
+.login-page .login-card .btn-login .btn-spinner { display: none; }
+```
+
+但登录页实际用的容器类是 `.wow-login-card`，并不匹配 `.login-card`
+—— 这是它从旧版 `.login-card` 布局迁移到 `.wow-login-card` 时漏改的选择器。
+结果是登录按钮右侧的 `circle-notch` 图标**常驻显示且一直在转**，
+让按钮看起来永远停在"加载中"。
+
+本仓库补上了 `.wow-login-card .btn-login .btn-spinner`，让 spinner 只在 `.loading` 时出现。
+若要连这个现象一起复刻，删掉 `static/login.css` 里那两条规则即可。
+
+**2. 验证码与提交协议沿用本产品自己的后端**
+
+上游用 RSA + nonce + PoW 的登录协议，本产品用的是
+`/api/auth/captcha` + `/api/auth/login`（PBKDF2 + 图形验证码 + 登录限速）。
+视觉与交互一致，协议不外借。上游的 `pow-worker.js` 因此未移植 ——
+本产品后端不校验 PoW，移植过来只会是无用的等待。
+
+### 一处顺带修掉的既有缺陷
+
+后端错误走 `HTTPException`，响应体是 `{"detail": "..."}`；
+而登录页原来只读 `r.error`，**永远拿到 `undefined`**，
+导致"验证码错误"/"用户名或密码错误"这些具体原因全部被吞成通用提示。
+现已同时读 `error` 与 `detail`。
+
+---
+
+## 三、响应式与视觉设计
 
 ### 断点策略
 
@@ -219,7 +286,7 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ---
 
-## 三、与原版 v7.6 对照 + 需求功能落地
+## 四、与原版 v7.6 对照 + 需求功能落地
 
 | 能力 | 原版 v7.6（PyQt6 桌面） | 本 Web 版 |
 |---|---|---|
@@ -272,7 +339,7 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ---
 
-## 四、可自定义的服务器配置项
+## 五、可自定义的服务器配置项
 
 **机型**（33 种，按区域自动过滤可用性）
 
@@ -307,7 +374,7 @@ STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
 
 ---
 
-## 五、REST API
+## 六、REST API
 
 基础地址 `http://<host>:<port>`，交互式文档 `/docs`。
 除公开接口外，全部需要登录（Cookie `gcp_sid`，也支持 `Authorization: Bearer <token>`）。
@@ -396,7 +463,7 @@ curl -b /tmp/cj -X POST http://127.0.0.1:8000/api/create \
 
 ---
 
-## 六、目录结构
+## 七、目录结构
 
 ```
 gcp-manager-web/
@@ -422,19 +489,21 @@ gcp-manager-web/
 ├── docker-compose.yml     compose 部署（默认只绑本机 + 命名卷持久化）
 ├── .dockerignore          镜像构建忽略清单
 ├── requirements.txt       Python 依赖
-├── tests_e2e.py           端到端验证（214 项，无需真实 GCP 账号）
+├── tools/
+│   └── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
+├── tests_e2e.py           端到端验证（236 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
 ---
 
-## 七、验证
+## 八、验证
 
 ```bash
 python3 tests_e2e.py
 ```
 
-共 214 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 236 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -451,6 +520,14 @@ python3 tests_e2e.py
 - **F2. 实例操作**（6 项）：非本工具创建的实例（预存在的、原版桌面工具建的）
   也能被 start/stop/reset/delete；本地无记录时遍历账号按名字定位真实 zone；
   找不到时给出明确原因而非静默跳过；找不到时不执行任何动作
+
+- **H. 登录页对齐 sysuahb**（22 项）：`wow-login-*` 结构齐全、标题与副标题、
+  FontAwesome 图标、`togglePwd` / `showMsg` / `nps_login_username` 与上游同名、
+  语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
+  `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
+  16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
+- **I. 测试夹具隔离**（3 项）：产品 `app.py` 无任何 `__probe` 路由、
+  运行中的 app 无 `__probe` 路由、夹具强制只监听 127.0.0.1
 
 - **G. 安装与部署产物**（28 项）：`install.sh` / `run.sh` 语法检查、
   依赖失败自动换源（PyPI→清华→阿里云）、耗时兜底而非仅探测连通性、
@@ -470,7 +547,7 @@ python3 tests_e2e.py
 
 ---
 
-## 八、实测记录（真实 GCP 项目）
+## 九、实测记录（真实 GCP 项目）
 
 用真实服务账号 `80717428802-compute@developer.gserviceaccount.com`
 （项目 `sincere-axon-354618`）端到端跑通，非 mock。
@@ -547,7 +624,7 @@ inode 与时间戳完全不变。
 
 ---
 
-## 九、安全说明
+## 十、安全说明
 
 - **服务账号 JSON 与 Root 密码是高敏感数据**：`data/` 目录不要提交到公开仓库
   （`.gitignore` 已排除）。

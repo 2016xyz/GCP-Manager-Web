@@ -245,6 +245,16 @@ check("未登录访问 / → 302 跳登录页", r.status_code == 302 and "/login
       f"{r.status_code} {r.headers.get('location')}")
 r = client.get("/login")
 check("登录页可匿名访问", r.status_code == 200 and "验证码" in r.text)
+# 测试夹具（tools/ui_login_probe.py）会暴露验证码明文，绝不能出现在产品里
+check("★ 产品代码 app.py 不含任何 __probe 调试路由",
+      "__probe" not in open(os.path.join(BASE_DIR, "app.py"), encoding="utf-8").read())
+check("★ 运行中的 app 也没有 __probe 路由",
+      not any("__probe" in getattr(r, "path", "") for r in appmod.app.routes),
+      str([getattr(r, "path", "") for r in appmod.app.routes if "__probe" in getattr(r, "path", "")]))
+check("★ 夹具强制只监听 127.0.0.1",
+      'HOST = "127.0.0.1"' in open(os.path.join(BASE_DIR, "tools", "ui_login_probe.py"),
+                                   encoding="utf-8").read())
+
 r = client.get("/static/vendor/vue.global.prod.js")
 check("静态资源可匿名访问（Vue 本地托管）", r.status_code == 200 and "vue v3" in r.text[:80],
       str(r.status_code))
@@ -827,9 +837,61 @@ check("★ 前端防火墙文案标注「默认关闭」",
 
 lh = client.get("/login").text
 check("登录页返回", "验证码" in lh and "captcha" in lh)
-check("登录页含响应式断点", "@media (max-width:520px)" in lh and "@media (max-width:360px)" in lh)
-check("登录页字号 ≥16px 防 iOS 缩放", "font-size:16px" in lh)
-check("登录页配色心理学注释", "配色心理学" in lh)
+
+# ── 登录页视觉：逐项对齐上游 sysuahb 的设计 ──
+# 上游 web/views/login/index.html + web/static/css/style.css 中的
+# login-page / wow-login-* 规则。这些断言就是「与上游一致」的清单。
+check("★ 登录页采用上游 wow-login 结构",
+      all(k in lh for k in ('wow-login-page', 'wow-login-background', 'wow-login-content',
+                            'wow-login-header', 'wow-login-card', 'wow-input-group',
+                            'wow-verification', 'wow-remember', 'wow-language-switch')))
+check("★ 标题与副标题与上游一致",
+      "统一协同平台" in lh and "Unified Collaboration Platform" in lh)
+check("★ 输入框左侧图标为上游同款 FontAwesome 图标",
+      'fas fa-user' in lh and 'fas fa-lock' in lh and 'fas fa-eye' in lh)
+check("★ 密码可见切换沿用上游同名函数 togglePwd", "function togglePwd" in lh)
+check("★ 记住账号沿用上游 localStorage 键名",
+      "nps_login_username" in lh)
+check("★ 提示遮罩沿用上游 showMsg（深色底 #2e2d3c）",
+      "function showMsg" in lh and "2e2d3c" in lh)
+check("★ 语言切换按上游方式（li[lang] + 按钮取语言全名）",
+      'lang="zh-CN"' in lh and 'lang="en-US"' in lh and "languagemenu" in lh)
+check("★ 资源全部本地托管（无 CDN 外链）",
+      "/static/vendor/" in lh and "http://cdn" not in lh and "https://cdn" not in lh
+      and "unpkg" not in lh and "jsdelivr" not in lh)
+check("★ 未残留上游 Go 模板变量（除注释外）",
+      lh.count("{{") <= 1, f"{{{{ 出现 {lh.count('{{')} 次")
+
+lc = client.get("/static/login.css").text
+check("★ 登录页样式表为上游同源提取（含品牌色 #3d53f5）",
+      "#3d53f5" in lc and "linear-gradient(90deg, #3d53f5, #6f9bd1 45%, #2ec6b4)" in lc)
+check("★ 含上游背景渐变与光斑动画",
+      "wow-bg-shift" in lc and "wow-float-a" in lc and "wow-float-b" in lc and "wow-rise" in lc)
+check("★ 含上游响应式断点",
+      "@media (max-width: 600px)" in lc and "@media (max-width: 380px)" in lc
+      and "@media (min-width: 576px) and (max-width: 991.98px)" in lc)
+check("★ 尊重系统减少动效偏好", "prefers-reduced-motion" in lc)
+check("★ 输入框字号 16px（上游值，同时避免 iOS 聚焦缩放）",
+      "font-size: 16px" in lc)
+check("★ 保留了上游的配色心理学说明注释",
+      "psychology palette" in lc or "配色" in lc)
+check("★ 已修正上游 spinner 选择器漏配问题",
+      ".wow-login-card .btn-login .btn-spinner { display: none; }" in lc)
+
+# 登录页 JS 必须能读到后端的具体错误原因。
+# 缺陷：后端用 HTTPException，响应体是 {"detail": "..."}；
+# 只读 r.error 会永远 undefined，导致所有具体原因被吞成通用提示。
+check("★ 登录页读取后端 detail 字段（否则错误原因全被吞）",
+      "r.error || r.detail" in lh)
+
+# FontAwesome 本地资源必须齐全，否则图标全变方块
+for _f in ("/static/vendor/fontawesome/css/fontawesome.min.css",
+           "/static/vendor/fontawesome/css/solid.min.css",
+           "/static/vendor/fontawesome/webfonts/fa-solid-900.woff2",
+           "/static/vendor/bootstrap.min.css",
+           "/static/vendor/jquery-3.7.1.min.js"):
+    _r = client.get(_f)
+    check(f"★ 本地资源可用 {_f.split('/')[-1]}", _r.status_code == 200, str(_r.status_code))
 
 r = client.get("/static/vendor/vue.global.prod.js")
 check("Vue 3 本地托管可用", r.status_code == 200 and len(r.text) > 100000, str(len(r.text)))
