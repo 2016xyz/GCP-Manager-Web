@@ -889,6 +889,35 @@ if _inst:
     check("★ install.sh 支持 NO_SERVICE / PORT / APP_DIR 覆盖",
           "NO_SERVICE" in _inst and "PORT=" in _inst and "APP_DIR=" in _inst)
 
+    # ── 管道模式自举：curl | bash 时仓库并不在本地，必须能自己把源码弄下来 ──
+    # 真实缺陷：早期版本用 $(dirname "${BASH_SOURCE[0]}") 取目录，在 set -u 下
+    # 管道模式直接报「BASH_SOURCE[0]：未绑定的变量」，且因为拿不到仓库而
+    # 立刻以「找不到 app.py」失败 —— 文档里那条一键命令根本跑不通。
+    check("★ 管道模式下 BASH_SOURCE 带默认值（set -u 不炸）",
+          'SELF="${BASH_SOURCE[0]:-}"' in _inst)
+    check("★ 缺 app.py 时自动下载源码（git clone）",
+          "git clone --depth 1" in _inst and "fetch_repo" in _inst)
+    check("★ git 不可用时退到 tarball 兜底",
+          "archive/refs/heads" in _inst and "tar xzf" in _inst)
+    check("★ 提供 ONLY_FETCH 仅下载模式",
+          "ONLY_FETCH" in _inst)
+    check("★ 环境变量 PORT 被继承时明确提示",
+          "PORT_WAS_SET" in _inst and "来自环境变量 PORT" in _inst)
+
+    # 端到端：模拟管道模式（无 BASH_SOURCE）执行 ONLY_FETCH，验证真能自举
+    _tmp = tempfile.mkdtemp(prefix="gcpweb-inst-")
+    _pipe = _sp.run(
+        ["bash", "-c",
+         f'cat "{BASE_DIR}/install.sh" | ONLY_FETCH=1 REPO_URL="{BASE_DIR}" bash'],
+        cwd=_tmp, capture_output=True, text=True, timeout=180)
+    _dst = os.path.join(_tmp, "gcp-manager-web", "app.py")
+    check("★ 管道模式实测：能自举出源码（无 BASH_SOURCE 报错）",
+          _pipe.returncode == 0 and os.path.exists(_dst),
+          f"rc={_pipe.returncode} app.py={os.path.exists(_dst)} "
+          f"err={(_pipe.stderr or '')[-160:]}")
+    check("★ 管道模式实测：标准错误里无「未绑定的变量」",
+          "未绑定" not in (_pipe.stderr or ""), (_pipe.stderr or "")[-160:])
+
 if _docker:
     check("★ Dockerfile 用非 root 用户运行", "USER appuser" in _docker)
     check("★ Dockerfile 带健康检查", "HEALTHCHECK" in _docker)

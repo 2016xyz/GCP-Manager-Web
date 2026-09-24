@@ -3,7 +3,10 @@
 #  GCP Manager Web · 一键安装 / 部署脚本
 #
 #  用法：
-#    直接运行（会自动识别系统、装依赖、建服务、启动）
+#    一键（自动下载源码 + 装环境 + 建服务 + 启动）
+#        curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh | bash
+#
+#    在已克隆的仓库里运行
 #        bash install.sh
 #
 #    指定端口 / 监听地址 / 安装目录
@@ -12,14 +15,32 @@
 #    不装 systemd 服务，只把环境装好（适合容器或手动启动）
 #        NO_SERVICE=1 bash install.sh
 #
+#    只下载源码不安装
+#        ONLY_FETCH=1 bash install.sh
+#
 #  支持：Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora
-#  幂等：可重复执行，已存在的环境不会重复安装
+#  幂等：可重复执行，已存在的环境不会重复安装，不会覆盖既有数据
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+REPO_URL="${REPO_URL:-https://github.com/2016xyz/GCP-Manager-Web.git}"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+REPO_TARBALL="${REPO_TARBALL:-https://github.com/2016xyz/GCP-Manager-Web/archive/refs/heads/${REPO_BRANCH}.tar.gz}"
+
+# 关键：管道模式（curl | bash）下 BASH_SOURCE[0] 未定义，
+# 而 set -u 会让直接引用直接报错退出。必须带默认值取。
+SELF="${BASH_SOURCE[0]:-}"
+if [ -n "$SELF" ] && [ -f "$SELF" ]; then
+  SRC_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+else
+  SRC_DIR=""            # 管道模式：没有本地源码，待会下载
+fi
+
+PORT_WAS_SET="${PORT:+yes}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
-APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# 有本地源码就地安装；管道模式装到 ./gcp-manager-web
+APP_DIR="${APP_DIR:-${SRC_DIR:-$PWD/gcp-manager-web}}"
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 SERVICE_NAME="${SERVICE_NAME:-gcp-manager-web}"
 PY="${PYTHON:-python3}"
@@ -38,13 +59,63 @@ PIP_TIMEOUT="${PIP_TIMEOUT:-300}"
 
 printf "\n===========================================\n"
 printf "  GCP Manager Web · 安装程序\n"
-printf "  目录 %s  端口 %s\n" "$APP_DIR" "$PORT"
+printf "  目录 %s\n" "$APP_DIR"
+if [ -n "$PORT_WAS_SET" ]; then
+  printf "  端口 %s ${C_DIM}(来自环境变量 PORT，非默认 8000)${C_0}\n" "$PORT"
+else
+  printf "  端口 %s\n" "$PORT"
+fi
 printf "===========================================\n"
 
-# ── 0. 前置检查 ────────────────────────────────────────────────────────────
+# ── 0. 前置检查 + 自举下载源码 ─────────────────────────────────────────────
 step "检查运行环境"
 
-[ -f "$APP_DIR/app.py" ] || die "在 $APP_DIR 找不到 app.py，请在项目根目录运行本脚本"
+fetch_repo() {
+  # 优先 git clone（能带出 .git 便于后续升级）；无 git 则退到 tarball
+  mkdir -p "$(dirname "$APP_DIR")"
+  if command -v git >/dev/null 2>&1; then
+    info "git clone --depth 1 $REPO_URL"
+    if git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$APP_DIR" 2>&1 | tail -2; then
+      return 0
+    fi
+    rm -rf "$APP_DIR" 2>/dev/null || true
+    warn "git clone 失败，改用 tarball"
+  fi
+
+  command -v curl >/dev/null 2>&1 || die "需要 git 或 curl 之一下载源码"
+  local tmp
+  tmp="$(mktemp -d)"
+  info "下载 $REPO_TARBALL"
+  curl -fsSL "$REPO_TARBALL" -o "$tmp/src.tar.gz" || { rm -rf "$tmp"; return 1; }
+  tar xzf "$tmp/src.tar.gz" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+  local inner
+  inner="$(find "$tmp" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  [ -n "$inner" ] || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$APP_DIR"
+  cp -a "$inner"/. "$APP_DIR"/
+  rm -rf "$tmp"
+  return 0
+}
+
+if [ ! -f "$APP_DIR/app.py" ]; then
+  # 本地源码目录直接就地用；否则下载
+  if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/app.py" ] && [ "$SRC_DIR" != "$APP_DIR" ]; then
+    info "从 $SRC_DIR 复制源码到 $APP_DIR"
+    mkdir -p "$APP_DIR"
+    cp -a "$SRC_DIR"/. "$APP_DIR"/
+  else
+    warn "在 $APP_DIR 未找到 app.py，开始下载项目源码…"
+    fetch_repo || die "下载源码失败，请检查网络或手动 git clone 后重试"
+  fi
+fi
+
+[ -f "$APP_DIR/app.py" ] || die "在 $APP_DIR 仍找不到 app.py，安装中止"
+ok "源码就绪：$APP_DIR"
+
+if [ "${ONLY_FETCH:-0}" = "1" ]; then
+  printf "\n  ${C_OK}ONLY_FETCH=1${C_0}：源码已下载到 %s，未执行安装\n\n" "$APP_DIR"
+  exit 0
+fi
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
