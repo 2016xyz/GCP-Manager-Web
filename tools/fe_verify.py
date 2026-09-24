@@ -19,54 +19,12 @@ from playwright.sync_api import sync_playwright
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/fe_shots"
 os.makedirs(OUT, exist_ok=True)
 
-ADMIN, PW = "admin", "Adm1n@GCP2026!"
+import _fixtures as FX  # noqa: E402  同目录夹具：管理员密码统一从 data/INITIAL_ADMIN.txt 读
+ADMIN, PW = FX.ADMIN_USER, FX.admin_password()
 LOGIN = "http://127.0.0.1:8001/login"
 CONSOLE = "http://127.0.0.1:8001/"
 
-FAKE_INSTANCES = [
-    {"name": "vm-1-48904-1-7286", "ip": "34.136.20.11", "private_ip": "10.128.0.2",
-     "zone": "us-central1-a", "region": "us-central1",
-     "location": "us-central1 (爱荷华)", "status": "RUNNING",
-     "machine_type": "e2-micro", "disk_type": "pd-standard", "disk_size_gb": 30,
-     "image": "ubuntu-2204-jammy-v20260901", "image_source": "", "created": "", "created_ts": 0,
-     "preemptible": False, "spot": False, "project_id": "p1",
-     "account_email": "gcp-manager-svc@sincere-axon-354618.iam.gserviceaccount.com",
-     "account_id": 1, "account_label": "主力账号", "has_password": True,
-     "note": "客户A环境", "installs": ["docker", "nps"],
-     "cost": {"hourly_usd": 0.010055, "daily_usd": 0.2413, "used_usd": 3.618,
-              "used_hours": 359.8, "free_tier": True,
-              "free_tier_reason": "规格落在 Always Free 额度内", "priced": True},
-     "spec": {"machine_type": "e2-micro", "image_key": "ubuntu-2204-lts",
-              "disk_type": "pd-standard", "disk_size_gb": 30}},
-    {"name": "vm-2-48904-3-9911", "ip": "104.199.7.88", "private_ip": "10.140.0.3",
-     "zone": "asia-east1-b", "region": "asia-east1",
-     "location": "asia-east1 (台湾)", "status": "TERMINATED",
-     "machine_type": "n2-standard-4", "disk_type": "pd-ssd", "disk_size_gb": 100,
-     "image": "debian-12-bookworm-v20260101", "image_source": "", "created": "", "created_ts": 0,
-     "preemptible": False, "spot": True, "project_id": "p2",
-     "account_email": "very-long-service-account-name@extremely-long-project-id-123456.iam.gserviceaccount.com",
-     "account_id": 2, "account_label": "", "has_password": False,
-     "note": "", "installs": [],
-     "cost": {"hourly_usd": 0.0207, "daily_usd": 0.497, "used_usd": 12.44,
-              "used_hours": 601.2, "free_tier": False,
-              "free_tier_reason": "不免费：机型 n2-standard-4 不是 e2-micro", "priced": True},
-     "spec": {"machine_type": "n2-standard-4", "image_key": "debian-12",
-              "disk_type": "pd-ssd", "disk_size_gb": 100}},
-]
 
-FAKE_ACCOUNTS = [
-    {"id": 1, "email": "gcp-manager-svc@sincere-axon-354618.iam.gserviceaccount.com",
-     "project_id": "sincere-axon-354618", "label": "主力账号", "key_file": "sa1.json",
-     "key_exists": True, "proxy_set": True, "proxy_ok": True, "proxy_error": "",
-     "proxy_type": "SOCKS5H", "proxy_type_label": "SOCKS5（代理端解析 DNS，推荐）",
-     "proxy_has_auth": True, "proxy_display": "socks5h://proxyuser:***@203.0.113.9:1080",
-     "proxy_host": "203.0.113.9", "proxy_port": "1080"},
-    {"id": 2, "email": "another-very-long-account-address@another-long-project-99.iam.gserviceaccount.com",
-     "project_id": "another-long-project-99", "label": "", "key_file": "sa2.json",
-     "key_exists": True, "proxy_set": False, "proxy_ok": True, "proxy_error": "",
-     "proxy_type": "HTTPS", "proxy_type_label": "HTTPS 代理（HTTP CONNECT）",
-     "proxy_has_auth": False, "proxy_display": "", "proxy_host": "", "proxy_port": ""},
-]
 
 # ── 把注入用的实例真正写进本地库 ──────────────────────────────
 # /api/instances/password 是**从库里读 root 密码**的。只在 Vue 状态里造数据的话，
@@ -81,7 +39,7 @@ _db = os.path.join(ROOT, "data", "gcp_web.db")
 _store = Store(_db)
 SEEDED = []
 SEED_PW = {}
-for _i in FAKE_INSTANCES:
+for _i in FX.FAKE_INSTANCES:
     if _i["has_password"]:
         _pw = "R00t-" + _i["name"][-4:] + "!Aa1"
         _store.save_vm(_i["name"], _i["ip"], _pw, _i["account_id"], _i["zone"],
@@ -129,7 +87,7 @@ def inject_inst(pg, v):
     这是测试环境的时序问题，不是产品缺陷，所以测试侧自己保证注入有效。
     """
     pg.evaluate(f"""() => {{
-        {v}.instances = {json.dumps(FAKE_INSTANCES, ensure_ascii=False)};
+        {v}.instances = {json.dumps(FX.FAKE_INSTANCES, ensure_ascii=False)};
         {v}.instErrors = [];
     }}""")
     pg.wait_for_timeout(350)
@@ -155,8 +113,8 @@ with sync_playwright() as p:
     # ── 注入数据 ──────────────────────────────────────────────
     pg.evaluate(f"""() => {{
         const c = {v};
-        c.instances = {json.dumps(FAKE_INSTANCES, ensure_ascii=False)};
-        c.accounts = {json.dumps(FAKE_ACCOUNTS, ensure_ascii=False)};
+        c.instances = {json.dumps(FX.FAKE_INSTANCES, ensure_ascii=False)};
+        c.accounts = {json.dumps(FX.FAKE_ACCOUNTS, ensure_ascii=False)};
         c.instErrors = [];
     }}""")
     pg.wait_for_timeout(500)
@@ -204,7 +162,7 @@ with sync_playwright() as p:
     pg.wait_for_function(f"() => {v}.loadingInst === false", timeout=60000)
     pg.wait_for_timeout(1200)
     pg.evaluate(f"""() => {{
-        {v}.instances = {json.dumps(FAKE_INSTANCES, ensure_ascii=False)};
+        {v}.instances = {json.dumps(FX.FAKE_INSTANCES, ensure_ascii=False)};
         {v}.instErrors = [];
     }}""")
     pg.wait_for_timeout(400)
@@ -318,7 +276,7 @@ with sync_playwright() as p:
     pg.evaluate(f"""() => {{ {v}.go('accounts'); }}""")
     pg.wait_for_timeout(1800)
     pg.evaluate(f"""() => {{
-        {v}.accounts = {json.dumps(FAKE_ACCOUNTS, ensure_ascii=False)};
+        {v}.accounts = {json.dumps(FX.FAKE_ACCOUNTS, ensure_ascii=False)};
     }}""")
     pg.wait_for_timeout(400)
     r = pg.evaluate("""() => {
