@@ -1563,6 +1563,46 @@ check("★ PATCH/POST 用专用助手而非两参 api()",
       "this.patch('/api/instances/note'" in _ct4
       and "this.post('/api/instances/password'" in _ct4)
 
+# pydantic 会丢弃模型未声明的字段 —— 少写就静默失效，不报错，最难查
+_M = appmod.CreateRequest.model_fields
+check("★ CreateRequest 声明了 note（否则备注传不到后端，且不报错）",
+      "note" in _M, str(list(_M)))
+check("★ CreateRequest 声明了 installs（否则勾选的预设静默丢失）",
+      "installs" in _M, str(list(_M)))
+
+# 端到端跑一遍 dry-run，确认安装脚本真的被拼进 post_command
+_seen = {}
+_orig = appmod.tm.submit_create
+appmod.tm.submit_create = lambda p: (_seen.update(p), {"ok": True})[1]
+try:
+    client.post("/api/create", json={"count": 1, "spec": {"machine_type": "e2-micro"},
+                                     "dry_run": True, "note": "N段备注",
+                                     "installs": ["docker", "nps"],
+                                     "post_command": "", "verify_command": ""})
+finally:
+    appmod.tm.submit_create = _orig
+check("★ dry-run 时备注到达后端", _seen.get("note") == "N段备注", repr(_seen.get("note")))
+check("★ dry-run 时安装项已归一化", _seen.get("installs") == ["docker", "nps"],
+      str(_seen.get("installs")))
+_pc = _seen.get("post_command") or ""
+check("★ 勾选的预设被拼进 post_command",
+      "===== [docker]" in _pc and "===== [nps]" in _pc and "[3x-ui]" not in _pc)
+check("★ 未勾选验证命令时自动从预设生成",
+      "docker --version" in (_seen.get("verify_command") or ""))
+
+# 自己写了命令时，预设追加而非覆盖
+_seen.clear()
+appmod.tm.submit_create = lambda p: (_seen.update(p), {"ok": True})[1]
+try:
+    client.post("/api/create", json={"count": 1, "spec": {"machine_type": "e2-micro"},
+                                     "dry_run": True, "installs": ["docker"],
+                                     "post_command": "echo 我的命令"})
+finally:
+    appmod.tm.submit_create = _orig
+_pc2 = _seen.get("post_command") or ""
+check("★ 用户自写的安装命令不被预设覆盖（预设追加在后）",
+      "echo 我的命令" in _pc2 and _pc2.index("echo 我的命令") < _pc2.index("[docker]"))
+
 check("★ favicon 路由已注册（消除每页一个 404）",
       client.get("/favicon.ico").status_code == 200)
 

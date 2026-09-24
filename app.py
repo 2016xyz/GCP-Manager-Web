@@ -232,6 +232,12 @@ class CreateRequest(BaseModel):
     root_password: str | None = ""
     post_command: str | None = ""
     verify_command: str | None = ""
+    # 机器备注（创建后可在实例列表修改）。
+    # 注意：pydantic 会**丢弃**模型里没声明的字段，前端传了也到不了后端 ——
+    # 少写这两个字段会导致备注和安装项静默消失（不是报错，更难发现）。
+    note: str | None = ""
+    # 创建后自动安装的预设 key 列表（docker / 3x-ui / nps / hermes / ekko）
+    installs: list[str] | None = None
     concurrency: int | None = 3
     account_workers: int | None = 1
     retry_count: int | None = 2
