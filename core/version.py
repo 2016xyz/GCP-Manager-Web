@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,17 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.1.1",
+        "date": "2026-09-25",
+        "notes": [
+            "修复：`curl … | sh </dev/null` 的 stdin 重定向会覆盖管道，"
+            "导致 Docker / nps / Hermes 的安装脚本内容被丢弃（curl 报 23）",
+            "远程脚本统一改为「先下载到临时文件，再以 </dev/null 执行」",
+            "nps 换源：ehang-io/nps（2021 起停更）→ 2016xyz/sysuahb（djylb/nps v0.34.7）",
+            "nps 由容器实测验证：随机进程名、面板 302 → /login/index 均正常",
+        ],
+    },
     {
         "version": "1.1.0",
         "date": "2026-09-25",

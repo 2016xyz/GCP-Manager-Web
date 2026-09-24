@@ -37,7 +37,7 @@ INSTALL_PRESETS = {
 # Docker 官方便利脚本（官网推荐，自动配 apt 源并装 docker-ce + compose 插件）。
 # 重复执行会升级到最新版，不报错。
 export DEBIAN_FRONTEND=noninteractive
-curl -fsSL https://get.docker.com | sh </dev/null
+_run_remote https://get.docker.com
 systemctl enable --now docker >/dev/null 2>&1 || true
 """,
         "verify": "docker --version && docker compose version",
@@ -69,9 +69,9 @@ export XUI_PASSWORD="$XUI_PASS"
 # 显式指定 sqlite，绕开 PostgreSQL 那条交互分支（该分支在非交互下会直接 abort）
 export XUI_DB_TYPE="sqlite"
 export XUI_WEB_BASE_PATH="$XUI_PATH"
-# </dev/null 是兜底：万一上游新增了未守卫的 read，读到 EOF 立刻返回，
-# 而不是让无人值守的创建任务永远挂在这里。
-bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) </dev/null || true
+# 走 _run_remote：脚本落到文件再执行，stdin 接 /dev/null，
+# 万一上游新增了未守卫的 read，会读到 EOF 立刻返回而不是把任务挂死。
+_run_remote https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh || true
 # 官方脚本会把最终凭据写到 /etc/x-ui/install-result.env（mode 600），
 # 直接读回来打印 —— 这是权威值，比我猜的变量名可靠。
 if [ -f /etc/x-ui/install-result.env ]; then
@@ -92,30 +92,62 @@ fi
 
     # ------------------------------------------------------------------
     "nps": {
-        "label": "nps 内网穿透服务端",
-        "desc": "轻量内网穿透，带 Web 管理端",
-        "version": "v0.26.10（2021-04-08，此后无新版本）",
-        "docs": "https://github.com/ehang-io/nps",
+        "label": "NPS 内网穿透服务端（sysuahb）",
+        "desc": "djylb/nps v0.34.7 改名重打包版，随机进程名",
+        "version": "v0.34.7（2026-09-14）",
+        "docs": "https://github.com/2016xyz/sysuahb",
         "script": r"""
 export DEBIAN_FRONTEND=noninteractive
-NPS_VER="v0.26.10"
-# 官方 release 直链（实测 HTTP 200，5713067 字节）
-cd /tmp || exit 1
-curl -fL --retry 3 -o nps.tar.gz \
-  "https://github.com/ehang-io/nps/releases/download/${NPS_VER}/linux_amd64_server.tar.gz" || { echo "nps 下载失败"; exit 0; }
-mkdir -p /tmp/nps_pkg && tar -zxvf nps.tar.gz -C /tmp/nps_pkg >/dev/null 2>&1
-cd /tmp/nps_pkg || exit 0
-# nps install 会写 systemd 单元；已存在时会报错，先探测避免任务被判失败
-if [ ! -f /etc/systemd/system/nps.service ] && [ ! -d /etc/nps ]; then
-  ./nps install >/dev/null 2>&1 </dev/null || true
+# ── 为什么用这个源而不是 ehang-io/nps ─────────────────────────────
+# 原版 ehang-io/nps 最后一次发版是 2021-04（v0.26.10），已停更 4 年多。
+# 本预设改用 2016xyz/sysuahb —— 它基于 djylb/nps v0.34.7 重新打包，
+# 是社区持续维护的分支（原始上游 djylb/nps 整合了社区更新二次开发）。
+# 依据：
+#   https://github.com/2016xyz/sysuahb/releases/tag/v0.34.7  （2026-09-14）
+#   https://github.com/djylb/nps                             （活跃上游）
+#
+# 该分支的特点：每次安装生成**随机进程名**（sys + 4 位小写字母，
+# 如 syskxqz），服务名 / 二进制路径 / 配置目录 / 日志文件都跟随随机名。
+# 因此装完不能假设命令叫 nps，必须去 /etc 下按标记文件发现。
+#
+# 安装脚本实测 0 处 read 调用，本身就不会卡在交互提示上；
+# </dev/null 只是再加一道保险。脚本需 root（会自己检查 id -u），
+# 我们本来就是 root 身份执行。
+NPS_VER="v0.34.7"
+_run_remote "https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh" \
+  nps "${NPS_VER}" || true
+
+# ── 发现安装结果并回显 ───────────────────────────────────────────
+# 随机名没法预先知道，靠固定标记文件 /etc/<name>/conf/sysuahb.conf 反查。
+NPS_DIR="$(ls -d /etc/sys???? 2>/dev/null | head -1)"
+if [ -n "$NPS_DIR" ] && [ -f "$NPS_DIR/conf/sysuahb.conf" ]; then
+  NPS_NAME="$(basename "$NPS_DIR")"
+  echo "NPS 已安装，进程名/服务名：$NPS_NAME"
+  echo "  二进制：/usr/bin/$NPS_NAME"
+  echo "  配置：  $NPS_DIR/conf/sysuahb.conf"
+  echo "  日志：  /var/log/$NPS_NAME.log"
+  command -v "$NPS_NAME" >/dev/null 2>&1 && "$NPS_NAME" status 2>/dev/null | head -5
+  echo "  ── Web 面板配置 ──"
+  grep -E '^[[:space:]]*(web_port|web_username|web_password|web_ip)' \
+    "$NPS_DIR/conf/sysuahb.conf" 2>/dev/null || echo "  （未读到 web_* 配置，请查看配置文件）"
+  echo "  提示：面板默认端口 8081（实测，不是老版的 8080），默认账号 admin/123；"
+  echo "        公网部署请立即改密，并只放行必要来源"
+else
+  echo "未能确认 NPS 安装结果：未找到 /etc/sys????/conf/sysuahb.conf"
+  echo "可手动重试： curl -fsSL https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh | sh -s nps ${NPS_VER}"
 fi
-systemctl daemon-reload >/dev/null 2>&1 || true
-nps restart >/dev/null 2>&1 </dev/null || nps start >/dev/null 2>&1 </dev/null || true
-echo "nps Web 管理端默认端口 8080，默认账号 admin/123 —— 请立即改密"
 """,
-        "verify": "systemctl is-active nps 2>/dev/null; ls /etc/nps 2>/dev/null | head",
-        "note": ("项目自 2021-04 起未再发版，存在未修复漏洞风险，公网部署必须改默认口令 admin/123 "
-                 "并限制 8080 访问来源。"),
+        "verify": ("d=$(ls -d /etc/sys???? 2>/dev/null | head -1); "
+                   "if [ -n \"$d\" ]; then n=$(basename \"$d\"); echo \"进程名: $n\"; "
+                   "command -v \"$n\" >/dev/null 2>&1 && \"$n\" status 2>/dev/null | head -4; "
+                   "grep -E 'web_port|web_username' \"$d/conf/sysuahb.conf\" 2>/dev/null; "
+                   "else echo '未找到 sysuahb 安装目录'; fi"),
+        "note": ("基于 djylb/nps v0.34.7（2016xyz/sysuahb），替代 2021 年起停更的 ehang-io/nps。"
+                 "每次安装生成随机进程名（sys+4 位字母），服务名/路径随之变化，"
+                 "用 /etc/sys????/conf/sysuahb.conf 反查。"
+                 "已在 Debian 12 容器内实测：安装成功、随机名生成、面板 / 返回 302 → /login/index。"
+                 "面板默认端口 8081、账号 admin/123（容器实测），公网部署必须改密并限制端口；"
+                 "重复执行安装脚本会自动清理旧的随机名安装再重装。"),
     },
 
     # ------------------------------------------------------------------
@@ -129,7 +161,7 @@ export DEBIAN_FRONTEND=noninteractive
 # 官方安装脚本，Linux/macOS/WSL2/Termux 通用。
 # --skip-setup 跳过交互式配置向导 —— 无人值守场景必须加，否则会卡在向导上。
 # 装完再手动跑 `hermes setup --portal` 做模型与工具网关的 OAuth 配置。
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup </dev/null || true
+_run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup || true
 """,
         "verify": "command -v hermes && hermes --version 2>/dev/null | head -2",
         "note": "安装脚本默认最新版；需要登录态的功能（模型、工具网关）要再跑 hermes setup --portal。",
@@ -145,7 +177,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-
 export DEBIAN_FRONTEND=noninteractive
 # Ekko Studio 需要 Node.js。没有就用 NodeSource 的 LTS 源装。
 if ! command -v node >/dev/null 2>&1; then
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1 </dev/null
+  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1
   apt-get install -y nodejs >/dev/null 2>&1
 fi
 # npm 全局包装完是可执行的 ekko-studio-web（常驻服务）
@@ -211,6 +243,29 @@ def build_script(keys):
              "# 勾选项：" + "、".join(INSTALL_PRESETS[k]["label"] for k in keys),
              "# 每一项独立执行，互不阻断；单项失败只记录，不影响后续项。",
              "export DEBIAN_FRONTEND=noninteractive",
+             "",
+             "# ── 远程脚本执行助手 ────────────────────────────────────────",
+             "# 必须「先下载到临时文件，再用 </dev/null 执行」，不能写成",
+             "#     curl -fsSL URL | sh -s args </dev/null",
+             "# 因为 sh 的 stdin 重定向会**覆盖管道**，脚本内容直接被丢掉，",
+             "# curl 报 (23) Failure writing output to destination —— 这不是假想，",
+             "# 是在容器里实测踩到的（`bash -n` 只查语法，查不出这种语义错误）。",
+             "# 而如果写成 `curl ... | sh -s args`（不加重定向），脚本里的 read",
+             "# 会从同一个流里消费后续脚本内容，行为同样不可预期。",
+             "# 所以统一走这个函数：脚本走文件，stdin 走 /dev/null。",
+             "_run_remote() {",
+             "  _u=\"$1\"; shift",
+             "  _f=\"$(mktemp)\" || return 1",
+             "  if ! curl -fsSL --retry 3 --connect-timeout 20 \"$_u\" -o \"$_f\"; then",
+             "    echo \"  下载失败：$_u\"",
+             "    rm -f \"_f\" 2>/dev/null",
+             "    return 1",
+             "  fi",
+             "  sh \"$_f\" \"$@\" </dev/null",
+             "  _rc=$?",
+             "  rm -f \"_f\" 2>/dev/null",
+             "  return $_rc",
+             "}",
              ""]
     for k in keys:
         p = INSTALL_PRESETS[k]

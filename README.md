@@ -1,10 +1,10 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.1.0-1a73e8)
+![版本](https://img.shields.io/badge/version-1.1.1-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
-> 当前版本 **v1.1.0** · 仓库 <https://github.com/2016xyz/GCP-Manager-Web> ·
+> 当前版本 **v1.1.1** · 仓库 <https://github.com/2016xyz/GCP-Manager-Web> ·
 > 反馈 <https://github.com/2016xyz/GCP-Manager-Web/issues>
 
 原版 `shenping1200/GCP-Manager-V3.4`（实为 v7.6 PyQt6 桌面版）的 **Web 化重构版**。
@@ -132,7 +132,7 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ## 版本号
 
-当前版本 **v1.1.0**，采用语义化版本 `MAJOR.MINOR.PATCH`：
+当前版本 **v1.1.1**，采用语义化版本 `MAJOR.MINOR.PATCH`：
 
 - `MAJOR` 不兼容改动
 - `MINOR` 向后兼容的功能新增
@@ -598,7 +598,7 @@ socks5  9.9.9.9  1080  u1  p1       空格分隔（常见面板导出格式）
 |---|---|---|
 | Docker CE + Compose | 装最新 | 官方 `get.docker.com` 便利脚本 |
 | 3x-ui 面板 | v3.8.5 | Xray 面板。**原 v2-ui 已不可用**，见下 |
-| nps 内网穿透 | v0.26.10 | ehang-io/nps 服务端 |
+| NPS 内网穿透 | v0.34.7 | **2016xyz/sysuahb**（djylb/nps 改名重打包），非 2021 年停更的 ehang-io/nps |
 | Hermes Agent | 滚动最新 | Nous Research 的 AI Agent 运行时 |
 | Ekko Studio | 0.7.24 | 自托管 Web 控制台（原 Hermes Studio） |
 
@@ -617,6 +617,73 @@ $ curl -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/sprov/v2
 
 所以这里改用社区活跃替代 **3x-ui**（最新 v3.8.5），界面上的选项名保留
 「3x-ui（替代已停更的 v2-ui）」以便对照。**没有**伪造一个还能用的 v2-ui 安装命令。
+
+### nps 用的是 sysuahb，不是停更的 ehang-io/nps
+
+原版 `ehang-io/nps` 最后一次发版是 **2021-04**（v0.26.10），已停更 4 年多。
+现在改用 **[2016xyz/sysuahb](https://github.com/2016xyz/sysuahb)** ——
+它基于社区持续维护的 [djylb/nps](https://github.com/djylb/nps) **v0.34.7** 重新打包
+（2026-09-14 发版）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/2016xyz/sysuahb/v0.34.7/install.sh \
+  | sh -s nps v0.34.7          # 上游推荐的手动写法；本工具内部走 _run_remote
+```
+
+这个分支的特点是**每次安装生成随机进程名**（`sys` + 4 位小写字母），
+服务名 / 二进制路径 / 配置目录 / 日志文件都跟着随机名走：
+
+```
+/etc/<name>/conf/sysuahb.conf      ← 固定标记文件，用来反查随机名
+/usr/bin/<name>                    ← 二进制（本次实测 25 MB）
+/var/log/<name>.log
+```
+
+因为名字是随机的，装完不能假设命令叫 `nps`。本工具用标记文件反查：
+
+```bash
+d=$(ls -d /etc/sys???? | head -1); n=$(basename "$d")
+"$n" status
+```
+
+**容器实测结果**（Debian 12，`docker run --rm`）：
+
+| 检查项 | 结果 |
+|---|---|
+| 安装是否成功 | ✅ 生成随机名 `sysalvy`，二进制 25 065 386 B |
+| 版本 | ✅ 日志确认 `the version of server is 0.34.7` |
+| 进程是否起来 | ✅ `/usr/bin/sysduce service` |
+| 面板是否可访问 | ✅ `GET http://127.0.0.1:8081/` → **302 → /login/index** |
+| 随机名是否真的随机 | ✅ 两次安装分别是 `sysalvy` / `sysduce` |
+| 面板端口 | ⚠ **8081**（不是老版的 8080），账号 `admin/123` |
+
+> 面板默认端口是 8081，默认口令 `admin/123` —— 公网部署必须立即改密，
+> 并只放行必要来源。安装脚本**实测 0 处 `read` 调用**，本身就不会卡交互。
+
+### 一个把三个预设都弄坏的坑：`curl | sh </dev/null`
+
+上一版为了「防止上游新增未交互提示把任务挂死」，给所有远程脚本加了 `</dev/null`。
+写法是错的：
+
+```bash
+# ❌ 错：sh 的 stdin 重定向会覆盖管道，脚本内容直接被丢掉
+curl -fsSL https://get.docker.com | sh </dev/null
+# → curl: (23) Failure writing output to destination
+
+# ✅ 对：脚本走文件，stdin 走 /dev/null
+_f=$(mktemp); curl -fsSL URL -o "$_f" && sh "$_f" args </dev/null
+```
+
+在 POSIX shell 里，`cmd1 | cmd2 < file` 的输入重定向**优先于管道**，`cmd2` 从
+`file` 读而不是从管道读，于是 curl 写出去的数据没人收，报 (23) 退出。
+**Docker、nps、Hermes 三个预设因此全部失效** ——
+而 `bash -n` 只做语法检查，这种语义错误完全查不出来。
+
+是**容器里真实跑一遍**才发现的：第一次实测输出就是
+`curl: (23) Failure writing output to destination`，什么都没装上。
+
+修复方式：生成脚本里带一个 `_run_remote` 助手，统一「下载到临时文件 →
+`sh "$_f" "$@" </dev/null` → 删除临时文件」，并补了断言禁止流水线写法回流。
 
 ### 3x-ui 的非交互处理
 
@@ -946,7 +1013,7 @@ gcp-manager-web/
 │   ├── _fixtures.py        测试夹具共享（管理员密码、展示用假数据）
 │   ├── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（453 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（474 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -958,7 +1025,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 453 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 474 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -981,13 +1048,14 @@ python3 tests_e2e.py
   语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
   `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
   16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
-- **N. 备注 / 费用 / root 密码 / 代理 / 安装预设**（110 项）：预设齐备与顺序稳定、
+- **N. 备注 / 费用 / root 密码 / 代理 / 安装预设 / 远程脚本执行**（131 项）：预设齐备与顺序稳定、
   非法 key 过滤去重、全量脚本过 `bash -n`、每项带 stdin 兜底、单项失败不阻断、
   v2-ui 已死且有替代依据、费用三项计算与停机只算磁盘、未知机型不冒充 0、
   免费额度按时间计（含官方原文断言）、四类免费判定条件、代理解析 9 种合法写法 +
   4 种非法拒绝、SOCKS5 走代理端 DNS、代理密码打码、老库迁移幂等、
   备注二次保存不被冲掉、root 密码须二次验证且拒绝时不泄露、
-  账号接口不外发明文代理、前端各列与交互存在性、favicon 路由、`CreateRequest` 必须声明 `note`/`installs`（pydantic 会静默丢弃
+  账号接口不外发明文代理、前端各列与交互存在性、nps 已换源 sysuahb 且不再引用 ehang-io、版本号固定、随机名反查逻辑、面板端口为实测值；禁止 `curl|sh </dev/null` 反例写法、`_run_remote` 助手存在且被全部预设使用；
+  favicon 路由、`CreateRequest` 必须声明 `note`/`installs`（pydantic 会静默丢弃
   未声明字段）、dry-run 端到端确认安装脚本真的拼进 `post_command`
 
 - **M. 版本号 / 导航分组 / 按钮排序**（42 项）：版本号符合语义化格式且 ≥1.0.1、

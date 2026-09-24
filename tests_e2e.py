@@ -1356,6 +1356,66 @@ check("★ 3x-ui 用官方非交互机制（XUI_NONINTERACTIVE）",
       "XUI_NONINTERACTIVE" in _script and "XUI_DB_TYPE" in _script)
 check("★ 验证命令按勾选项拼接", "docker --version" in _ip.verify_command(["docker"]))
 
+# ── nps 换源：ehang-io/nps（2021 停更）→ 2016xyz/sysuahb（djylb/nps v0.34.7）──
+_nps = _ip.INSTALL_PRESETS["nps"]
+check("★ nps 预设改用 2016xyz/sysuahb", "2016xyz/sysuahb" in _nps["docs"])
+check("★ nps 不再从 ehang-io 下载（该源 2021 年起停更）",
+      "ehang-io/nps/releases" not in _nps["script"])
+check("★ nps 记录了改用理由（上游持续维护）",
+      "djylb/nps" in _nps["script"] and "停更" in _nps["script"])
+check("★ nps 版本号固定（可复现，不跟 latest）",
+      'NPS_VER="v0.34.7"' in _nps["script"] and '"${NPS_VER}"' in _nps["script"])
+check("★ nps 说明里写明随机进程名机制",
+      "随机进程名" in _nps["note"] and "sys" in _nps["note"])
+check("★ nps 靠固定标记文件发现安装（随机名无法预设）",
+      "/etc/sys????" in _nps["script"] and "sysuahb.conf" in _nps["script"])
+check("★ nps 回显面板端口与默认账号提醒",
+      "web_port" in _nps["script"] and "改密" in _nps["script"])
+check("★ nps 面板端口标注为实测值 8081（非老版 8080）",
+      "8081" in _nps["note"], _nps["note"][:60])
+check("★ nps 记录了容器内实测结论",
+      "Debian 12" in _nps["note"] or "容器" in _nps["note"])
+
+# ══════════ 远程脚本执行方式 ══════════
+# 容器实测踩到的真坑：`curl URL | sh -s args </dev/null` 里
+# sh 的 stdin 重定向会覆盖管道，脚本内容被丢掉（curl 报 23）。
+# bash -n 只查语法，查不出这种语义错误，只能靠断言守住写法。
+import re as _re2  # noqa: E402
+
+_all_scripts = _ip.build_script(list(_ip.INSTALL_PRESETS))
+_anti = _re2.findall(r"curl[^\n|]*\|\s*(?:sh|bash)\b[^\n]*</dev/null", _all_scripts)
+# 注释里会提到这个反例，过滤掉纯注释行
+_code_lines = [ln for ln in _all_scripts.split("\n") if not ln.strip().startswith("#")]
+_anti_real = [ln for ln in _code_lines
+              if _re2.search(r"curl[^|]*\|\s*(?:sh|bash)\b", ln) and "</dev/null" in ln]
+check("★ 不使用 `curl | sh </dev/null` 反例写法（stdin 重定向会吞掉管道）",
+      not _anti_real, str(_anti_real[:2]))
+check("★ 生成脚本内含 _run_remote 助手",
+      "_run_remote() {" in _all_scripts)
+check("★ 助手先下载到临时文件再执行（脚本走文件、stdin 走 /dev/null）",
+      'curl -fsSL --retry 3 --connect-timeout 20 "$_u" -o "$_f"' in _all_scripts
+      and 'sh "$_f" "$@" </dev/null' in _all_scripts)
+check("★ 所有远程脚本都改走 _run_remote",
+      _all_scripts.count("_run_remote https") >= 4
+      and "get.docker.com | sh" not in _all_scripts)
+# 只看代码行 —— 注释里会引用这个反例做说明
+# 排除注释行与 echo 出来的「给人看的手动重试提示」——
+# 后者是让用户在终端里手动执行的，人的 stdin 是 tty，原样写没问题。
+_exec_lines = [ln for ln in _code_lines if not ln.strip().startswith("echo")]
+check("★ 没有真正参与执行的 `curl|sh </dev/null` 反例写法",
+      not any(("| bash -s" in ln or "| sh -s" in ln) and "</dev/null" in ln
+              for ln in _exec_lines),
+      str([ln for ln in _exec_lines if "| sh -s" in ln][:2]))
+check("★ 流水线形式的 curl|bash 已全部替换为 _run_remote",
+      not any(_re2.search(r"\|\s*(sh|bash)\b", ln) for ln in _exec_lines),
+      str([ln for ln in _exec_lines if _re2.search(r"\|\s*(sh|bash)\b", ln)][:2]))
+check("★ 助手下载失败有明确提示且清理临时文件",
+      "下载失败" in _all_scripts and "rm -f" in _all_scripts)
+for _k in _ip.INSTALL_PRESETS:
+    check(f"★ 预设 {_k} 的脚本仍带 stdin 兜底",
+          "</dev/null" in _ip.build_script([_k]))
+
+
 # ══════════ 费用与免费额度 ══════════
 from core import catalog as _cat  # noqa: E402
 
