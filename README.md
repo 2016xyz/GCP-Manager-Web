@@ -24,13 +24,56 @@
 
 ## 快速开始
 
+### 方式一：一键脚本（推荐，裸机 / VPS）
+
 ```bash
-cd gcp-manager-web
+curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh | bash
+```
+
+一条命令完成：检查 Python 环境 → 建虚拟环境 → 装依赖（PyPI 不通自动切清华镜像）
+→ 建数据目录 → 注册 systemd 服务并设开机自启 → 启动 → 打印访问地址与初始密码。
+
+装完即可打开 `http://<你的IP>:8000/`。
+
+指定端口 / 目录 / 不装服务：
+
+```bash
+# 换端口与安装目录
+curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh \
+  | PORT=9000 APP_DIR=/opt/gcp-manager-web bash
+
+# 只在当前目录装好环境，不注册 systemd（容器 / 手动启动场景）
+curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh \
+  | NO_SERVICE=1 bash
+```
+
+### 方式二：Docker Compose
+
+```bash
+git clone https://github.com/2016xyz/GCP-Manager-Web.git
+cd GCP-Manager-Web
+docker compose up -d
+
+# 取初始管理员密码
+docker compose exec gcp-manager-web cat /app/data/INITIAL_ADMIN.txt
+```
+
+默认只绑 `127.0.0.1:8000`，**不会**把控制台暴露到公网。
+需要局域网访问时改 `docker-compose.yml` 里的端口映射为 `"8000:8000"`。
+数据（服务账号 JSON、Root 密码库）在命名卷 `gcpweb-data` 里，换镜像不丢。
+
+### 方式三：手动运行（源码）
+
+```bash
+git clone https://github.com/2016xyz/GCP-Manager-Web.git
+cd GCP-Manager-Web
 ./run.sh                     # 自动装依赖并启动
 # 或
 pip install -r requirements.txt
 python3 app.py               # 默认 0.0.0.0:8000
 ```
+
+### 首次登录
 
 首次启动会自动创建管理员并打印随机初始密码：
 
@@ -48,7 +91,22 @@ python3 app.py               # 默认 0.0.0.0:8000
 
 > `data/INITIAL_ADMIN.txt` 权限为 600，仅在初始化时生成一次。请登录后立即改密并删除该文件。
 
-环境变量：`PORT`（默认 8000）、`HOST`（默认 0.0.0.0）。
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PORT` | `8000` | 监听端口 |
+| `HOST` | `0.0.0.0` | 监听地址（建议公网场景改 `127.0.0.1` 并走反代） |
+| `GCPWEB_DATA_DIR` | `<项目>/data` | 数据目录（账号密钥、密码库、会话）。容器/多实例部署时用它隔离 |
+
+### 安装后常用命令
+
+```bash
+systemctl status  gcp-manager-web      # 状态
+journalctl -u gcp-manager-web -f       # 实时日志
+systemctl restart gcp-manager-web      # 重启
+systemctl disable gcp-manager-web      # 取消开机自启
+```
 
 ---
 
@@ -348,7 +406,13 @@ gcp-manager-web/
 │   ├── console.html       Vue 3 响应式控制台
 │   └── vendor/
 │       └── vue.global.prod.js   Vue 3.5.13（本地托管）
-├── tests_e2e.py           端到端验证（162 项，无需真实 GCP 账号）
+├── install.sh             一键安装部署（venv + systemd + 自动换源重试）
+├── run.sh                 手动启动脚本（优先复用 .venv）
+├── Dockerfile             容器镜像（非 root 运行 + 健康检查）
+├── docker-compose.yml     compose 部署（默认只绑本机 + 命名卷持久化）
+├── .dockerignore          镜像构建忽略清单
+├── requirements.txt       Python 依赖
+├── tests_e2e.py           端到端验证（200 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -360,7 +424,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 162 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 200 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -371,8 +435,13 @@ python3 tests_e2e.py
   是否完整落到 `compute.instances.insert` 请求体
 - **E. 区域/成本/任务**（20 项）：4 种区域模式、成本估算与折扣、dry-run、
   实例动作、命令执行、任务与日志
-- **F. 页面与前端**（33 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
+- **F. 页面与前端**（36 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
   日志去重、验证码真实渲染（`ink_ratio` 回归）、极速预设入口、省钱优化面板
+
+- **G. 安装与部署产物**（21 项）：`install.sh` / `run.sh` 语法检查、
+  依赖失败自动换源（PyPI→清华→阿里云）、耗时兜底而非仅探测连通性、
+  systemd 注册与开机自启、数据目录权限 700、Dockerfile 非 root + 健康检查、
+  compose 默认只绑本机 + 命名卷持久化
 
 另有 **省钱与默认值专项**（19 项）：全开防火墙默认关闭、Ops Agent 默认禁用、
 无备份默认开启、删除保护默认关闭、省钱清单 7 项计数、`/api/savings` 实时计算、

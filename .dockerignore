@@ -1,0 +1,17 @@
+data/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-wal
+*.db-shm
+.git/
+.gitignore
+tests_e2e.py
+*.md
+!README.md
+.idea/
+.vscode/
+.DS_Store

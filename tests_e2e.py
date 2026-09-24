@@ -796,6 +796,29 @@ check("控制台含减少动效偏好支持", "prefers-reduced-motion" in html)
 check("表格使用 .resp 响应式类", html.count('class="resp"') >= 5, str(html.count('class="resp"')))
 check("★ 前端含「极速部署预设」入口", "quickMode" in html and "极速部署预设" in html)
 check("★ 前端含「放开全开防火墙」显式入口", "openFirewallMode" in html and "放开全开防火墙" in html)
+
+# ---- 前端静态检查：这类错误没有构建步骤兜底，只能靠测试拦 ----
+# 缺陷 1：this.api() 只接受一个 path。曾误写成 this.api('GET', url)，
+# 结果把 'GET' 当成路径 → 404，而 404 响应体是 {"detail":"Not Found"}，
+# 前端判 !r.ok 后只弹了泛化的「读取失败」，看不出真实原因。
+import re as _re  # noqa: E402
+_api_2arg = _re.findall(r"this\.api\(\s*['\"](?:GET|POST|PUT|DELETE|PATCH)['\"]\s*,", html)
+check("★ 前端无 this.api('METHOD', url) 两参误用",
+      not _api_2arg, str(_api_2arg[:3]))
+
+# 缺陷 2：toast 只认识 'g'（绿）/ 'r'（红）/ 'a'（琥珀），传别的值不报错但样式丢失
+_kinds = set(_re.findall(r"toast\([^)]*?,\s*'([a-zA-Z_]+)'\s*\)", html))
+_bad = _kinds - {"g", "r", "a"}
+check("★ 前端 toast 样式级别仅用 g/r/a",
+      not _bad, f"非法级别: {sorted(_bad)}")
+
+# 缺陷 3：网络/子网必须能从真实 VPC 列表渲染，且提供了读取入口
+check("★ 前端提供「读取项目真实网络」按钮",
+      "读取项目真实网络" in html and "loadNetworks" in html)
+check("★ 网络/子网按真实列表渲染为 select",
+      'v-for="n in netInfo.networks"' in html and 'v-for="s in netInfo.subnets"' in html)
+check("★ 无 default 网络时给出告警",
+      "该项目不存在名为" in html and "has_default_network" in html)
 check("★ 前端含省钱优化面板", "省钱优化" in html and "savings.items" in html)
 check("★ 前端出厂默认全开防火墙为 false", "auto_open_firewall:false" in html)
 check("★ 前端出厂默认含无备份", "no_backup:true" in html and "no_backup: c.no_backup !== false" in html)
@@ -826,6 +849,64 @@ r = client.post("/api/auth/logout")
 check("登出成功", r.status_code == 200)
 r = client.get("/api/status")
 check("登出后接口再次 401", r.status_code == 401, str(r.status_code))
+
+# ═══════════════════════════════════════════════════════════════════════════
+# G. 安装 / 部署产物
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n── G. 安装与部署产物 ──")
+
+import subprocess as _sp  # noqa: E402
+
+
+def _read(name):
+    p = os.path.join(BASE_DIR, name)
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+_inst = _read("install.sh")
+_docker = _read("Dockerfile")
+_compose = _read("docker-compose.yml")
+_run = _read("run.sh")
+
+check("install.sh 存在", bool(_inst))
+check("Dockerfile 存在", bool(_docker))
+check("docker-compose.yml 存在", bool(_compose))
+check(".dockerignore 存在", bool(_read(".dockerignore")))
+
+if _inst:
+    rc = _sp.run(["bash", "-n", os.path.join(BASE_DIR, "install.sh")],
+                 capture_output=True, text=True)
+    check("★ install.sh 语法检查通过", rc.returncode == 0, rc.stderr[:200])
+    check("★ install.sh 幂等保护（venv 已存在则复用）", "复用已有" in _inst)
+    check("★ install.sh 依赖失败自动换源（清华/阿里云）",
+          "pypi.tuna.tsinghua.edu.cn" in _inst and "mirrors.aliyun.com" in _inst)
+    check("★ install.sh 用耗时兜底，而非仅探测连通性",
+          "PIP_TIMEOUT" in _inst and "timeout \"$PIP_TIMEOUT\"" in _inst)
+    check("★ install.sh 注册 systemd 并开机自启",
+          "systemctl enable" in _inst and "WantedBy=multi-user.target" in _inst)
+    check("★ install.sh 数据目录权限收紧为 700", "chmod 700" in _inst)
+    check("★ install.sh 打印访问地址", "http://%s:%s/" in _inst)
+    check("★ install.sh 支持 NO_SERVICE / PORT / APP_DIR 覆盖",
+          "NO_SERVICE" in _inst and "PORT=" in _inst and "APP_DIR=" in _inst)
+
+if _docker:
+    check("★ Dockerfile 用非 root 用户运行", "USER appuser" in _docker)
+    check("★ Dockerfile 带健康检查", "HEALTHCHECK" in _docker)
+    check("★ Dockerfile 数据目录可挂载（GCPWEB_DATA_DIR）",
+          "GCPWEB_DATA_DIR" in _docker)
+    check("★ Dockerfile 不把测试脚本打进镜像",
+          "tests_e2e.py" not in _docker)
+
+if _compose:
+    check("★ compose 默认只绑本机（不暴露公网）", "127.0.0.1:8000:8000" in _compose)
+    check("★ compose 用命名卷持久化数据", "gcpweb-data:/app/data" in _compose)
+    check("★ compose 设置重启策略", "restart: unless-stopped" in _compose)
+
+if _run:
+    rc = _sp.run(["bash", "-n", os.path.join(BASE_DIR, "run.sh")],
+                 capture_output=True, text=True)
+    check("★ run.sh 语法检查通过", rc.returncode == 0, rc.stderr[:200])
+    check("★ run.sh 优先复用 install.sh 建的 .venv", ".venv/bin/python" in _run)
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

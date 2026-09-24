@@ -1390,15 +1390,15 @@ createApp({
     async loadNetworks(){
       const accId = this.checkedAccountIds[0] || (this.accounts[0] && this.accounts[0].id) || 0;
       if(!accId){ return this.toast('请先在「账号管理」导入 GCP 服务账号','a'); }
-      this.toast('正在读取项目网络…','i');
+      this.toast('正在读取项目网络…');
       try{
-        const r = await this.api('GET',
+        const r = await this.api(
           `/api/project_networks?account_id=${accId}&region=${encodeURIComponent(this.primaryRegion||'')}`);
-        if(!r || !r.ok){ return this.toast((r&&r.error)||'读取失败','e'); }
+        if(!r || !r.ok){ return this.toast((r&&r.error)||'读取失败','r'); }
         this.netInfo = {loaded:true, region:r.region, networks:r.networks||[],
                         subnets:r.subnets||[], has_default_network:r.has_default_network};
         if(!this.netInfo.networks.length){
-          return this.toast('该项目下没有可用的 VPC 网络，请先在 GCP 控制台创建','e');
+          return this.toast('该项目下没有可用的 VPC 网络，请先在 GCP 控制台创建','r');
         }
         // 当前选择不在真实列表里 → 自动纠正，避免创建时报「network not found」
         if(!this.netInfo.networks.includes(this.spec.network)){
@@ -1412,7 +1412,7 @@ createApp({
         this.toast(`已读取 ${this.netInfo.networks.length} 个 VPC / ${this.netInfo.subnets.length} 个子网${warn}`,
                    this.netInfo.has_default_network ? 'g' : 'a');
         this.recalc();
-      }catch(e){ this.toast('读取网络失败：'+e.message,'e'); }
+      }catch(e){ this.toast('读取网络失败：'+e.message,'r'); }
     },
 
     /* 显式放开全开防火墙：二次确认后开启 */

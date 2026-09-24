@@ -1,0 +1,34 @@
+# GCP Manager Web · docker compose 一键部署
+#
+#   docker compose up -d
+#
+# 数据（服务账号 JSON、Root 密码库、初始管理员密码）都在命名卷里，
+# 换镜像不会丢。首次启动后取初始密码：
+#   docker compose exec gcp-manager-web cat /app/data/INITIAL_ADMIN.txt
+
+services:
+  gcp-manager-web:
+    build: .
+    # 也可以直接用 GHCR 上的镜像（若已发布）：
+    # image: ghcr.io/2016xyz/gcp-manager-web:latest
+    container_name: gcp-manager-web
+    restart: unless-stopped
+    ports:
+      # 默认只绑本机，避免把控制台直接暴露到公网。
+      # 需要局域网访问改成 "8000:8000"。
+      - "127.0.0.1:8000:8000"
+    environment:
+      GCPWEB_DATA_DIR: /app/data
+      PORT: "8000"
+    volumes:
+      - gcpweb-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/login',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  gcpweb-data:
