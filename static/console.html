@@ -456,6 +456,17 @@ pre.log.big{max-height:520px}
             <!-- ② 网络与启动 -->
             <div class="card">
               <h2><span class="n">2</span>网络与启动行为</h2>
+              <div class="row" style="margin-top:12px">
+                <button class="s" @click="quickMode">⚡ 极速部署预设</button>
+                <button @click="safeMode">🛡 保守预设（关闭全开防火墙）</button>
+                <span class="hint">一键套用推荐参数组合，仍可手动微调</span>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <span class="pill g">v7.4+ 默认省钱配置已启用</span>
+                <span class="pill b">全开防火墙默认开启</span>
+              </div>
+
+              <div class="sep"></div>
               <div class="grid g3">
                 <label class="f">网络<input v-model.trim="spec.network" class="mono"></label>
                 <label class="f">子网<input v-model.trim="spec.subnet" class="mono"></label>
@@ -467,16 +478,26 @@ pre.log.big{max-height:520px}
                 </label>
               </div>
               <div class="row" style="margin-top:12px">
+                <label class="sw rd" :class="{on:spec.auto_open_firewall}">
+                  <input type="checkbox" v-model="spec.auto_open_firewall"> 创建时全开放防火墙（入站+出站 0.0.0.0/0）· 默认开启</label>
                 <label class="sw" :class="{on:spec.assign_public_ip}">
                   <input type="checkbox" v-model="spec.assign_public_ip"> 分配公网 IP</label>
-                <label class="sw rd" :class="{on:spec.auto_open_firewall}">
-                  <input type="checkbox" v-model="spec.auto_open_firewall"> 创建时全开放防火墙（入站+出站 0.0.0.0/0）</label>
                 <label class="sw" :class="{on:spec.disable_ops_agent}">
                   <input type="checkbox" v-model="spec.disable_ops_agent"> 禁用 Ops / 监控 Agent</label>
+                <label class="sw" :class="{on:spec.no_backup}">
+                  <input type="checkbox" v-model="spec.no_backup"> 数据保护 → 无备份（不挂快照时间表/备份策略）</label>
+                <label class="sw" :class="{on:!spec.deletion_protection}">
+                  <input type="checkbox" :checked="!spec.deletion_protection"
+                         @change="spec.deletion_protection = !$event.target.checked"> 关闭删除保护（便于回收）</label>
                 <label class="sw" :class="{on:spec.preemptible}">
                   <input type="checkbox" v-model="spec.preemptible"> 抢占式 Preemptible（约 -80%）</label>
                 <label class="sw" :class="{on:spec.spot}">
                   <input type="checkbox" v-model="spec.spot"> Spot 实例</label>
+              </div>
+              <div v-if="spec.auto_open_firewall" class="alert w on" style="margin:11px 0 0">
+                <span>⚠</span><span>全开放防火墙已启用：将为项目建立 <code>allow-all-ingress</code> /
+                  <code>allow-all-egress</code> 规则，放开入站与出站 <code>0.0.0.0/0</code> 全协议。
+                  实例创建后立即可访问，但公网暴露面同时扩大 —— 仅建议在可控环境使用。</span>
               </div>
               <div style="margin-top:12px">
                 <div class="hint" style="margin-bottom:6px">网络标签 tags（影响默认防火墙规则命中）：</div>
@@ -605,6 +626,28 @@ pre.log.big{max-height:520px}
             </div>
 
             <div class="card">
+              <h2>💸 省钱优化 <small>v7.4+ 默认启用</small></h2>
+              <div class="cost" style="background:linear-gradient(140deg,#fffbeb,#fef6e7);border-color:#fcd34d">
+                <div class="sub" style="color:#92400e">已启用 {{ savings.enabled }} / {{ savings.total }} 项省钱优化</div>
+                <div style="font-size:15px;font-weight:700;color:#b45309;margin-top:3px">
+                  {{ savings.enabled===savings.total ? '全部省钱项已开启' : '有 '+(savings.total-savings.enabled)+' 项未开启，可能产生附加费用' }}
+                </div>
+              </div>
+              <div style="margin-top:11px">
+                <div v-for="s in savings.items" :key="s.key"
+                     style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-bottom:1px solid #f1f5f9">
+                  <span class="badge" :class="s.enabled?'g':'r'" style="flex:none;margin-top:2px">
+                    {{ s.enabled?'已省':'未开' }}</span>
+                  <div style="min-width:0">
+                    <div style="font-size:12.5px;font-weight:600">{{ s.label }}</div>
+                    <div class="hint">{{ s.detail }}</div>
+                    <div class="hint" style="color:#047857" v-if="s.enabled">省下：{{ s.saved }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
               <h2>🧾 当前配置摘要</h2>
               <div class="kv">
                 <b>机型</b><span>{{ activeMachineName }}{{ activeMachine?`（${activeMachine.vcpu}vCPU/${activeMachine.mem_gb}GB，${activeMachine.arch}）`:'' }}</span>
@@ -612,6 +655,8 @@ pre.log.big{max-height:520px}
                 <b>磁盘</b><span>{{ activeDisk.label||spec.disk_type }} · {{ spec.disk_size_gb }}GB</span>
                 <b>区域</b><span>{{ regionModeLabel }} → {{ primaryRegion }}</span>
                 <b>网络</b><span>{{ spec.network }} / {{ spec.subnet }} / {{ spec.network_tier }} {{ spec.assign_public_ip?'公网IP':'无公网IP' }}</span>
+                <b>防火墙</b><span>{{ spec.auto_open_firewall ? '全开放（入站+出站 0.0.0.0/0）' : '不自动放开' }}</span>
+                <b>省钱</b><span>{{ savings.enabled }}/{{ savings.total }} 项已启用{{ spec.disable_ops_agent?' · 无 Ops Agent':'' }}{{ spec.no_backup?' · 无备份':'' }}{{ !spec.deletion_protection?' · 可随时回收':'' }}</span>
                 <b>标签</b><span>{{ spec.tags.length?spec.tags.join(', '):'（无）' }}</span>
                 <b>登录</b><span>{{ loginMode==='root_password'?(pwdMode==='random'?'Root 密码（随机）':'Root 密码（自定义）'):'SSH 密钥' }}</span>
                 <b>规模</b><span>{{ checkedAccountIds.length }} 账号 × {{ opts.count }} 台，实例并发 {{ opts.concurrency }}</span>
@@ -1038,13 +1083,20 @@ const TABS = [
   {id:'profile',  icon:'⚙', label:'个人设置', desc:'账号信息与修改密码'},
 ];
 
+/* 出厂默认：极速部署 + 极致省钱（对应 v7.4+ 的设计意图）
+   · auto_open_firewall=true  部署后立即可访问
+   · disable_ops_agent=true   不产生日志/监控费用
+   · no_backup=true           不挂快照时间表/备份策略
+   · deletion_protection=false 便于随时回收，避免持续计费 */
 const EMPTY_SPEC = () => ({
   machine_type:'e2-micro', image_key:'ubuntu-minimal-2204', disk_type:'pd-standard',
   disk_size_gb:30, region_mode:'auto_free', region:'us-central1',
   regions:['us-central1','us-east1','us-west1'], max_per_region:4,
   network:'default', subnet:'default', network_tier:'STANDARD',
   tags:['http-server','https-server'], assign_public_ip:true,
-  auto_open_firewall:false, disable_ops_agent:true, no_resource_policy:true,
+  auto_open_firewall:true, disable_ops_agent:true,
+  no_backup:true, no_snapshot_schedule:true, no_resource_policy:true,
+  deletion_protection:false,
   preemptible:false, spot:false,
 });
 
@@ -1063,7 +1115,7 @@ createApp({
     postCommand:'', verifyCommand:'',
     opts:{count:1, concurrency:3, account_workers:1, retry_count:2,
           ssh_timeout:300, idle_timeout:180, command_timeout:1800, verify_timeout:180},
-    est:{}, creating:false,
+    est:{}, creating:false, savings:{items:[],enabled:0,total:0},
     execForm:{scope:'all', command:'', concurrency:10, idle_timeout:120, command_timeout:600},
     execOut:'',
     accForm:{key_path:'', folder:'', proxy:'', proxy_type:'HTTPS'},
@@ -1284,13 +1336,33 @@ createApp({
         network_tier: c.network_tier || 'STANDARD',
         tags: Array.isArray(c.tags) && c.tags.length ? c.tags : ['http-server','https-server'],
         assign_public_ip: c.assign_public_ip !== false,
-        auto_open_firewall: !!c.auto_open_firewall,
-        disable_ops_agent: c.disable_ops_agent !== false,
+        auto_open_firewall: c.auto_open_firewall !== false,       // 默认 true
+        disable_ops_agent: c.disable_ops_agent !== false,          // 默认 true
+        no_backup: c.no_backup !== false,                          // 默认 true
+        no_snapshot_schedule: c.no_snapshot_schedule !== false,     // 默认 true
+        deletion_protection: c.deletion_protection === true,        // 默认 false
         preemptible: !!c.preemptible, spot: !!c.spot,
       };
       this.recalc();
     },
     regionTest(){ /* 占位：保持 spec.region 变更时可触发重算 */ },
+
+    /* 极速部署预设：全开防火墙 + 全部省钱项 + 免费区 */
+    quickMode(){
+      const keep = {machine_type:this.spec.machine_type, image_key:this.spec.image_key,
+                    disk_type:this.spec.disk_type, disk_size_gb:this.spec.disk_size_gb};
+      Object.assign(this.spec, EMPTY_SPEC(), keep);
+      this.spec.max_per_region = 4;
+      this.toast('已套用「极速部署」预设：全开防火墙 + 全部省钱项已开启','g');
+      this.recalc();
+    },
+    /* 保守预设：关闭全开防火墙，其余省钱项保留 */
+    safeMode(){
+      this.spec.auto_open_firewall = false;
+      this.toast('已关闭全开放防火墙，仅放开 http/https-server 标签端口','a');
+      this.recalc();
+    },
+
     async recalc(){
       const r = await this.post('/api/cost/estimate', {
         machine_type: this.activeMachineName, disk_type: this.spec.disk_type,
@@ -1298,6 +1370,11 @@ createApp({
         count: this.opts.count, preemptible: this.spec.preemptible, spot: this.spec.spot,
       });
       if(r.ok) this.est = r.estimate;
+      this.refreshSavings();
+    },
+    async refreshSavings(){
+      const r = await this.post('/api/savings', this.spec);
+      if(r.ok) this.savings = r.savings;
     },
 
     /* ───────── 标签 / 区域 ───────── */
@@ -1394,7 +1471,8 @@ createApp({
         return this.toast('请填写自定义 Root 密码','a');
       const s = this.buildSpec();
       const warn = s.auto_open_firewall
-        ? '\n\n⚠ 已启用「全开放防火墙」：将放开入站/出站 0.0.0.0/0 全协议，公网暴露面显著扩大。' : '';
+        ? '\n\n🔥 全开放防火墙：将建立 allow-all-ingress / allow-all-egress，'
+          + '放开 0.0.0.0/0 全协议（默认开启，部署后立即可访问）' : '';
       this.modal = {
         title: dry ? '确认预检（Dry-run）' : '确认创建实例',
         sub: dry ? '仅做可行性检查，不会创建任何资源。'
@@ -1402,6 +1480,8 @@ createApp({
                    + `机型 ${this.activeMachineName} / 镜像 ${this.activeImage?this.activeImage.label:'-'}\n`
                    + `磁盘 ${this.spec.disk_type} ${this.spec.disk_size_gb}GB\n`
                    + `区域 ${this.regionModeLabel} → ${this.primaryRegion}\n`
+                   + `登录 ${this.loginMode==='root_password'?'Root 密码':'SSH 密钥'}`
+                   + `　省钱优化 ${this.savings.enabled}/${this.savings.total} 项\n`
                    + `预估月成本 $${this.est.monthly_total_usd || '?'}${warn}`,
         okText: dry ? '开始预检' : '确认创建',
         onOk: async ()=>{

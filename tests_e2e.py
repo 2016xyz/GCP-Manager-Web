@@ -144,22 +144,47 @@ def check(name, cond, detail=""):
     print(f"{'✅' if cond else '❌'} {name}" + (f"  → {detail}" if detail and not cond else ""))
 
 
-# 危险默认值必须在任何创建动作发生前就是安全的（创建会写回默认配置）
+# ═══════════════════ 前置：默认值与省钱配置 ═══════════════════
 print("=" * 76)
 print("GCP Manager Web · 端到端验证（含鉴权）")
 print("=" * 76)
-print("\n── 前置：危险默认值 ──")
-check("★ DEFAULT_CONFIG 中全开放防火墙为 False",
-      catalog_mod.DEFAULT_CONFIG["auto_open_firewall"] is False,
+print("\n── 前置：默认值与省钱配置 ──")
+check("★ 全开放防火墙默认开启（部署后立即可访问）",
+      catalog_mod.DEFAULT_CONFIG["auto_open_firewall"] is True,
       str(catalog_mod.DEFAULT_CONFIG["auto_open_firewall"]))
-check("DEFAULT_CONFIG 与 README 一致（e2-micro + Ubuntu Minimal 22.04 + 30GB）",
+check("★ 禁用 Ops Agent 默认开启（避免日志/监控费用）",
+      catalog_mod.DEFAULT_CONFIG["disable_ops_agent"] is True)
+check("★ 数据保护→无备份 默认开启（避免快照存储费用）",
+      catalog_mod.DEFAULT_CONFIG["no_backup"] is True)
+check("★ 无快照时间表 默认开启",
+      catalog_mod.DEFAULT_CONFIG["no_snapshot_schedule"] is True)
+check("★ 删除保护默认关闭（便于回收，避免持续计费）",
+      catalog_mod.DEFAULT_CONFIG["deletion_protection"] is False)
+check("出厂默认与 README 一致（e2-micro + Ubuntu Minimal 22.04 + 30GB）",
       catalog_mod.DEFAULT_CONFIG["machine_type"] == "e2-micro" and
       catalog_mod.DEFAULT_CONFIG["image_key"] == "ubuntu-minimal-2204" and
-      catalog_mod.DEFAULT_CONFIG["disk_size_gb"] == 30,
-      str(catalog_mod.DEFAULT_CONFIG))
+      catalog_mod.DEFAULT_CONFIG["disk_size_gb"] == 30 and
+      catalog_mod.DEFAULT_CONFIG["disk_type"] == "pd-standard", str(catalog_mod.DEFAULT_CONFIG))
 check("DEFAULT_CONFIG 中标签默认两枚",
       catalog_mod.DEFAULT_CONFIG["tags"] == ["http-server", "https-server"],
       str(catalog_mod.DEFAULT_CONFIG["tags"]))
+
+_sv = catalog_mod.savings_status(catalog_mod.DEFAULT_CONFIG)
+check("省钱清单共 7 项", _sv["total"] == 7, str(_sv["total"]))
+check("★ 出厂默认开启 6 项省钱优化",
+      _sv["enabled"] == 6, f"{_sv['enabled']}/{_sv['total']}")
+check("★ 唯一默认未开启的是「抢占式/Spot」（默认不抢占，符合预期）",
+      [i["key"] for i in _sv["items"] if not i["enabled"]] == ["preemptible_or_spot"],
+      str([i["key"] for i in _sv["items"] if not i["enabled"]]))
+check("省钱清单包含「无备份」项",
+      any(i["key"] == "no_backup" and i["enabled"] for i in _sv["items"]))
+_sv_off = catalog_mod.savings_status({
+    "auto_open_firewall": False, "disable_ops_agent": False, "no_backup": False,
+    "no_snapshot_schedule": False, "deletion_protection": True,
+    "network_tier": "PREMIUM", "machine_type": "n2-standard-4",
+    "disk_type": "pd-ssd", "disk_size_gb": 200})
+check("省钱清单能正确反映关闭状态",
+      _sv_off["enabled"] == 0, f"{_sv_off['enabled']}/{_sv_off['total']}")
 
 
 def login(username, password):
@@ -440,7 +465,8 @@ SPEC = {
     "network": "default", "subnet": "default", "network_tier": "PREMIUM",
     "tags": ["http-server", "web", "custom-tag"],
     "assign_public_ip": True, "auto_open_firewall": False,
-    "disable_ops_agent": True, "preemptible": True,
+    "disable_ops_agent": True, "no_backup": True, "no_snapshot_schedule": True,
+    "deletion_protection": False, "preemptible": True,
 }
 r = client.post("/api/create", json={
     "account_ids": [ACC_ID], "count": 2, "spec": SPEC,
@@ -466,9 +492,36 @@ if CAPTURED:
     check("★ PREMIUM 网络层级",
           cap.network_interfaces[0].access_configs[0].network_tier == "PREMIUM")
     check("★ Root 密码写入 startup-script", "TestPwd@2026" in md.get("startup-script", ""))
-    check("★ 禁用 Ops Agent 标记", md.get("google-logging-enabled") == "false")
+    # ---- 省钱项：真实落到请求体 ----
+    check("★ [省钱] 禁用 Ops Agent：logging=false",
+          md.get("google-logging-enabled") == "false", str(md.get("google-logging-enabled")))
+    check("★ [省钱] 禁用 Ops Agent：monitoring=false",
+          md.get("google-monitoring-enabled") == "false", str(md.get("google-monitoring-enabled")))
+    check("★ [省钱] 禁用 Ops Agent：ops-agent-enabled=false",
+          md.get("google-ops-agent-enabled") == "false", str(md.get("google-ops-agent-enabled")))
+    check("★ [省钱] 数据保护→无备份：resource_policies 为空",
+          list(ip.resource_policies) == [], str(list(ip.resource_policies)))
+    check("★ [省钱] 无快照来源：未指定 source_snapshot",
+          not ip.source_snapshot, str(ip.source_snapshot))
+    check("★ [省钱] 删除保护已关闭", cap.deletion_protection is False,
+          str(cap.deletion_protection))
     check("★ 未开启全开放防火墙时不调用防火墙接口", len(FW_CALLS) == 0, str(len(FW_CALLS)))
 
+# ---- 默认全开防火墙：不传 spec 时应自动放开 ----
+CAPTURED.clear()
+FW_CALLS.clear()
+r = client.post("/api/create", json={
+    "account_ids": [ACC_ID], "count": 1,
+    "spec": {"machine_type": "e2-micro", "image_key": "ubuntu-minimal-2204",
+             "disk_type": "pd-standard", "disk_size_gb": 30,
+             "region_mode": "single", "region": "us-west1",
+             "auto_open_firewall": True, "disable_ops_agent": True,
+             "no_backup": True, "no_snapshot_schedule": True,
+             "deletion_protection": False},
+    "login_mode": "ssh_key", "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2E test@host",
+    "concurrency": 1, "retry_count": 0, "ssh_timeout": 5}).json()
+check("提交「默认全开防火墙」任务", r["ok"], str(r)[:140])
+time.sleep(9)
 CAPTURED.clear()
 FW_CALLS.clear()
 r = client.post("/api/create", json={
@@ -487,7 +540,20 @@ if CAPTURED:
     check("★ Ubuntu 24.04 镜像",
           cap.disks[0].initialize_params.source_image.endswith("ubuntu-2404-lts-amd64"),
           cap.disks[0].initialize_params.source_image)
-    check("★ auto_open_firewall=True 触发防火墙 upsert", len(FW_CALLS) >= 1, str(len(FW_CALLS)))
+    check("★ 默认全开防火墙：auto_open_firewall=True 触发 allow-all 规则",
+          len(FW_CALLS) >= 2, str(len(FW_CALLS)))
+    fw_names = [c.get("firewall_resource", {}).name for c in FW_CALLS
+                if getattr(c.get("firewall_resource", None), "name", None)]
+    check("★ 防火墙规则名为 allow-all-ingress / allow-all-egress",
+          {"allow-all-ingress", "allow-all-egress"} <= set(fw_names), str(fw_names))
+    if FW_CALLS:
+        fr = FW_CALLS[0].get("firewall_resource")
+        if fr is not None:
+            check("★ 全开放：source_ranges 含 0.0.0.0/0",
+                  "0.0.0.0/0" in list(fr.source_ranges or []), str(list(fr.source_ranges or [])))
+            check("★ 全开放：协议为 all",
+                  any(getattr(a, "I_p_protocol", None) == "all" for a in (fr.allowed or [])),
+                  str(fr.allowed))
 else:
     check("★ SSH 密钥模式创建成功", False, "未捕获 insert")
 
@@ -555,8 +621,14 @@ check("日志可读且非空", r["ok"] and len(r["logs"]) > 0, str(len(r["logs"]
 cfg = client.get("/api/config").json()["config"]
 
 r = client.get("/api/config").json()
-check("★ 危险默认值：新用户的全开放防火墙默认关闭",
-      r["config"]["auto_open_firewall"] is False, str(r["config"]["auto_open_firewall"]))
+check("★ 全开放防火墙：新用户默认为开启",
+      r["config"]["auto_open_firewall"] is True, str(r["config"]["auto_open_firewall"]))
+check("★ 省钱项：新用户默认全部开启",
+      r["config"]["disable_ops_agent"] is True and r["config"]["no_backup"] is True
+      and r["config"]["no_snapshot_schedule"] is True
+      and r["config"]["deletion_protection"] is False,
+      json.dumps({k: r["config"].get(k) for k in ("disable_ops_agent", "no_backup",
+                                                  "no_snapshot_schedule", "deletion_protection")}))
 check("出厂默认与 README 一致（e2-micro + Ubuntu Minimal 22.04 + 30GB）",
       catalog_mod.DEFAULT_CONFIG["machine_type"] == "e2-micro" and
       catalog_mod.DEFAULT_CONFIG["image_key"] == "ubuntu-minimal-2204" and
@@ -564,10 +636,32 @@ check("出厂默认与 README 一致（e2-micro + Ubuntu Minimal 22.04 + 30GB）
       catalog_mod.DEFAULT_CONFIG["disk_type"] == "pd-standard", str(catalog_mod.DEFAULT_CONFIG))
 check("默认配置接口标注为用户级（互不覆盖）",
       r.get("scope") == "user", str(r.get("scope")))
+check("★ 目录接口内置省钱清单",
+      "savings" in client.get("/api/catalog").json()
+      and client.get("/api/catalog").json()["savings"]["total"] == 7,
+      str(client.get("/api/catalog").json().get("savings", {}).get("enabled")))
+r_sv = client.post("/api/savings", json={"auto_open_firewall": False, "disable_ops_agent": False,
+                                         "no_backup": False, "no_snapshot_schedule": False,
+                                         "deletion_protection": True, "network_tier": "PREMIUM",
+                                         "machine_type": "n2-standard-4", "disk_type": "pd-ssd",
+                                         "disk_size_gb": 500}).json()
+check("★ /api/savings 按 spec 实时计算",
+      r_sv["ok"] and r_sv["savings"]["enabled"] == 0, str(r_sv["savings"]["enabled"]))
+r_sv2 = client.post("/api/savings", json={"machine_type": "e2-micro", "disk_type": "pd-standard",
+                                          "disk_size_gb": 30, "network_tier": "STANDARD",
+                                          "disable_ops_agent": True, "no_backup": True,
+                                          "no_snapshot_schedule": True,
+                                          "deletion_protection": False}).json()
+check("★ 免费机型组合命中「标准盘+免费机型」省钱项",
+      any(i["key"] == "pd_standard_or_free" and i["enabled"] for i in r_sv2["savings"]["items"]),
+      str([i["key"] for i in r_sv2["savings"]["items"] if i["enabled"]]))
 
-check("★ 每次创建后默认配置中的危险开关始终为 False",
-      cfg["auto_open_firewall"] is False and cfg["preemptible"] is False and cfg["spot"] is False,
-      json.dumps({k: cfg.get(k) for k in ("auto_open_firewall", "preemptible", "spot")}))
+# 经过上面的真实创建，默认配置中的省钱项必须仍然全部开启
+check("★ 每次创建后省钱项默认值不被关闭",
+      cfg["disable_ops_agent"] is True and cfg["no_backup"] is True
+      and cfg["no_snapshot_schedule"] is True,
+      json.dumps({k: cfg.get(k) for k in ("disable_ops_agent", "no_backup",
+                                          "no_snapshot_schedule")}))
 check("★ 最后一次创建显式指定的字段会被记住",
       cfg["machine_type"] == "e2-small" and cfg["image_key"] == "ubuntu-2404-lts"
       and cfg["disk_size_gb"] == 20 and cfg["disk_type"] == "pd-standard",
@@ -607,6 +701,10 @@ for key in ("createApp", "vue.global.prod.js", "region_mode", "checkedAccountIds
 check("控制台含响应式断点（手机）", "@media (max-width:768px)" in html and "@media (max-width:480px)" in html)
 check("控制台含减少动效偏好支持", "prefers-reduced-motion" in html)
 check("表格使用 .resp 响应式类", html.count('class="resp"') >= 5, str(html.count('class="resp"')))
+check("★ 前端含「极速部署预设」入口", "quickMode" in html and "极速部署预设" in html)
+check("★ 前端含省钱优化面板", "省钱优化" in html and "savings.items" in html)
+check("★ 前端出厂默认全开防火墙", "auto_open_firewall:true" in html)
+check("★ 前端出厂默认含无备份", "no_backup:true" in html and "no_backup: c.no_backup !== false" in html)
 
 lh = client.get("/login").text
 check("登录页返回", "验证码" in lh and "captcha" in lh)

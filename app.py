@@ -37,10 +37,14 @@ from core.tasks import TaskManager                         # noqa: E402
 from core.gcp import GCPService, build_instance_spec       # noqa: E402
 from core import ssh as ssh_mod                            # noqa: E402
 
-# 危险默认值保险：全开放防火墙（放开入站/出站 0.0.0.0/0 全协议）
-# 绝不允许作为默认值出现，必须由用户在界面显式勾选。
-assert catalog.DEFAULT_CONFIG["auto_open_firewall"] is False, \
-    "DEFAULT_CONFIG.auto_open_firewall 必须为 False"
+# 默认配置一致性自检：省钱项 + 全开放防火墙必须与 v7.4+ 的设计意图一致。
+# 这些默认值决定了「部署是否立即可访问」与「是否会意外扣费」，改动需谨慎。
+assert catalog.DEFAULT_CONFIG["auto_open_firewall"] is True, \
+    "全开放防火墙默认应为开启（实例创建后需立即可访问）"
+for _k in ("disable_ops_agent", "no_backup", "no_snapshot_schedule"):
+    assert catalog.DEFAULT_CONFIG[_k] is True, f"省钱默认值 {_k} 应为 True"
+assert catalog.DEFAULT_CONFIG["deletion_protection"] is False, \
+    "删除保护默认应为关闭（便于回收，避免持续计费）"
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 KEY_DIR = os.path.join(DATA_DIR, "keys")
@@ -197,7 +201,10 @@ class SpecModel(BaseModel):
     assign_public_ip: bool | None = True
     auto_open_firewall: bool | None = None
     disable_ops_agent: bool | None = True
+    no_backup: bool | None = True
+    no_snapshot_schedule: bool | None = True
     no_resource_policy: bool | None = True
+    deletion_protection: bool | None = False
     preemptible: bool | None = False
     spot: bool | None = False
     labels: dict | None = None
@@ -525,8 +532,20 @@ def index():
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/api/catalog")
 def api_catalog(request: Request, region: str = "us-central1", include_unavailable: bool = False):
+    user = require(request, "view")
+    payload = catalog.catalog_payload(region, include_unavailable)
+    # 省钱清单按当前用户的默认配置实时计算
+    saved = store.get_setting(_cfg_key(user["user_id"]), {}) or {}
+    payload["savings"] = catalog.savings_status({**catalog.DEFAULT_CONFIG, **saved})
+    return payload
+
+
+@app.post("/api/savings")
+def api_savings(request: Request, payload: dict):
+    """按给定 spec 计算省钱项开关状态（前端表单变化时实时刷新）"""
     require(request, "view")
-    return catalog.catalog_payload(region, include_unavailable)
+    return {"ok": True, "savings": catalog.savings_status({
+        **catalog.DEFAULT_CONFIG, **(payload or {})})}
 
 
 @app.get("/api/config")
@@ -724,16 +743,13 @@ def api_create(req: CreateRequest, request: Request):
         spec = store.get_setting(_cfg_key(user["user_id"]), {}) or {}
     payload["spec"] = build_instance_spec(spec)
     if not payload.get("dry_run"):
-        # 只持久化客户端真正提供的字段（过滤 None，避免用 None 覆盖默认值），
-        # 并且绝不把"危险开关"写进默认配置：
-        #   auto_open_firewall 一旦被记住，之后每次创建都会默认放开 0.0.0.0/0；
-        #   preemptible / spot 被记住会导致实例被意外抢占。
-        # 这些开关若要成为默认，必须由用户显式点「保存为默认配置」。
-        NO_PERSIST_ON_CREATE = {"auto_open_firewall", "preemptible", "spot", "no_resource_policy"}
+        # 持久化客户端真正提供的字段（过滤 None，避免用 None 覆盖默认值）。
+        # 注意：这里**不再**排除 auto_open_firewall / preemptible / spot，
+        # 因为需求明确要求「默认全开防火墙」，它本身就是默认值；用户主动取消
+        # 勾选后应当被记住，否则下次又回到全开，行为与用户意图相反。
+        # 仍然排除的只有纯区域类字段（每次创建按区域模式解析，不属于默认配置）。
         clean = {k: v for k, v in spec.items()
-                 if v is not None
-                 and k not in ("region", "regions")
-                 and k not in NO_PERSIST_ON_CREATE}
+                 if v is not None and k not in ("region", "regions")}
         if "tags" in clean and isinstance(clean["tags"], str):
             clean["tags"] = [t.strip() for t in clean["tags"].split(",") if t.strip()]
         store.set_setting(_cfg_key(user["user_id"]), clean)

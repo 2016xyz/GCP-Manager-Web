@@ -158,7 +158,13 @@ DISK_TYPES = {
     "hyperdisk-balanced": {"label": "Hyperdisk Balanced", "hourly_usd_per_gb": 0.0001369, "min_gb": 10, "max_gb": 65536, "allowed_regions": ["us-central1", "us-east1", "us-west1", "us-east4", "europe-west1", "europe-west4", "asia-southeast1"]},
 }
 
-# 默认配置（当用户在页面上不做任何自定义时的兜底，与 v7.6 保持一致）
+# 默认配置（当用户在页面上不做任何自定义时的兜底）
+#
+# 本默认值取向：**极速部署 + 极致省钱**，与 v7.4+ 的设计意图一致：
+#   · 全开放防火墙默认开启 —— 实例创建后立即可访问，不需要再进控制台配规则
+#   · 禁用 Ops Agent —— 避免日志存储 / 监控产生附加费用
+#   · 无备份 —— 不挂快照时间表 / 备份策略，避免磁盘快照存储费用
+#   · 关闭删除保护 —— 便于随时回收实例，避免忘记清理而持续计费
 DEFAULT_CONFIG = {
     "machine_type": "e2-micro",
     "image_key": "ubuntu-minimal-2204",
@@ -169,14 +175,94 @@ DEFAULT_CONFIG = {
     "network_tier": "STANDARD",
     "assign_public_ip": True,
     "tags": ["http-server", "https-server"],
-    # 危险默认值：全开放防火墙默认关闭（会放开入站/出站 0.0.0.0/0 全协议），
-    # 必须由用户在页面上显式勾选，避免无意识的公网暴露。
-    "auto_open_firewall": False,
-    "no_resource_policy": True,
-    "disable_ops_agent": True,
+    # --- 全开放防火墙（默认开启，见上方说明）---
+    "auto_open_firewall": True,
+    # --- 省钱相关 ---
+    "disable_ops_agent": True,        # 禁用 Google Cloud Ops Agent（日志/监控）
+    "no_backup": True,                # 数据保护 → 无备份
+    "no_snapshot_schedule": True,     # 不挂快照时间表（resource_policies 置空）
+    "no_resource_policy": True,       # 不绑定任何资源策略
+    "deletion_protection": False,     # 关闭删除保护，便于回收
     "preemptible": False,
     "spot": False,
 }
+
+# ---------------------------------------------------------------------------
+# 省钱优化清单
+#   每一项都对应 create_instance 里的一处真实实现，用于前端展示「已省下什么」。
+#   key 与 DEFAULT_CONFIG / spec 字段同名，enabled 由 spec 实时计算。
+# ---------------------------------------------------------------------------
+SAVINGS_ITEMS = [
+    {
+        "key": "disable_ops_agent",
+        "label": "禁用 Ops / 监控 Agent",
+        "detail": "写入 metadata google-logging-enabled=false、google-monitoring-enabled=false，"
+                  "不产生日志存储与监控费用",
+        "saved": "日志 0.50/GB + 监控 0.2580/百万样本",
+    },
+    {
+        "key": "no_backup",
+        "label": "数据保护 → 无备份",
+        "detail": "不创建快照时间表、不绑定备份策略（Backup and DR），磁盘不产生快照存储费",
+        "saved": "快照存储 0.026/GB·月",
+    },
+    {
+        "key": "no_snapshot_schedule",
+        "label": "无快照时间表",
+        "detail": "磁盘 resource_policies 置空，GCP 不会按计划自动生成快照",
+        "saved": "免去计划快照累积",
+    },
+    {
+        "key": "deletion_protection_off",
+        "label": "关闭删除保护",
+        "detail": "实例可随时删除回收，避免忘记清理导致持续计费",
+        "saved": "避免僵尸实例空转",
+    },
+    {
+        "key": "standard_tier",
+        "label": "STANDARD 网络层级",
+        "detail": "出站流量每月 200GB 内免费（PREMIUM 不免费）",
+        "saved": "出站 0.085/GB（PREMIUM）→ 0",
+    },
+    {
+        "key": "pd_standard_or_free",
+        "label": "标准盘 + 免费机型",
+        "detail": "e2-micro + pd-standard 30GB 命中 GCP 永久免费额度（限 us-west1/us-central1/us-east1）",
+        "saved": "整机免费额度内 $0",
+    },
+    {
+        "key": "preemptible_or_spot",
+        "label": "抢占式 / Spot 实例",
+        "detail": "计算价格约为按需的 20%（抢占式）或 35%（Spot）",
+        "saved": "计算费 -65% ~ -80%",
+    },
+]
+
+
+def savings_status(spec):
+    """按 spec 计算每个省钱项的开关状态，供前端展示"""
+    spec = spec or {}
+    def on(k, default=False):
+        return bool(spec.get(k, default))
+
+    states = {
+        "disable_ops_agent": on("disable_ops_agent", True),
+        "no_backup": on("no_backup", True),
+        "no_snapshot_schedule": on("no_snapshot_schedule", True),
+        "deletion_protection_off": not bool(spec.get("deletion_protection", False)),
+        "standard_tier": (spec.get("network_tier") or "STANDARD") == "STANDARD",
+        "pd_standard_or_free": (
+            spec.get("machine_type") == "e2-micro"
+            and spec.get("disk_type") == "pd-standard"
+            and int(spec.get("disk_size_gb") or 0) <= 30
+        ),
+        "preemptible_or_spot": on("preemptible") or on("spot"),
+    }
+    items = []
+    for it in SAVINGS_ITEMS:
+        items.append({**it, "enabled": bool(states.get(it["key"]))})
+    enabled = sum(1 for i in items if i["enabled"])
+    return {"items": items, "enabled": enabled, "total": len(items)}
 
 
 def image_source(image_key):

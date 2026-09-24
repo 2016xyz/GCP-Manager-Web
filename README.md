@@ -9,6 +9,13 @@
 2. **Vue 3 响应式控制台** —— 手机 / 平板 / 电脑自适应，配色依据色彩心理学选型。
 3. **登录鉴权** —— 账号 + 密码 + 图形验证码，多角色权限，后台可改密、可加用户。
 
+对齐 v7.4+ 的**极速部署 + 极致省钱**默认行为：
+
+- **默认全开防火墙** —— 创建实例时自动建立 `allow-all-ingress` / `allow-all-egress`，部署后立即可访问
+- **禁用 Ops Agent** —— 不产生日志存储与监控费用
+- **数据保护 → 无备份** —— 不挂快照时间表与备份策略，不产生快照存储费
+- **关闭删除保护** —— 实例可随时回收，避免忘记清理而持续计费
+
 ---
 
 ## 快速开始
@@ -140,30 +147,52 @@ python3 app.py               # 默认 0.0.0.0:8000
 
 ---
 
-## 三、可与原版 v7.6 对照的能力
+## 三、与原版 v7.6 对照 + 需求功能落地
 
 | 能力 | 原版 v7.6（PyQt6 桌面） | 本 Web 版 |
 |---|---|---|
 | 运行形态 | 只有 Windows exe / 源码跑 GUI | 浏览器访问，跨平台，可部署到服务器 |
+| **多账号并行** | 支持导入多个 JSON 密钥 | ✅ 支持多账号批量导入（文件/路径/目录），账号级并发 1–10 |
+| **默认全开防火墙** | 默认开启 | ✅ 默认开启，自动建 `allow-all-ingress`/`allow-all-egress`（入站+出站 `0.0.0.0/0`） |
+| **智能区域管理** | 免费区/付费区二选一 | ✅ 4 种模式：免费区自动 / 付费区自动 / 自定义多区域 / 指定单区域，可设每区配额 |
+| **Root 密码模式** | startup-script 自动改密 + 放开 Root SSH | ✅ 同 |
+| **SSH 密钥模式** | 上传公钥注入项目 metadata | ✅ 同，另支持在线生成密钥对、读服务器公钥文件 |
+| **创建后自动执行命令** | SSH 就绪后自动执行 | ✅ 同，输出实时推到网页日志（WebSocket） |
+| **禁用 Ops Agent** | v7.4 默认禁用 | ✅ 默认禁用，写 `logging/monitoring/ops-agent-enabled=false` |
+| **数据保护 → 无备份** | v7.4 默认无备份 | ✅ 默认无备份，`resource_policies` 置空不挂快照时间表 |
 | 服务器规格 | **硬编码** `e2-micro` + `ubuntu-minimal-2204-lts` + `pd-standard 30GB` | **页面自由选择** 33 机型 / 14 镜像 / 5 磁盘类型 / 10–65536GB，还能手填任意机型名 |
-| 区域 | 免费区/付费区二选一 + 单区域下拉 | 4 种模式：免费区自动 / 付费区自动 / 自定义多区域 / 指定单区域，可设每区域配额 |
 | 登录鉴权 | 无（打开即用） | 账号 + 密码 + 图形验证码，三角色权限，用户管理，审计 |
 | 界面 | PyQt6 固定窗口 | Vue 3 响应式，手机/平板/电脑自适应 |
-| 创建后执行命令 | 有 | 有，输出实时推到网页日志（WebSocket） |
 | 并发 | 固定 `MAX_WORKERS=3` | 实例级并发（1–30）+ 账号级并发（1–10） |
-| 成本预估 | 无 | 按机型单价 × 区域系数 × 磁盘估算月成本，支持抢占式/Spot 折扣 |
+| 成本预估 | 无 | 按机型单价 × 区域系数 × 磁盘估算月成本 |
 | 默认配置作用域 | 全局 | **每用户独立**，互不覆盖 |
 | 敏感信息 | JSON 密钥路径明文入库 | 接口不回传 `key_path` / 密钥内容，密钥收进 `data/keys/` |
 
-### 默认值安全修正
+### 省钱优化清单（界面实时展示，共 7 项）
 
-原版 v7.4+ 默认开启「全开放防火墙」。本版**默认关闭**，并要求用户显式勾选：
+每项都对应 `core/gcp.py::create_instance` 里的一处真实实现，不是文案：
 
-- `catalog.DEFAULT_CONFIG["auto_open_firewall"] = False`，`app.py` 启动时用 `assert` 兜底
-- 创建时**不会**把 `auto_open_firewall` / `preemptible` / `spot` 写回默认配置 ——
-  否则「勾一次全开放防火墙」会静默变成此后每次创建的默认行为
-- 这些危险开关若要成为默认，只能由用户主动点「保存为默认配置」
-- 勾选后前端会以红色标签提示、提交前弹层再次警告
+| # | 省钱项 | 实现位置 | 默认 |
+|---|---|---|---|
+| 1 | 禁用 Ops / 监控 Agent | metadata `google-logging-enabled=false`、`google-monitoring-enabled=false`、`google-ops-agent-enabled=false` | ✅ |
+| 2 | 数据保护 → 无备份 | 不创建快照时间表、不绑定备份策略 | ✅ |
+| 3 | 无快照时间表 | 磁盘 `resource_policies=[]`，不指定 `source_snapshot` | ✅ |
+| 4 | 关闭删除保护 | `instance.deletion_protection=False`，可随时回收避免僵尸实例计费 | ✅ |
+| 5 | STANDARD 网络层级 | 出站 200GB/月内免费（PREMIUM 不免费） | ✅ |
+| 6 | 标准盘 + 免费机型 | `e2-micro` + `pd-standard` ≤30GB 命中 GCP 永久免费额度 | ✅ |
+| 7 | 抢占式 / Spot | 计算费约按需的 20% / 35% | ❌ 默认不抢占 |
+
+出厂默认启用 6/7 项，唯一未启用的是「抢占式 / Spot」（默认不抢占，避免实例被意外回收）。
+界面右侧「💸 省钱优化」卡片会实时显示每项状态与省下的费用项。
+
+### 关于「默认全开防火墙」的取舍
+
+本版按需求默认开启。**必须明确知道它的代价**：
+
+- 它为项目建立 `allow-all-ingress` 与 `allow-all-egress`（`0.0.0.0/0` 全协议），
+  意味着实例的所有端口对所有来源开放，公网暴露面最大。
+- 界面上会有黄色警告条 + 创建前弹层二次确认，提示这是默认行为。
+- 若需要收敛，点「🛡 保守预设」一键关闭，改为仅放开 `http-server` / `https-server` 标签端口。
 
 ---
 
@@ -307,7 +336,7 @@ gcp-manager-web/
 │   ├── console.html       Vue 3 响应式控制台
 │   └── vendor/
 │       └── vue.global.prod.js   Vue 3.5.13（本地托管）
-├── tests_e2e.py           端到端验证（129 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（155 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -319,7 +348,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-用假密钥 + mock 掉 Google 客户端，实测：
+共 155 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -330,8 +359,16 @@ python3 tests_e2e.py
   是否完整落到 `compute.instances.insert` 请求体
 - **E. 区域/成本/任务**（20 项）：4 种区域模式、成本估算与折扣、dry-run、
   实例动作、命令执行、任务与日志
-- **F. 页面与前端**（26 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
-  日志去重、验证码真实渲染（`ink_ratio` 回归）
+- **F. 页面与前端**（30 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
+  日志去重、验证码真实渲染（`ink_ratio` 回归）、极速预设入口、省钱优化面板
+
+另有 **省钱与默认值专项**（12 项）：全开防火墙默认开启、Ops Agent 默认禁用、
+无备份默认开启、删除保护默认关闭、省钱清单 7 项计数、`/api/savings` 实时计算，
+以及**逐字段核对省钱项是否真实落到 `compute.instances.insert` 请求体**：
+`google-logging-enabled=false`、`google-monitoring-enabled=false`、
+`google-ops-agent-enabled=false`、`resource_policies=[]`、无 `source_snapshot`、
+`deletion_protection=False`，以及 `allow-all-ingress`/`allow-all-egress`
+两条防火墙规则的 `0.0.0.0/0` 与 `all` 协议。
 
 ---
 

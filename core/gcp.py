@@ -158,9 +158,13 @@ def build_instance_spec(user_spec):
     spec["preemptible"] = bool(spec.get("preemptible"))
     spec["spot"] = bool(spec.get("spot"))
     spec["assign_public_ip"] = bool(spec.get("assign_public_ip", True))
-    spec["auto_open_firewall"] = bool(spec.get("auto_open_firewall", False))
+    spec["auto_open_firewall"] = bool(spec.get("auto_open_firewall", True))
     spec["disable_ops_agent"] = bool(spec.get("disable_ops_agent", True))
+    # 省钱：数据保护 → 无备份
+    spec["no_backup"] = bool(spec.get("no_backup", True))
+    spec["no_snapshot_schedule"] = bool(spec.get("no_snapshot_schedule", True))
     spec["no_resource_policy"] = bool(spec.get("no_resource_policy", True))
+    spec["deletion_protection"] = bool(spec.get("deletion_protection", False))
     return spec
 
 
@@ -269,7 +273,12 @@ class GCPService:
                     source_image=spec["image_source"],
                     disk_size_gb=spec["disk_size_gb"],
                     disk_type=f"zones/{zone}/diskTypes/{spec['disk_type']}",
-                    resource_policies=[],
+                    # 省钱：不绑定任何资源策略 → 不会挂上快照时间表(Snapshot Schedule)
+                    # 与备份计划(Backup and DR)，磁盘不产生快照存储费用。
+                    # 留空即等价于「数据保护 → 无备份」。
+                    resource_policies=[] if spec.get("no_snapshot_schedule",
+                                                      spec.get("no_backup", True)) else None,
+                    # 不指定 source_snapshot / storage_pool，避免引入额外资源与费用
                 )
             )
 
@@ -291,13 +300,21 @@ class GCPService:
                 network_interfaces=[nic],
             )
 
+            # 省钱：默认关闭删除保护，实例可随时删除回收，
+            # 避免忘记清理导致僵尸实例持续计费。
+            instance.deletion_protection = bool(spec.get("deletion_protection", False))
+
             if spec.get("tags"):
                 instance.tags = compute_v1.Tags(items=spec["tags"])
 
             meta = []
-            if spec.get("disable_ops_agent"):
+            # 省钱：禁用 Google Cloud Ops Agent（日志 + 监控），
+            # 不产生日志存储费与监控样本费。
+            if spec.get("disable_ops_agent", True):
                 meta += [compute_v1.Items(key="google-logging-enabled", value="false"),
                          compute_v1.Items(key="google-monitoring-enabled", value="false")]
+                # 同时阻止控制台默认开启 Ops Agent 的注入
+                meta.append(compute_v1.Items(key="google-ops-agent-enabled", value="false"))
             if startup_script:
                 meta.append(compute_v1.Items(key="startup-script", value=startup_script))
             if meta:
