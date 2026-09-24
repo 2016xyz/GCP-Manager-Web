@@ -824,3 +824,73 @@ html[theme="dark-mode"] .login-page {
     color: #74777a;
     font-size: 12px;
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   登录页页脚：版本号 + 仓库地址
+   ────────────────────────────────────────────────────────────────────
+   相对上游 sysuahb 的一处新增（上游没有此区块）。
+   刻意放在 .wow-login-card 之外 —— 这样卡片的像素结构、尺寸与
+   动画时序完全不受影响，只在其下追加一行浅色说明文字。
+   配色沿用登录页已有的浅蓝白系（#93bde4 / rgba(255,255,255,.7)），
+   保证在深蓝渐变背景上足够可读但不过度抢视线。
+   ════════════════════════════════════════════════════════════════════ */
+.wow-login-footer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 18px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, .78);
+    animation: wow-rise .7s cubic-bezier(.22, .61, .36, 1) both;
+    animation-delay: .12s;                 /* 略晚于卡片入场，形成层次 */
+}
+
+.wow-login-repo {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: rgba(255, 255, 255, .82);
+    text-decoration: none;
+    padding: 3px 8px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, .22);
+    background: rgba(255, 255, 255, .08);
+    transition: background .15s, color .15s, border-color .15s;
+    max-width: min(320px, 76vw);
+}
+
+.wow-login-repo span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wow-login-repo:hover {
+    background: rgba(255, 255, 255, .17);
+    border-color: rgba(255, 255, 255, .38);
+    color: #fff;
+}
+
+.wow-login-repo .gh-ic { flex: none; opacity: .9 }
+
+.wow-login-vsep {
+    width: 1px;
+    height: 13px;
+    background: rgba(255, 255, 255, .26);
+}
+
+.wow-login-ver {
+    font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
+    color: rgba(255, 255, 255, .72);
+    letter-spacing: .3px;
+}
+
+@media (max-width: 380px) {
+    .wow-login-footer { margin-top: 12px; font-size: 11px; gap: 7px }
+    .wow-login-repo { padding: 2px 7px }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wow-login-footer { animation: none }
+}

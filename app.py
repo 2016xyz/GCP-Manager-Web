@@ -27,6 +27,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 from core import catalog                                   # noqa: E402
+from core import version as ver                            # noqa: E402
 from core import auth as auth_mod                          # noqa: E402
 from core.auth import (captcha_store, login_guard, PERMISSIONS, ROLE_ADMIN,  # noqa: E402
                        ROLE_LABELS, ROLES, ROLE_OPERATOR, ROLE_VIEWER,
@@ -64,8 +65,9 @@ store = Store(os.path.join(DATA_DIR, "gcp_web.db"))
 users_store = UserStore(store)
 tm = TaskManager(store)
 
-app = FastAPI(title="GCP Manager Web", version="2.0.0",
-              description="GCP 批量管理 Web 版 — 自定义服务器配置 + Vue3 响应式控制台 + 登录鉴权")
+app = FastAPI(title=ver.APP_NAME, version=ver.VERSION,
+              description="GCP 批量管理 Web 版 — 自定义服务器配置 + Vue3 响应式控制台 + 登录鉴权"
+                          f"（{ver.REPO_URL}）")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -108,6 +110,9 @@ bootstrap_admin()
 PUBLIC_PATHS = {
     "/login", "/api/auth/login", "/api/auth/captcha", "/api/auth/logout",
     "/api/auth/me", "/favicon.ico",
+    # 登录页要在未登录状态下显示版本号与仓库地址，故此接口匿名可读。
+    # 只回版本、仓库、更新日志，不含任何账号或环境信息。
+    "/api/version",
 }
 PUBLIC_PREFIXES = ("/static/",)
 
@@ -640,6 +645,12 @@ def _norm_region(r):
     return r
 
 
+@app.get("/api/version")
+def api_version():
+    """版本与仓库信息。刻意不要求登录 —— 登录页也要展示版本号。"""
+    return {"ok": True, **ver.info()}
+
+
 @app.get("/api/inspect/sections")
 def api_inspect_sections(request: Request):
     """列出可勘察的节，供前端渲染勾选项"""
@@ -1001,7 +1012,15 @@ def api_status(request: Request):
     require(request, "view")
     users = users_store.list_users()
     return {
-        "ok": True, "version": app.version,
+        "ok": True,
+        # 版本与仓库信息统一来自 core/version.py
+        "version": ver.VERSION,
+        "app_name": ver.APP_NAME,
+        "app_name_cn": ver.APP_NAME_CN,
+        "repo": ver.REPO_URL,
+        "repo_name": ver.REPO_NAME,
+        "issue_url": ver.ISSUE_URL,
+        "changelog": ver.CHANGELOG,
         "accounts": len(store.get_accounts()),
         "vms_with_password": len(store.get_all_vms()),
         "paramiko": ssh_mod.check_paramiko(),

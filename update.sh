@@ -186,10 +186,13 @@ else
   echo "        docker compose up -d --build # 容器方式"
 fi
 
+# 从 core/version.py 读产品版本（单一来源）
+APP_VER="$(grep -m1 '^VERSION = ' "$APP_DIR/core/version.py" 2>/dev/null | cut -d'"' -f2 || true)"
+
 echo
-ok "升级完成"
+ok "升级完成${APP_VER:+ —— 当前版本 v$APP_VER}"
 if [ "$IS_GIT" = "1" ]; then
-  echo "      当前版本 $NEW_SHA"
+  echo "      提交 $NEW_SHA"
   echo "      回滚方式 git reset --hard $LOCAL_SHA"
 fi
 echo

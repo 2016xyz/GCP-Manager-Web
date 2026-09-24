@@ -147,6 +147,40 @@ a{color:var(--brand);text-decoration:none}
   .insp-hd{padding:8px 9px}
 }
 
+
+/* ══════════ 按钮分隔线（主要 / 辅助 / 危险 三段划分）══════════
+   用视觉分隔代替拥挤排布：破坏性按钮不再紧贴常规按钮，
+   减少「手滑点到隔壁」的概率。 */
+.br{width:1px;height:22px;background:var(--line);flex:none;margin:0 3px;align-self:center}
+
+/* ══════════ 侧栏页脚：仓库链接 + 版本号 ══════════ */
+.sb-link{display:flex;align-items:center;gap:8px;margin-top:7px;padding:8px 10px;
+  border-radius:9px;color:var(--sidebar-tx);font-size:12px;text-decoration:none;
+  border:1px solid rgba(148,163,184,.18);transition:background .14s,color .14s,border-color .14s}
+.sb-link:hover{background:rgba(148,163,184,.12);color:#e2e8f0;border-color:rgba(148,163,184,.3)}
+.sb-link .gh-ic{flex:none;opacity:.85}
+.sb-link .lb{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sb-link .ver{margin-left:auto;flex:none;font-family:var(--mono);font-size:11px;
+  background:rgba(148,163,184,.16);border-radius:6px;padding:1px 6px}
+
+/* ══════════ 关于卡片 ══════════ */
+.repo-link{color:var(--brand);text-decoration:none;display:inline-flex;align-items:center;gap:5px}
+.repo-link:hover{text-decoration:underline}
+.repo-link .gh-ic{flex:none}
+.about-h{margin:0 0 7px;font-size:12px;color:var(--muted);font-weight:700}
+.about-ul{margin:0;padding-left:19px;font-size:12.5px;color:var(--ink-2);line-height:1.75}
+.about-ul li{margin-bottom:2px}
+
+@media (max-width:1023px){
+  .sb-link{justify-content:center;padding:8px 0}
+  .sb-link .lb{display:none}
+}
+@media (max-width:768px){
+  /* 窄屏下按钮本来就换行，分隔线改成横向更自然 */
+  .br{width:100%;height:1px;margin:1px 0}
+  .sb-link{display:none}
+}
+
 /* ══════════ 侧栏 / 导航 ══════════ */
 .sidebar{
   position:fixed;left:0;top:0;bottom:0;width:var(--sb-w);z-index:40;
@@ -541,15 +575,18 @@ pre.log.big{max-height:520px}
   <aside class="sidebar">
     <div class="sb-brand">
       <div class="lg">G</div>
-      <div class="tx">GCP Manager<small>WEB CONSOLE</small></div>
+      <div class="tx">{{ ver.name || 'GCP Manager' }}<small>WEB CONSOLE · v{{ ver.version || "—" }}</small></div>
     </div>
     <nav class="sb-nav">
-      <button v-for="t in visibleTabs" :key="t.id" class="nav-i"
-              :class="{on:tab===t.id}" @click="go(t.id)" :title="t.label">
-        <span class="ic">{{ t.icon }}</span>
-        <span class="lb">{{ t.label }}</span>
-        <span class="bd" v-if="t.id==='tasks' && runningTasks.length">{{ runningTasks.length }}</span>
-      </button>
+      <template v-for="g in navGroups" :key="g.name">
+        <div class="sb-group">{{ g.name }}</div>
+        <button v-for="t in g.tabs" :key="t.id" class="nav-i"
+                :class="{on:tab===t.id}" @click="go(t.id)" :title="t.label">
+          <span class="ic">{{ t.icon }}</span>
+          <span class="lb">{{ t.label }}</span>
+          <span class="bd" v-if="t.id==='tasks' && runningTasks.length">{{ runningTasks.length }}</span>
+        </button>
+      </template>
     </nav>
     <div class="sb-foot">
       <div class="who" @click="go('profile')" :title="me.username + ' · ' + me.role_label">
@@ -560,6 +597,12 @@ pre.log.big{max-height:520px}
         </div>
         <button class="lo" @click.stop="logout" title="退出登录">⏻</button>
       </div>
+      <a class="sb-link" :href="ver.repo || '#'" target="_blank" rel="noopener noreferrer"
+         :title="ver.repo ? ('在 GitHub 上查看源码：' + ver.repo) : 'GitHub'">
+        <svg class="gh-ic" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="lb">{{ ver.repo_name || 'GitHub' }}</span>
+        <span class="ver">v{{ ver.version || '—' }}</span>
+      </a>
     </div>
   </aside>
 
@@ -663,8 +706,10 @@ pre.log.big{max-height:520px}
               <h2><span class="n">2</span>网络与启动行为</h2>
               <div class="row" style="margin-top:12px">
                 <button class="p" @click="quickMode">⚡ 极速部署预设</button>
-                <button class="d" @click="openFirewallMode">🔥 放开全开防火墙</button>
                 <span class="hint">一键套用推荐参数组合，仍可手动微调</span>
+                <span class="br"></span>
+                <button class="d" @click="openFirewallMode">🔥 放开全开防火墙</button>
+                <span class="hint">危险动作：入站与出站全部放开，仅建议临时调试使用</span>
               </div>
               <div class="row" style="margin-top:8px">
                 <span class="pill g">省钱优化默认已启用</span>
@@ -798,9 +843,10 @@ pre.log.big{max-height:520px}
               <h2><span class="n">4</span>目标账号与创建规模
                 <small>已选 {{ checkedAccountIds.length }} / {{ accounts.length }} 个账号</small></h2>
               <div class="row" style="margin-bottom:9px">
+                <button class="sm" @click="loadAccounts">↻ 刷新账号</button>
+                <span class="br"></span>
                 <button class="sm" @click="selectAllAccounts(true)">全选</button>
                 <button class="sm" @click="selectAllAccounts(false)">全不选</button>
-                <button class="sm" @click="loadAccounts">↻ 刷新账号</button>
                 <span class="hint" v-if="!accounts.length">还没有账号，请到「账号管理」导入 GCP 服务账号 JSON</span>
               </div>
               <div class="tw" style="max-height:210px">
@@ -835,8 +881,10 @@ pre.log.big{max-height:520px}
                 <button class="p" :disabled="creating" @click="submitCreate(false)">
                   <span v-if="creating" class="inline-spin"></span>{{ creating?'提交中…':'🚀 开始创建' }}</button>
                 <button @click="submitCreate(true)">🔍 预检（Dry-run）</button>
+                <span class="br"></span>
                 <button @click="saveConfig">💾 保存为默认配置</button>
                 <button @click="loadConfig">↻ 载入已保存配置</button>
+                <span class="br"></span>
                 <button class="gh" @click="logs.create=''">清空日志</button>
               </div>
             </div>
@@ -940,6 +988,7 @@ pre.log.big{max-height:520px}
               <select v-model="accForm.proxy_type"><option>HTTPS</option><option>SOCKS5</option></select></label>
             <div class="row" style="align-items:flex-end">
               <button class="p" @click="uploadAccounts">⬆ 上传并导入</button>
+              <span class="br"></span>
               <button @click="addAccountByPath">＋ 按路径导入</button>
               <button @click="importDir">📂 导入目录</button>
             </div>
@@ -952,6 +1001,7 @@ pre.log.big{max-height:520px}
           <div class="row" style="margin-bottom:9px">
             <button @click="loadAccounts">↻ 刷新</button>
             <button @click="testAllAccounts">🔌 测试全部连通性</button>
+            <span class="br"></span>
             <button class="d" v-if="can('account')" @click="deleteCheckedAccounts">🗑 删除勾选</button>
           </div>
           <div class="tw" v-if="accounts.length">
@@ -992,12 +1042,15 @@ pre.log.big{max-height:520px}
           <div class="row" style="margin-bottom:9px">
             <button class="p" :disabled="loadingInst" @click="loadInstances(true)">
               <span v-if="loadingInst" class="inline-spin"></span>{{ loadingInst?'同步中…':'↻ 同步云端实例' }}</button>
+            <span class="br"></span>
             <button class="sm" @click="selectAllInstances(true)">全选</button>
             <button class="sm" @click="selectAllInstances(false)">全不选</button>
             <template v-if="can('operate')">
+              <span class="br"></span>
               <button class="s sm" @click="instanceAction('start')">▶ 启动</button>
               <button class="sm" @click="instanceAction('stop')">⏹ 停止</button>
               <button class="sm" @click="instanceAction('reset')">🔄 重启</button>
+              <span class="br"></span>
               <button class="d sm" @click="instanceAction('delete')">🗑 删除</button>
             </template>
           </div>
@@ -1261,7 +1314,9 @@ pre.log.big{max-height:520px}
           </div>
           <div class="row" style="margin-top:13px">
             <button class="p" :disabled="!can('operate')" @click="runCommand">▶ 执行</button>
+            <span class="br"></span>
             <button @click="loadTasks">↻ 刷新任务</button>
+            <span class="br"></span>
             <button class="gh" @click="execOut=''">清空结果</button>
             <span class="hint" v-if="!can('operate')">当前角色为只读，无法执行命令</span>
           </div>
@@ -1278,6 +1333,7 @@ pre.log.big{max-height:520px}
           <h2>任务列表</h2>
           <div class="row" style="margin-bottom:9px">
             <button @click="loadTasks">↻ 刷新</button>
+            <span class="br"></span>
             <button class="d" v-if="can('operate')" @click="clearLogs">清空后端日志</button>
           </div>
           <div class="tw" v-if="tasks.length">
@@ -1453,6 +1509,28 @@ pre.log.big{max-height:520px}
         </div>
 
         <div class="card">
+          <h2>关于 <small>{{ ver.name_cn || 'GCP 批量管理控制台' }}</small></h2>
+          <div class="kv">
+            <b>版本</b><span><span class="badge b">{{ ver.version || '—' }}</span>
+              <span class="hint" v-if="ver.released">发布于 {{ ver.released }}</span></span>
+            <b>仓库</b><span>
+              <a class="repo-link" :href="ver.repo || '#'" target="_blank" rel="noopener noreferrer">
+                <svg class="gh-ic" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> {{ ver.repo_name || '—' }}</a></span>
+            <b>问题反馈</b><span>
+              <a class="repo-link" :href="ver.issue_url || '#'" target="_blank" rel="noopener noreferrer">
+                {{ ver.issue_url || '—' }}</a></span>
+          </div>
+          <div class="sep"></div>
+          <h6 class="about-h">v{{ ver.version || '—' }} 更新内容</h6>
+          <ul class="about-ul">
+            <li v-for="(n,i) in (ver.latest_notes||[])" :key="i">{{ n }}</li>
+          </ul>
+          <div class="hint" style="margin-top:7px">
+            升级到最新版：在部署目录执行 <code>bash update.sh</code>，全程不触碰 data/ 账号数据。
+          </div>
+        </div>
+
+        <div class="card">
           <h2>角色权限说明</h2>
           <div class="tw">
             <table class="resp">
@@ -1510,15 +1588,22 @@ pre.log.big{max-height:520px}
    ════════════════════════════════════════════════════════════════════ */
 const { createApp } = Vue;
 
+/* 导航顺序按「实际操作流程」排，而不是按开发顺序：
+   运维主线放最前（建机器 → 管机器 → 批量执行 → 看任务），
+   其次是 GCP 侧的账号与资源勘察，最后是系统级管理。
+   分组名会渲染成侧栏小标题（≤1023px 时自动隐藏）。 */
 const TABS = [
-  {id:'create',   icon:'🚀', label:'创建实例', desc:'自定义机型 / 镜像 / 磁盘 / 区域'},
-  {id:'accounts', icon:'👤', label:'账号管理', desc:'导入与管理 GCP 服务账号'},
-  {id:'instances',icon:'📋', label:'实例列表', desc:'同步、启停、重启、删除'},
-  {id:'inspect',  icon:'🛰', label:'GCP 资源', desc:'项目 / 配额 / 网络 / 存储 / API 全览'},
-  {id:'exec',     icon:'💻', label:'命令执行', desc:'批量 SSH 执行命令'},
-  {id:'tasks',    icon:'🗂', label:'任务日志', desc:'任务队列与实时日志'},
-  {id:'users',    icon:'👥', label:'用户管理', desc:'用户 / 角色 / 会话 / 审计', perm:'user'},
-  {id:'profile',  icon:'⚙', label:'个人设置', desc:'账号信息与修改密码'},
+  // ── 运维主线：日常使用频率最高，按流程先后排列 ──
+  {id:'create',   group:'运维', icon:'🚀', label:'创建实例', desc:'自定义机型 / 镜像 / 磁盘 / 区域'},
+  {id:'instances',group:'运维', icon:'📋', label:'实例列表', desc:'同步、启停、重启、删除'},
+  {id:'exec',     group:'运维', icon:'💻', label:'命令执行', desc:'批量 SSH 执行命令'},
+  {id:'tasks',    group:'运维', icon:'🗂', label:'任务日志', desc:'任务队列与实时日志'},
+  // ── 资源：GCP 侧的对象与凭据 ──
+  {id:'inspect',  group:'资源', icon:'🛰', label:'GCP 资源', desc:'项目 / 配额 / 网络 / 存储 / API 全览'},
+  {id:'accounts', group:'资源', icon:'👤', label:'账号管理', desc:'导入与管理 GCP 服务账号'},
+  // ── 系统：管理面 ──
+  {id:'users',    group:'系统', icon:'👥', label:'用户管理', desc:'用户 / 角色 / 会话 / 审计', perm:'user'},
+  {id:'profile',  group:'系统', icon:'⚙', label:'个人设置', desc:'账号信息与修改密码'},
 ];
 
 /* 出厂默认：默认收敛暴露面 + 极致省钱
@@ -1637,6 +1722,7 @@ const __APP_REF__ = createApp({
     accForm:{key_path:'', folder:'', proxy:'', proxy_type:'HTTPS'},
     userForm:{username:'', password:'', role:'operator', display_name:'', must_change:true},
     pwForm:{old_password:'', new_password:'', confirm:''},
+    ver:{version:'', name:'', repo:'', repo_name:'', issue_url:'', changelog:[]},
     inspect:{}, inspecting:false, inspectErr:'', inspectAt:0,
     inspectAccount:0, inspectRegion:'', inspectZone:'',
     inspectProjectId:'', inspectFailed:[], inspectOpen:{}, inspectLoaded:'',
@@ -1653,6 +1739,17 @@ const __APP_REF__ = createApp({
       return TABS.filter(t => !t.perm || this.can(t.perm));
     },
     currentTab(){ return TABS.find(t=>t.id===this.tab) || TABS[0]; },
+    /* 按 group 聚合可见标签页，保持 TABS 里的先后顺序 */
+    navGroups(){
+      const out = [];
+      this.visibleTabs.forEach(t => {
+        const name = t.group || '其他';
+        let g = out.find(x => x.name === name);
+        if(!g){ g = {name, tabs:[]}; out.push(g); }
+        g.tabs.push(t);
+      });
+      return out;
+    },
     /* 已拿到的分区，按 META 顺序排列，便于模板遍历 */
     inspectList(){
       return INSPECT_META
@@ -1955,6 +2052,16 @@ const __APP_REF__ = createApp({
       else if(id==='inspect') this.enterInspect();
     },
 
+    /* ───────── 版本信息 ─────────
+       单一来源在后端 core/version.py，此处只负责取回并渲染，
+       避免版本号在前后端各写一份而慢慢不一致。 */
+    async loadVersion(){
+      try{
+        const r = await this.api('/api/version');
+        if(r && r.ok) this.ver = r;
+      }catch(e){ /* 版本信息拿不到不影响使用，静默降级 */ }
+    },
+
     /* ───────── 启动 ───────── */
     async boot(){
       try{
@@ -1963,7 +2070,9 @@ const __APP_REF__ = createApp({
         if(me.user.must_change_password){ location.href='/login'; return; }
         this.me = me.user;
         this.permissions = me.permissions || [];
-        await Promise.all([this.loadStatus(), this.loadCatalog(), this.loadAccounts(), this.loadConfig()]);
+        // 版本信息与其余初始化并行拉取，互不阻塞
+        await Promise.all([this.loadStatus(), this.loadCatalog(), this.loadAccounts(),
+                           this.loadConfig(), this.loadVersion()]);
         this.loadInstances(false);
         this.loadTasks();
         // 必须等日志尾部拉取完成（logSeq 推进到最新）再建立 WebSocket，

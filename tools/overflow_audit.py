@@ -58,7 +58,10 @@ AUDIT_JS = r"""() => {
     //    文字行常有 1~3px 的舍入差，算进来全是假阳性；
     //    真溢出视口的情况由 ① 兜住。
     const c = getComputedStyle(el);
-    if (!isScroller && el.children.length === 0
+    // 带 text-overflow:ellipsis 的元素是「故意截断」（例如侧栏里过长的仓库名），
+    // 属于设计意图而非破版，必须排除，否则满屏假阳性。
+    const ellipsis = c.textOverflow === 'ellipsis';
+    if (!isScroller && !ellipsis && el.children.length === 0
         && (c.overflowX === 'hidden' || c.overflowX === 'clip')
         && el.scrollWidth > el.clientWidth + 2 && el.clientWidth > 0) {
       clipped.push({选择器: el.tagName + (cls ? '.' + cls.trim().split(/\s+/)[0] : ''),

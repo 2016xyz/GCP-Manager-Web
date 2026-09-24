@@ -2,6 +2,15 @@
 # 单阶段即可：纯 Python + 静态文件，无构建步骤（Vue 用全局构建本地托管）
 FROM python:3.12-slim
 
+# OCI 标准标签：镜像元数据里也带上版本与仓库，
+# 便于 `docker inspect` 直接看出这是哪个版本。
+# 版本号与 core/version.py 保持一致（升级时一并改）。
+LABEL org.opencontainers.image.title="GCP Manager Web" \
+      org.opencontainers.image.version="1.0.1" \
+      org.opencontainers.image.source="https://github.com/2016xyz/GCP-Manager-Web" \
+      org.opencontainers.image.url="https://github.com/2016xyz/GCP-Manager-Web" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     GCPWEB_DATA_DIR=/app/data \

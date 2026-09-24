@@ -1302,6 +1302,169 @@ check("★ 登录页未受影响",
       client.get("/login").status_code == 200
       and "wow-login-card" in client.get("/login").text)
 
+print("\n── M. 版本号 / 导航分组 / 按钮排序 ──")
+
+from core import version as ver_mod  # noqa: E402
+
+# ── 版本号：单一来源 ────────────────────────────────────────────────
+check("★ core/version.py 定义版本号且符合语义化格式",
+      bool(__import__("re").fullmatch(r"\d+\.\d+\.\d+", ver_mod.VERSION)),
+      ver_mod.VERSION)
+check("★ 版本从 v1.0.1 起算", ver_mod.VERSION >= "1.0.1", ver_mod.VERSION)
+
+# 三处必须一致：FastAPI 元数据 / /api/status / /api/version
+check("★ FastAPI 版本号取自 version 模块（不再硬编码）",
+      appmod.app.version == ver_mod.VERSION,
+      f"fastapi={appmod.app.version} module={ver_mod.VERSION}")
+
+r = client.get("/api/version")
+check("★ /api/version 返回 ok", r.status_code == 200 and r.json().get("ok") is True)
+_v = r.json()
+check("★ /api/version 的版本与模块一致", _v.get("version") == ver_mod.VERSION)
+check("★ /api/version 带仓库地址",
+      _v.get("repo") == ver_mod.REPO_URL and "github.com" in _v.get("repo", ""))
+check("★ /api/version 带反馈地址与更新说明",
+      _v.get("issue_url", "").endswith("/issues") and len(_v.get("latest_notes") or []) > 0)
+check("★ 更新日志最新一条与当前版本一致",
+      ver_mod.CHANGELOG[0]["version"] == ver_mod.VERSION,
+      f"{ver_mod.CHANGELOG[0]['version']} vs {ver_mod.VERSION}")
+
+# 未登录也能拿到版本（登录页要显示版本号）
+_r0 = client.get("/api/version")
+check("★ /api/version 匿名可读（登录页展示需要）", _r0.status_code == 200, str(_r0.status_code))
+check("★ /api/version 不泄露账号或环境信息",
+      not any(k in _r0.json() for k in ("accounts", "users", "vms_with_password", "key_path")))
+
+login("admin", ADMIN_PW)
+_st = client.get("/api/status").json()
+check("★ /api/status 与 /api/version 版本一致",
+      _st.get("version") == _v.get("version"), f"{_st.get('version')} vs {_v.get('version')}")
+check("★ /api/status 也带仓库与更新日志",
+      _st.get("repo") == ver_mod.REPO_URL and isinstance(_st.get("changelog"), list))
+
+# ── 导航分组与顺序 ──────────────────────────────────────────────────
+_ct3 = client.get("/static/console.html").text
+check("★ 导航定义了分组字段",
+      "group:'运维'" in _ct3 and "group:'资源'" in _ct3 and "group:'系统'" in _ct3)
+check("★ 侧栏按分组渲染（模板 v-for 分组 + 小标题）",
+      'v-for="g in navGroups"' in _ct3 and 'class="sb-group"' in _ct3)
+check("★ 有 navGroups 计算属性按顺序聚合",
+      "navGroups(){" in _ct3 and "this.visibleTabs.forEach" in _ct3)
+
+# 顺序断言：运维主线在前，系统管理在后
+_order = ["{id:'create'", "{id:'instances'", "{id:'exec'", "{id:'tasks'",
+          "{id:'inspect'", "{id:'accounts'", "{id:'users'", "{id:'profile'"]
+_pos = [_ct3.find(x) for x in _order]
+check("★ 导航顺序为：创建→实例→执行→任务→资源→账号→用户→设置",
+      all(p_ > 0 for p_ in _pos) and _pos == sorted(_pos), str(_pos))
+check("★ 创建实例排在第一位（主流程入口）",
+      _ct3.find("{id:'create'") < _ct3.find("{id:'accounts'"))
+
+# ── 版本号与仓库地址的展示位 ────────────────────────────────────────
+check("★ 侧栏品牌显示版本号", "WEB CONSOLE · v{{ ver.version" in _ct3)
+check("★ 侧栏页脚有仓库链接 + 版本徽章",
+      'class="sb-link"' in _ct3 and 'class="ver"' in _ct3
+      and "ver.repo_name" in _ct3)
+check("★ 侧栏页脚链接带 rel=noopener noreferrer（防 tabnabbing）",
+      'rel="noopener noreferrer"' in _ct3)
+check("★ 个人设置有「关于」卡片（版本/仓库/反馈/更新内容）",
+      "关于 <small>" in _ct3 and 'class="repo-link"' in _ct3
+      and "about-ul" in _ct3 and "ver.issue_url" in _ct3)
+check("★ 启动时并行加载版本信息", "this.loadVersion()" in _ct3)
+
+# 登录页
+_lh3 = client.get("/login").text
+check("★ 登录页页脚有版本与仓库",
+      'class="wow-login-footer"' in _lh3 and 'id="verText"' in _lh3
+      and 'id="repoLink"' in _lh3)
+check("★ 登录页主动拉取 /api/version", "loadVersion()" in _lh3
+      and "fetch('/api/version')" in _lh3)
+check("★ 登录页链接同样带 rel=noopener noreferrer",
+      'rel="noopener noreferrer"' in _lh3)
+_lcs = client.get("/static/login.css").text
+check("★ 登录页页脚样式已定义且尊重减少动效",
+      ".wow-login-footer" in _lcs and "prefers-reduced-motion" in _lcs)
+
+# ── 按钮排序：分组与分隔线 ──────────────────────────────────────────
+check("★ 定义了按钮分隔线样式", ".br{width:1px;height:22px" in _ct3)
+check("★ 窄屏分隔线转横向（跟随换行）",
+      ".br{width:100%;height:1px;margin:1px 0}" in _ct3)
+
+# 破坏性操作必须与常规操作之间隔一个分隔线
+def _sep_between(text, left, right):
+    """判断 left 与 right 之间是否夹着一条按钮分隔线"""
+    i, j = text.find(left), text.find(right)
+    return i > 0 and j > i and '<span class="br"></span>' in text[i:j]
+
+
+# 按标签页切片，避免同名按钮在别处先被匹配到
+def _tab_slice(text, start_tab, end_tab=None):
+    i = text.find("tab==='" + start_tab + "'")
+    j = text.find("tab==='" + end_tab + "'") if end_tab else len(text)
+    return text[i:j] if i >= 0 else ''
+
+
+_inst = _tab_slice(_ct3, 'instances', 'exec')
+check("★ 实例列表：重启与删除之间有分隔线",
+      _sep_between(_inst, '🔄 重启</button>', '🗑 删除</button>'))
+check("★ 实例列表：同步与全选之间有分隔线",
+      _sep_between(_inst, '↻ 同步云端实例', '全选</button>'))
+
+_acct = _tab_slice(_ct3, 'accounts', 'inspect')
+check("★ 账号管理：删除勾选前有分隔线",
+      _sep_between(_acct, '🔌 测试全部连通性</button>', '🗑 删除勾选</button>'))
+
+_task = _tab_slice(_ct3, 'tasks', 'users')
+check("★ 任务日志：清空后端日志前有分隔线",
+      _sep_between(_task, '↻ 刷新</button>', '清空后端日志</button>'))
+
+_exec = _tab_slice(_ct3, 'exec', 'tasks')
+check("★ 命令执行：清空结果前有分隔线",
+      _sep_between(_exec, '↻ 刷新任务</button>', '清空结果</button>'))
+
+# 创建页：危险的全开防火墙不再紧挨极速预设
+_create = _tab_slice(_ct3, 'create', 'accounts')
+check("★ 创建页：危险动作与极速预设之间已隔开",
+      _sep_between(_create, '⚡ 极速部署预设</button>', '🔥 放开全开防火墙</button>'))
+
+# 创建页：危险的全开防火墙不再紧挨极速预设
+_i = _ct3.find('<button class="p" @click="quickMode">⚡ 极速部署预设</button>')
+_j = _ct3.find('<button class="d" @click="openFirewallMode">🔥 放开全开防火墙</button>')
+check("★ 创建页：危险动作与预设之间已隔开",
+      _i > 0 and _j > _i and '<span class="br"></span>' in _ct3[_i:_j])
+
+# 实例列表四段划分
+_inst = _ct3[_ct3.find("tab==='instances'"):]
+check("★ 实例列表按钮分为四段（同步/选择/运维/删除）",
+      _inst.count('<span class="br"></span>') >= 3,
+      f"分隔线 {_inst.count('<span class="br"></span>')} 条")
+
+# ── 版本号到处散落容易漂移，用测试守住一致性 ────────────────────────
+import re as _re  # noqa: E402
+
+_df = open(os.path.join(BASE_DIR, "Dockerfile"), encoding="utf-8").read()
+_rd = open(os.path.join(BASE_DIR, "README.md"), encoding="utf-8").read()
+_m = _re.search(r"image\.version=\"([^\"]+)\"", _df)
+_mb = _re.search(r"version-([\d.]+)-1a73e8", _rd)
+check("★ Dockerfile 的 OCI 版本标签与 version 模块一致",
+      bool(_m) and _m.group(1) == ver_mod.VERSION,
+      f"Dockerfile={_m.group(1) if _m else None} module={ver_mod.VERSION}")
+check("★ README 徽章版本与 version 模块一致",
+      bool(_mb) and _mb.group(1) == ver_mod.VERSION,
+      f"README={_mb.group(1) if _mb else None} module={ver_mod.VERSION}")
+check("★ README 里写的仓库地址与 version 模块一致",
+      ver_mod.REPO_URL in _rd)
+check("★ 页面/接口里的版本号不是硬编码",
+      '"2.0.0"' not in open(os.path.join(BASE_DIR, "app.py"), encoding="utf-8").read())
+
+# ── 安装与升级脚本也要报版本 ────────────────────────────────────────
+_u3 = open(os.path.join(BASE_DIR, "update.sh"), encoding="utf-8").read()
+_i3 = open(os.path.join(BASE_DIR, "install.sh"), encoding="utf-8").read()
+check("★ update.sh 升级后打印产品版本",
+      "core/version.py" in _u3 and "当前版本 v" in _u3)
+check("★ install.sh 安装后打印版本与仓库地址",
+      "core/version.py" in _i3 and "GCP-Manager-Web" in _i3)
+
 print("\n── G. 安装与部署产物 ──")
 
 import subprocess as _sp  # noqa: E402
