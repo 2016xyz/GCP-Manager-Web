@@ -160,8 +160,8 @@ DISK_TYPES = {
 
 # 默认配置（当用户在页面上不做任何自定义时的兜底）
 #
-# 本默认值取向：**极速部署 + 极致省钱**，与 v7.4+ 的设计意图一致：
-#   · 全开放防火墙默认开启 —— 实例创建后立即可访问，不需要再进控制台配规则
+# 本默认值取向：**默认收敛暴露面 + 极致省钱**
+#   · 全开放防火墙默认【关闭】—— 不自动放开 0.0.0.0/0；需要时由用户显式勾选
 #   · 禁用 Ops Agent —— 避免日志存储 / 监控产生附加费用
 #   · 无备份 —— 不挂快照时间表 / 备份策略，避免磁盘快照存储费用
 #   · 关闭删除保护 —— 便于随时回收实例，避免忘记清理而持续计费
@@ -175,8 +175,8 @@ DEFAULT_CONFIG = {
     "network_tier": "STANDARD",
     "assign_public_ip": True,
     "tags": ["http-server", "https-server"],
-    # --- 全开放防火墙（默认开启，见上方说明）---
-    "auto_open_firewall": True,
+    # --- 全开放防火墙：默认关闭（需显式开启）---
+    "auto_open_firewall": False,
     # --- 省钱相关 ---
     "disable_ops_agent": True,        # 禁用 Google Cloud Ops Agent（日志/监控）
     "no_backup": True,                # 数据保护 → 无备份

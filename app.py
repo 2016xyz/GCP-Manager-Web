@@ -37,10 +37,12 @@ from core.tasks import TaskManager                         # noqa: E402
 from core.gcp import GCPService, build_instance_spec       # noqa: E402
 from core import ssh as ssh_mod                            # noqa: E402
 
-# 默认配置一致性自检：省钱项 + 全开放防火墙必须与 v7.4+ 的设计意图一致。
-# 这些默认值决定了「部署是否立即可访问」与「是否会意外扣费」，改动需谨慎。
-assert catalog.DEFAULT_CONFIG["auto_open_firewall"] is True, \
-    "全开放防火墙默认应为开启（实例创建后需立即可访问）"
+# 默认配置一致性自检
+# 「全开放防火墙」默认关闭：不自动放开 0.0.0.0/0，避免无意识的公网暴露。
+# 省钱项默认开启：禁用 Ops Agent、无备份、无快照时间表、关闭删除保护。
+# 这些默认值直接决定安全暴露面与是否意外扣费，改动需谨慎。
+assert catalog.DEFAULT_CONFIG["auto_open_firewall"] is False, \
+    "全开放防火墙默认必须为 False（不自动放开 0.0.0.0/0）"
 for _k in ("disable_ops_agent", "no_backup", "no_snapshot_schedule"):
     assert catalog.DEFAULT_CONFIG[_k] is True, f"省钱默认值 {_k} 应为 True"
 assert catalog.DEFAULT_CONFIG["deletion_protection"] is False, \
@@ -743,13 +745,17 @@ def api_create(req: CreateRequest, request: Request):
         spec = store.get_setting(_cfg_key(user["user_id"]), {}) or {}
     payload["spec"] = build_instance_spec(spec)
     if not payload.get("dry_run"):
-        # 持久化客户端真正提供的字段（过滤 None，避免用 None 覆盖默认值）。
-        # 注意：这里**不再**排除 auto_open_firewall / preemptible / spot，
-        # 因为需求明确要求「默认全开防火墙」，它本身就是默认值；用户主动取消
-        # 勾选后应当被记住，否则下次又回到全开，行为与用户意图相反。
-        # 仍然排除的只有纯区域类字段（每次创建按区域模式解析，不属于默认配置）。
+        # 持久化客户端真正提供的字段（过滤 None，避免用 None 覆盖默认值），
+        # 但**危险开关不写回默认配置**：
+        #   · auto_open_firewall —— 默认关闭；若某次创建勾选了它并被记住，
+        #     之后每次创建都会默默放开 0.0.0.0/0 全协议，与默认收敛的意图相反
+        #   · preemptible / spot —— 被记住会导致后续实例被意外抢占
+        # 这些开关要成为默认，只能由用户主动点「保存为默认配置」。
+        NO_PERSIST_ON_CREATE = {"auto_open_firewall", "preemptible", "spot"}
         clean = {k: v for k, v in spec.items()
-                 if v is not None and k not in ("region", "regions")}
+                 if v is not None
+                 and k not in ("region", "regions")
+                 and k not in NO_PERSIST_ON_CREATE}
         if "tags" in clean and isinstance(clean["tags"], str):
             clean["tags"] = [t.strip() for t in clean["tags"].split(",") if t.strip()]
         store.set_setting(_cfg_key(user["user_id"]), clean)

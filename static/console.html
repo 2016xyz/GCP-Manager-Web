@@ -457,13 +457,14 @@ pre.log.big{max-height:520px}
             <div class="card">
               <h2><span class="n">2</span>网络与启动行为</h2>
               <div class="row" style="margin-top:12px">
-                <button class="s" @click="quickMode">⚡ 极速部署预设</button>
-                <button @click="safeMode">🛡 保守预设（关闭全开防火墙）</button>
+                <button class="p" @click="quickMode">⚡ 极速部署预设</button>
+                <button class="d" @click="openFirewallMode">🔥 放开全开防火墙</button>
                 <span class="hint">一键套用推荐参数组合，仍可手动微调</span>
               </div>
               <div class="row" style="margin-top:8px">
-                <span class="pill g">v7.4+ 默认省钱配置已启用</span>
-                <span class="pill b">全开防火墙默认开启</span>
+                <span class="pill g">省钱优化默认已启用</span>
+                <span class="pill" v-if="!spec.auto_open_firewall">全开防火墙：默认关闭</span>
+                <span class="pill r" v-else>全开防火墙：已开启</span>
               </div>
 
               <div class="sep"></div>
@@ -479,7 +480,7 @@ pre.log.big{max-height:520px}
               </div>
               <div class="row" style="margin-top:12px">
                 <label class="sw rd" :class="{on:spec.auto_open_firewall}">
-                  <input type="checkbox" v-model="spec.auto_open_firewall"> 创建时全开放防火墙（入站+出站 0.0.0.0/0）· 默认开启</label>
+                  <input type="checkbox" v-model="spec.auto_open_firewall"> 创建时全开放防火墙（入站+出站 0.0.0.0/0）· 默认关闭</label>
                 <label class="sw" :class="{on:spec.assign_public_ip}">
                   <input type="checkbox" v-model="spec.assign_public_ip"> 分配公网 IP</label>
                 <label class="sw" :class="{on:spec.disable_ops_agent}">
@@ -494,10 +495,15 @@ pre.log.big{max-height:520px}
                 <label class="sw" :class="{on:spec.spot}">
                   <input type="checkbox" v-model="spec.spot"> Spot 实例</label>
               </div>
-              <div v-if="spec.auto_open_firewall" class="alert w on" style="margin:11px 0 0">
-                <span>⚠</span><span>全开放防火墙已启用：将为项目建立 <code>allow-all-ingress</code> /
-                  <code>allow-all-egress</code> 规则，放开入站与出站 <code>0.0.0.0/0</code> 全协议。
-                  实例创建后立即可访问，但公网暴露面同时扩大 —— 仅建议在可控环境使用。</span>
+              <div v-if="spec.auto_open_firewall" class="alert e on" style="margin:11px 0 0">
+                <span>🔥</span><span>全开放防火墙已开启：将为项目建立 <code>allow-all-ingress</code> /
+                  <code>allow-all-egress</code> 规则，放开入站与出站 <code>0.0.0.0/0</code> 全协议，
+                  实例所有端口对所有来源开放。仅在明确需要时使用。</span>
+              </div>
+              <div v-else class="alert i on" style="margin:11px 0 0">
+                <span>🛡</span><span>全开放防火墙已关闭（默认）：不会改动项目防火墙规则。
+                  仅带有 <code>http-server</code> / <code>https-server</code> 标签的实例按 GCP 默认规则
+                  开放 80 / 443；其余端口需自行放行。</span>
               </div>
               <div style="margin-top:12px">
                 <div class="hint" style="margin-bottom:6px">网络标签 tags（影响默认防火墙规则命中）：</div>
@@ -626,7 +632,7 @@ pre.log.big{max-height:520px}
             </div>
 
             <div class="card">
-              <h2>💸 省钱优化 <small>v7.4+ 默认启用</small></h2>
+              <h2>💸 省钱优化 <small>出厂默认启用</small></h2>
               <div class="cost" style="background:linear-gradient(140deg,#fffbeb,#fef6e7);border-color:#fcd34d">
                 <div class="sub" style="color:#92400e">已启用 {{ savings.enabled }} / {{ savings.total }} 项省钱优化</div>
                 <div style="font-size:15px;font-weight:700;color:#b45309;margin-top:3px">
@@ -1083,10 +1089,10 @@ const TABS = [
   {id:'profile',  icon:'⚙', label:'个人设置', desc:'账号信息与修改密码'},
 ];
 
-/* 出厂默认：极速部署 + 极致省钱（对应 v7.4+ 的设计意图）
-   · auto_open_firewall=true  部署后立即可访问
-   · disable_ops_agent=true   不产生日志/监控费用
-   · no_backup=true           不挂快照时间表/备份策略
+/* 出厂默认：默认收敛暴露面 + 极致省钱
+   · auto_open_firewall=false  不自动放开 0.0.0.0/0（需显式勾选）
+   · disable_ops_agent=true    不产生日志/监控费用
+   · no_backup=true            不挂快照时间表/备份策略
    · deletion_protection=false 便于随时回收，避免持续计费 */
 const EMPTY_SPEC = () => ({
   machine_type:'e2-micro', image_key:'ubuntu-minimal-2204', disk_type:'pd-standard',
@@ -1094,7 +1100,7 @@ const EMPTY_SPEC = () => ({
   regions:['us-central1','us-east1','us-west1'], max_per_region:4,
   network:'default', subnet:'default', network_tier:'STANDARD',
   tags:['http-server','https-server'], assign_public_ip:true,
-  auto_open_firewall:true, disable_ops_agent:true,
+  auto_open_firewall:false, disable_ops_agent:true,
   no_backup:true, no_snapshot_schedule:true, no_resource_policy:true,
   deletion_protection:false,
   preemptible:false, spot:false,
@@ -1347,20 +1353,34 @@ createApp({
     },
     regionTest(){ /* 占位：保持 spec.region 变更时可触发重算 */ },
 
-    /* 极速部署预设：全开防火墙 + 全部省钱项 + 免费区 */
+    /* 极速部署预设：全部省钱项 + 免费区 + 不开全开防火墙（保持默认收敛） */
     quickMode(){
       const keep = {machine_type:this.spec.machine_type, image_key:this.spec.image_key,
                     disk_type:this.spec.disk_type, disk_size_gb:this.spec.disk_size_gb};
       Object.assign(this.spec, EMPTY_SPEC(), keep);
       this.spec.max_per_region = 4;
-      this.toast('已套用「极速部署」预设：全开防火墙 + 全部省钱项已开启','g');
+      this.toast('已套用「极速部署」预设：全部省钱优化已开启','g');
       this.recalc();
     },
-    /* 保守预设：关闭全开防火墙，其余省钱项保留 */
-    safeMode(){
-      this.spec.auto_open_firewall = false;
-      this.toast('已关闭全开放防火墙，仅放开 http/https-server 标签端口','a');
-      this.recalc();
+    /* 显式放开全开防火墙：二次确认后开启 */
+    openFirewallMode(){
+      if(this.spec.auto_open_firewall){
+        this.spec.auto_open_firewall = false;
+        this.toast('已关闭全开放防火墙','g');
+        return;
+      }
+      this.modal = {
+        title:'开启全开放防火墙', okText:'确认开启',
+        sub:'将为项目建立以下规则：\n'
+          + '  · allow-all-ingress  —— 入站 0.0.0.0/0 全协议\n'
+          + '  · allow-all-egress   —— 出站 0.0.0.0/0 全协议\n\n'
+          + '⚠ 这意味着实例的所有端口（含 22/3306/6379 等）对所有来源开放，\n'
+          + '  公网暴露面最大。仅在明确需要时开启。\n\n'
+          + '若只需开放 Web 端口，保持关闭即可：带 http-server / https-server\n'
+          + '标签的实例会按 GCP 默认规则开放 80 / 443。',
+        onOk: ()=>{ this.spec.auto_open_firewall = true; this.modal = null;
+                    this.toast('已开启全开放防火墙','a'); this.recalc(); },
+      };
     },
 
     async recalc(){
@@ -1471,8 +1491,8 @@ createApp({
         return this.toast('请填写自定义 Root 密码','a');
       const s = this.buildSpec();
       const warn = s.auto_open_firewall
-        ? '\n\n🔥 全开放防火墙：将建立 allow-all-ingress / allow-all-egress，'
-          + '放开 0.0.0.0/0 全协议（默认开启，部署后立即可访问）' : '';
+        ? '\n\n🔥 全开放防火墙已开启：将建立 allow-all-ingress / allow-all-egress，'
+          + '放开 0.0.0.0/0 全协议' : '';
       this.modal = {
         title: dry ? '确认预检（Dry-run）' : '确认创建实例',
         sub: dry ? '仅做可行性检查，不会创建任何资源。'
@@ -1481,7 +1501,8 @@ createApp({
                    + `磁盘 ${this.spec.disk_type} ${this.spec.disk_size_gb}GB\n`
                    + `区域 ${this.regionModeLabel} → ${this.primaryRegion}\n`
                    + `登录 ${this.loginMode==='root_password'?'Root 密码':'SSH 密钥'}`
-                   + `　省钱优化 ${this.savings.enabled}/${this.savings.total} 项\n`
+                   + `　防火墙 ${this.spec.auto_open_firewall?'全开放':'默认（不放 0.0.0.0/0）'}\n`
+                   + `省钱优化 ${this.savings.enabled}/${this.savings.total} 项\n`
                    + `预估月成本 $${this.est.monthly_total_usd || '?'}${warn}`,
         okText: dry ? '开始预检' : '确认创建',
         onOk: async ()=>{

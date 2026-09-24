@@ -149,8 +149,8 @@ print("=" * 76)
 print("GCP Manager Web · 端到端验证（含鉴权）")
 print("=" * 76)
 print("\n── 前置：默认值与省钱配置 ──")
-check("★ 全开放防火墙默认开启（部署后立即可访问）",
-      catalog_mod.DEFAULT_CONFIG["auto_open_firewall"] is True,
+check("★ 全开放防火墙默认关闭（不自动放开 0.0.0.0/0）",
+      catalog_mod.DEFAULT_CONFIG["auto_open_firewall"] is False,
       str(catalog_mod.DEFAULT_CONFIG["auto_open_firewall"]))
 check("★ 禁用 Ops Agent 默认开启（避免日志/监控费用）",
       catalog_mod.DEFAULT_CONFIG["disable_ops_agent"] is True)
@@ -507,7 +507,7 @@ if CAPTURED:
           str(cap.deletion_protection))
     check("★ 未开启全开放防火墙时不调用防火墙接口", len(FW_CALLS) == 0, str(len(FW_CALLS)))
 
-# ---- 默认全开防火墙：不传 spec 时应自动放开 ----
+# ---- 全开防火墙关闭时不得触碰项目防火墙规则 ----
 CAPTURED.clear()
 FW_CALLS.clear()
 r = client.post("/api/create", json={
@@ -515,13 +515,25 @@ r = client.post("/api/create", json={
     "spec": {"machine_type": "e2-micro", "image_key": "ubuntu-minimal-2204",
              "disk_type": "pd-standard", "disk_size_gb": 30,
              "region_mode": "single", "region": "us-west1",
-             "auto_open_firewall": True, "disable_ops_agent": True,
+             "auto_open_firewall": False, "disable_ops_agent": True,
              "no_backup": True, "no_snapshot_schedule": True,
              "deletion_protection": False},
     "login_mode": "ssh_key", "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2E test@host",
     "concurrency": 1, "retry_count": 0, "ssh_timeout": 5}).json()
-check("提交「默认全开防火墙」任务", r["ok"], str(r)[:140])
+check("提交「默认关闭防火墙」任务", r["ok"], str(r)[:140])
 time.sleep(9)
+check("★ [默认] 全开防火墙关闭时不调用防火墙接口",
+      len(FW_CALLS) == 0, f"FW_CALLS={len(FW_CALLS)}")
+check("★ [默认] 关闭防火墙时实例仍正常创建",
+      len(CAPTURED) >= 1, f"captured={len(CAPTURED)}")
+if CAPTURED:
+    _md = {i.key: i.value for i in CAPTURED[0]["instance"].metadata.items}
+    check("★ [默认] 省钱项仍然生效（Ops Agent 关闭）",
+          _md.get("google-logging-enabled") == "false"
+          and _md.get("google-ops-agent-enabled") == "false",
+          str({k: v for k, v in _md.items() if 'google' in k}))
+
+# ---- 显式开启全开防火墙时，才建立 allow-all 规则 ----
 CAPTURED.clear()
 FW_CALLS.clear()
 r = client.post("/api/create", json={
@@ -540,12 +552,12 @@ if CAPTURED:
     check("★ Ubuntu 24.04 镜像",
           cap.disks[0].initialize_params.source_image.endswith("ubuntu-2404-lts-amd64"),
           cap.disks[0].initialize_params.source_image)
-    check("★ 默认全开防火墙：auto_open_firewall=True 触发 allow-all 规则",
+    check("★ 显式开启：auto_open_firewall=True 触发 allow-all 规则",
           len(FW_CALLS) >= 2, str(len(FW_CALLS)))
-    fw_names = [c.get("firewall_resource", {}).name for c in FW_CALLS
-                if getattr(c.get("firewall_resource", None), "name", None)]
+    fw_names = [getattr(c.get("firewall_resource"), "name", None) for c in FW_CALLS]
     check("★ 防火墙规则名为 allow-all-ingress / allow-all-egress",
-          {"allow-all-ingress", "allow-all-egress"} <= set(fw_names), str(fw_names))
+          {"allow-all-ingress", "allow-all-egress"} <= set(n for n in fw_names if n),
+          str(fw_names))
     if FW_CALLS:
         fr = FW_CALLS[0].get("firewall_resource")
         if fr is not None:
@@ -621,9 +633,9 @@ check("日志可读且非空", r["ok"] and len(r["logs"]) > 0, str(len(r["logs"]
 cfg = client.get("/api/config").json()["config"]
 
 r = client.get("/api/config").json()
-check("★ 全开放防火墙：新用户默认为开启",
-      r["config"]["auto_open_firewall"] is True, str(r["config"]["auto_open_firewall"]))
-check("★ 省钱项：新用户默认全部开启",
+check("★ 全开放防火墙：新用户默认为关闭",
+      r["config"]["auto_open_firewall"] is False, str(r["config"]["auto_open_firewall"]))
+check("★ 省钱项：新用户默认全部开启（无备份等重点项）",
       r["config"]["disable_ops_agent"] is True and r["config"]["no_backup"] is True
       and r["config"]["no_snapshot_schedule"] is True
       and r["config"]["deletion_protection"] is False,
@@ -655,6 +667,14 @@ r_sv2 = client.post("/api/savings", json={"machine_type": "e2-micro", "disk_type
 check("★ 免费机型组合命中「标准盘+免费机型」省钱项",
       any(i["key"] == "pd_standard_or_free" and i["enabled"] for i in r_sv2["savings"]["items"]),
       str([i["key"] for i in r_sv2["savings"]["items"] if i["enabled"]]))
+
+# 经过上面的真实创建（含一次显式开启防火墙的创建），
+# 默认配置必须仍然保持"防火墙关闭"——危险开关不得被回写
+check("★ 某次创建开启防火墙后，默认配置仍为关闭（危险开关不回写）",
+      cfg["auto_open_firewall"] is False, str(cfg["auto_open_firewall"]))
+check("★ 同理 preemptible / spot 也不被回写",
+      cfg["preemptible"] is False and cfg["spot"] is False,
+      json.dumps({k: cfg.get(k) for k in ("preemptible", "spot")}))
 
 # 经过上面的真实创建，默认配置中的省钱项必须仍然全部开启
 check("★ 每次创建后省钱项默认值不被关闭",
@@ -702,9 +722,12 @@ check("控制台含响应式断点（手机）", "@media (max-width:768px)" in h
 check("控制台含减少动效偏好支持", "prefers-reduced-motion" in html)
 check("表格使用 .resp 响应式类", html.count('class="resp"') >= 5, str(html.count('class="resp"')))
 check("★ 前端含「极速部署预设」入口", "quickMode" in html and "极速部署预设" in html)
+check("★ 前端含「放开全开防火墙」显式入口", "openFirewallMode" in html and "放开全开防火墙" in html)
 check("★ 前端含省钱优化面板", "省钱优化" in html and "savings.items" in html)
-check("★ 前端出厂默认全开防火墙", "auto_open_firewall:true" in html)
+check("★ 前端出厂默认全开防火墙为 false", "auto_open_firewall:false" in html)
 check("★ 前端出厂默认含无备份", "no_backup:true" in html and "no_backup: c.no_backup !== false" in html)
+check("★ 前端防火墙文案标注「默认关闭」",
+      "0.0.0.0/0）· 默认关闭" in html)
 
 lh = client.get("/login").text
 check("登录页返回", "验证码" in lh and "captcha" in lh)

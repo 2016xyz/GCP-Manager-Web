@@ -158,7 +158,8 @@ def build_instance_spec(user_spec):
     spec["preemptible"] = bool(spec.get("preemptible"))
     spec["spot"] = bool(spec.get("spot"))
     spec["assign_public_ip"] = bool(spec.get("assign_public_ip", True))
-    spec["auto_open_firewall"] = bool(spec.get("auto_open_firewall", True))
+    # 全开放防火墙默认关闭：不自动放开 0.0.0.0/0，需用户显式开启
+    spec["auto_open_firewall"] = bool(spec.get("auto_open_firewall", False))
     spec["disable_ops_agent"] = bool(spec.get("disable_ops_agent", True))
     # 省钱：数据保护 → 无备份
     spec["no_backup"] = bool(spec.get("no_backup", True))
