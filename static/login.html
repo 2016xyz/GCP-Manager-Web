@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1a73e8">
+<title>登录 · GCP Manager Web</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   配色心理学说明
+   · 深靛蓝背景 (#0f172a→#1e3a8a)：冷色降低唤醒度，传达专业/安全/可信
+   · 主按钮蓝 #1a73e8：与 Google 生态一致，激活「熟悉→信任」联想
+   · 成功绿 #10b981：完成动作的正反馈，峰终定律留下"顺畅"印象
+   · 错误红 #e5484d：低明度高饱和，引人注意但不刺眼，不做评判式文案
+   · 大面积留白 + 单一视觉焦点：减少决策疲劳，降低认知负荷
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --ink:#0f172a; --ink-2:#1e293b; --brand:#1a73e8; --brand-d:#1557b0;
+  --brand-l:#eff6ff; --ok:#10b981; --bad:#e5484d; --warn:#f59e0b;
+  --line:#e2e8f0; --muted:#64748b; --bg:#f1f5f9; --card:#ffffff;
+  --r:14px; --sh:0 10px 30px rgba(15,23,42,.14),0 2px 6px rgba(15,23,42,.06);
+  --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 "Microsoft YaHei","PingFang SC","Hiragino Sans GB",
+       system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:grid;place-items:center;padding:20px;overflow-x:hidden;
+}
+/* 背景：深靛渐变 + 柔和光斑，营造纵深但不喧闹 */
+body::before{
+  content:"";position:fixed;inset:0;z-index:0;
+  background:
+    radial-gradient(1100px 620px at 12% -10%, #1d4ed8 0%, transparent 58%),
+    radial-gradient(900px 560px at 108% 108%, #0e7490 0%, transparent 55%),
+    linear-gradient(150deg,#0f172a 0%,#152a4d 46%,#1e3a8a 100%);
+}
+body::after{ /* 细网格，暗示"基础设施/工程"，提升专业感 */
+  content:"";position:fixed;inset:0;z-index:0;opacity:.055;
+  background-image:linear-gradient(#fff 1px,transparent 1px),
+                   linear-gradient(90deg,#fff 1px,transparent 1px);
+  background-size:44px 44px;
+}
+.shell{position:relative;z-index:1;width:100%;max-width:1000px;
+  display:grid;grid-template-columns:1.06fr .94fr;gap:0;
+  background:var(--card);border-radius:20px;overflow:hidden;box-shadow:var(--sh)}
+
+/* 左侧品牌区（小屏隐藏） */
+.brand{padding:44px 38px;background:linear-gradient(160deg,#132a52,#1b4ea8 60%,#1a73e8);
+  color:#fff;display:flex;flex-direction:column;justify-content:space-between;min-height:520px}
+.brand .logo{width:52px;height:52px;border-radius:15px;background:rgba(255,255,255,.14);
+  border:1px solid rgba(255,255,255,.26);display:grid;place-items:center;
+  font-weight:800;font-size:23px;backdrop-filter:blur(6px)}
+.brand h1{font-size:23px;margin:24px 0 8px;letter-spacing:.2px}
+.brand p{color:#c7dbff;font-size:13.5px;margin:0;line-height:1.75}
+.brand ul{list-style:none;padding:0;margin:26px 0 0;display:flex;flex-direction:column;gap:11px}
+.brand li{display:flex;gap:9px;align-items:flex-start;font-size:13px;color:#dbeafe}
+.brand li b{font-weight:700;color:#fff}
+.tick{flex:none;width:17px;height:17px;border-radius:50%;background:rgba(16,185,129,.22);
+  border:1px solid rgba(16,185,129,.55);display:grid;place-items:center;margin-top:2px}
+.tick::after{content:"";width:5px;height:8px;border:solid #6ee7b7;border-width:0 2px 2px 0;
+  transform:rotate(45deg) translate(-1px,-1px)}
+.brand footer{font-size:11.5px;color:#9db8e8;border-top:1px solid rgba(255,255,255,.13);padding-top:14px}
+
+/* 右侧表单区 */
+.form-side{padding:40px 38px;display:flex;flex-direction:column;justify-content:center}
+.m-head{margin-bottom:22px}
+.m-head h2{margin:0 0 5px;font-size:20px;font-weight:700;letter-spacing:.2px}
+.m-head p{margin:0;color:var(--muted);font-size:13px}
+.field{margin-bottom:15px}
+.field label{display:block;font-size:12.5px;font-weight:600;color:var(--ink-2);margin-bottom:6px}
+.ctrl{position:relative;display:flex;align-items:center}
+.ctrl input{width:100%;padding:12px 13px;font:inherit;font-size:15px;border:1.5px solid var(--line);
+  border-radius:10px;background:#fff;color:var(--ink);transition:border-color .16s,box-shadow .16s}
+.ctrl input::placeholder{color:#9aa8bb}
+.ctrl input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3.5px rgba(26,115,232,.14)}
+.ctrl input.bad{border-color:var(--bad);box-shadow:0 0 0 3.5px rgba(229,72,77,.13)}
+/* 输入框左侧图标（降低对"填什么"的认知负担） */
+.ctrl svg{position:absolute;left:12px;width:17px;height:17px;stroke:#94a3b8;fill:none;
+  stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.ctrl input{padding-left:38px}
+.eye{position:absolute;right:8px;border:0;background:transparent;padding:7px;border-radius:8px;
+  cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;line-height:1}
+.eye:hover{background:#f1f5f9}
+
+/* 验证码行 */
+.cap-row{display:grid;grid-template-columns:1fr 122px;gap:9px;align-items:stretch}
+.cap-box{position:relative;border:1.5px solid var(--line);border-radius:10px;overflow:hidden;
+  background:#f8fafc;cursor:pointer;display:grid;place-items:center;min-height:46px}
+.cap-box img{width:100%;height:46px;object-fit:cover;display:block}
+.cap-box .spin{position:absolute;inset:0;background:rgba(248,250,252,.86);display:none;
+  place-items:center;font-size:11.5px;color:var(--muted)}
+.cap-box.loading .spin{display:grid}
+.cap-hint{font-size:11.5px;color:var(--muted);margin-top:5px;display:flex;justify-content:space-between}
+
+/* 按钮 */
+.btn{width:100%;padding:13px;font:inherit;font-size:15px;font-weight:700;border:0;border-radius:10px;
+  background:var(--brand);color:#fff;cursor:pointer;transition:background .15s,transform .08s;
+  display:flex;align-items:center;justify-content:center;gap:8px;min-height:47px}
+.btn:hover:not(:disabled){background:var(--brand-d)}
+.btn:active:not(:disabled){transform:translateY(1px)}
+.btn:disabled{opacity:.62;cursor:not-allowed}
+.btn .ld{width:15px;height:15px;border:2.2px solid rgba(255,255,255,.4);border-top-color:#fff;
+  border-radius:50%;animation:sp .7s linear infinite;display:none}
+.btn.busy .ld{display:block}
+.btn.busy .tx{opacity:.85}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* 提示条 */
+.alert{display:none;gap:9px;align-items:flex-start;padding:11px 12px;border-radius:10px;
+  font-size:13px;margin-bottom:14px;line-height:1.5;animation:fb .22s ease}
+.alert.on{display:flex}
+.alert.err{background:#fef2f2;border:1px solid #fecaca;color:#9f1239}
+.alert.ok{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46}
+.alert.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}
+.alert b{font-weight:700}
+@keyframes fb{from{opacity:0;transform:translateY(-5px)}}
+
+.pw-bar{height:4px;border-radius:3px;background:#e2e8f0;margin-top:7px;overflow:hidden;display:none}
+.pw-bar.on{display:block}
+.pw-bar i{display:block;height:100%;width:0;border-radius:3px;transition:width .25s,background .25s}
+.pw-tip{font-size:11.5px;color:var(--muted);margin-top:4px;display:none}
+.pw-tip.on{display:block}
+
+.foot{margin-top:18px;padding-top:15px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--muted);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.foot a{color:var(--brand);text-decoration:none}
+.foot a:hover{text-decoration:underline}
+
+/* 强制改密弹层 */
+.mask{position:fixed;inset:0;background:rgba(15,23,42,.62);backdrop-filter:blur(3px);
+  z-index:60;display:none;place-items:center;padding:18px}
+.mask.on{display:grid}
+.sheet{background:#fff;border-radius:16px;padding:26px 24px;width:min(430px,94vw);
+  box-shadow:var(--sh);animation:pop .24s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes pop{from{opacity:0;transform:scale(.95) translateY(10px)}}
+.sheet h3{margin:0 0 6px;font-size:17px}
+.sheet p.sub{margin:0 0 18px;color:var(--muted);font-size:13px}
+
+/* ────────── 响应式：平板 ────────── */
+@media (max-width:900px){
+  .shell{grid-template-columns:1fr;max-width:480px}
+  .brand{display:none}
+  .form-side{padding:34px 28px}
+}
+/* ────────── 响应式：手机 ────────── */
+@media (max-width:520px){
+  body{padding:0;display:block;min-height:100%}
+  .shell{border-radius:0;min-height:100vh;max-width:100%;box-shadow:none;
+    display:flex;flex-direction:column;justify-content:center}
+  .form-side{padding:34px 20px calc(28px + var(--safe-b))}
+  .m-head h2{font-size:19px}
+  .ctrl input{font-size:16px}          /* ≥16px 防 iOS 聚焦缩放 */
+  .btn{font-size:16px}
+  .cap-row{grid-template-columns:1fr 106px}
+  .brand{display:none}
+}
+@media (max-width:360px){
+  .form-side{padding:24px 15px calc(22px + var(--safe-b))}
+  .cap-row{grid-template-columns:1fr 94px}
+}
+/* 横屏矮屏 */
+@media (max-height:520px) and (orientation:landscape){
+  .shell{max-width:760px;grid-template-columns:1fr 1fr}
+  .brand{display:none}
+  .form-side{padding:20px 26px}
+  .m-head{margin-bottom:14px}
+  .field{margin-bottom:11px}
+}
+/* 尊重"减少动效"偏好 */
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.01ms!important;transition-duration:.01ms!important}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <!-- 左：品牌 -->
+  <aside class="brand">
+    <div>
+      <div class="logo">G</div>
+      <h1>GCP Manager Web</h1>
+      <p>批量管理 Google Cloud Platform 实例<br>自定义机型 · 镜像 · 磁盘 · 区域</p>
+      <ul>
+        <li><span class="tick"></span><span><b>自定义服务器配置</b><br>33 种机型 / 14 种镜像 / 5 种磁盘</span></li>
+        <li><span class="tick"></span><span><b>批量并发部署</b><br>账号级 + 实例级双层并发，失败自动换区重试</span></li>
+        <li><span class="tick"></span><span><b>创建后自动执行</b><br>SSH 就绪即跑安装命令，输出实时回传</span></li>
+        <li><span class="tick"></span><span><b>多角色权限</b><br>管理员 / 运维 / 只读，操作全程审计</span></li>
+      </ul>
+    </div>
+    <footer>仅限授权环境使用 · 请勿将服务直接暴露公网</footer>
+  </aside>
+
+  <!-- 右：登录表单 -->
+  <main class="form-side">
+    <div class="m-head">
+      <h2 id="headTitle">登录控制台</h2>
+      <p id="headSub">请输入账号信息以继续</p>
+    </div>
+
+    <div class="alert err" id="alertBox">
+      <svg viewBox="0 0 24 24" style="width:17px;height:17px;flex:none;margin-top:1px;stroke:currentColor;fill:none;stroke-width:2">
+        <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
+      <span id="alertText"></span>
+    </div>
+
+    <form id="loginForm" autocomplete="on" novalidate>
+      <div class="field">
+        <label for="username">用户名</label>
+        <div class="ctrl">
+          <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <input id="username" name="username" type="text" placeholder="请输入用户名"
+                 autocomplete="username" inputmode="text" spellcheck="false" required>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="password">密码</label>
+        <div class="ctrl">
+          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <input id="password" name="password" type="password" placeholder="请输入密码"
+                 autocomplete="current-password" required>
+          <button type="button" class="eye" id="eyeBtn" aria-label="显示密码">显示</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="captcha">验证码</label>
+        <div class="cap-row">
+          <div class="ctrl">
+            <svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg>
+            <input id="captcha" name="captcha" type="text" placeholder="4 位字符" maxlength="6"
+                   autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+          </div>
+          <div class="cap-box" id="capBox" title="点击刷新验证码">
+            <span class="spin">加载中…</span>
+            <img id="capImg" alt="点击刷新验证码">
+          </div>
+        </div>
+        <div class="cap-hint">
+          <span>不区分大小写</span>
+          <span id="capRefresh" style="color:var(--brand);cursor:pointer;font-weight:600">换一张</span>
+        </div>
+      </div>
+
+      <button class="btn" type="submit" id="submitBtn">
+        <span class="ld"></span><span class="tx">登录</span>
+      </button>
+    </form>
+
+    <div class="foot">
+      <span>🔒 会话有效期 12 小时 · 连续失败将临时锁定</span>
+      <span><a href="/docs" target="_blank" rel="noopener">API 文档</a></span>
+    </div>
+  </main>
+</div>
+
+<!-- 首次登录强制改密 -->
+<div class="mask" id="pwMask">
+  <div class="sheet">
+    <h3>请先修改初始密码</h3>
+    <p class="sub">为了账号安全，首次登录或密码被重置后必须设置新密码。</p>
+    <div class="alert err" id="pwAlert"><span id="pwAlertText"></span></div>
+    <div class="field">
+      <label for="oldPw">当前密码</label>
+      <div class="ctrl">
+        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input id="oldPw" type="password" placeholder="请输入当前密码" autocomplete="current-password">
+      </div>
+    </div>
+    <div class="field">
+      <label for="newPw">新密码</label>
+      <div class="ctrl">
+        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input id="newPw" type="password" placeholder="至少 8 位，建议 12 位以上" autocomplete="new-password">
+      </div>
+      <div class="pw-bar" id="pwBar"><i></i></div>
+      <div class="pw-tip" id="pwTip"></div>
+    </div>
+    <div class="field">
+      <label for="newPw2">确认新密码</label>
+      <div class="ctrl">
+        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input id="newPw2" type="password" placeholder="再次输入新密码" autocomplete="new-password">
+      </div>
+    </div>
+    <button class="btn" id="pwSubmit"><span class="ld"></span><span class="tx">确认修改</span></button>
+    <div class="foot"><span>修改后其它设备的登录会自动失效</span></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX_PW = 4;
+
+function alertBox(el, text, kind){
+  const box = $(el === 'pw' ? 'pwAlert' : 'alertBox');
+  const txt = $(el === 'pw' ? 'pwAlertText' : 'alertText');
+  box.className = 'alert ' + (kind || 'err') + ' on';
+  txt.textContent = text;
+  if(el !== 'pw') setTimeout(()=>box.classList.remove('on'), 6500);
+}
+function hideAlert(){ $('alertBox').classList.remove('on'); }
+function setBusy(btn, busy, label){
+  btn.classList.toggle('busy', busy);
+  btn.disabled = busy;
+  if(label) btn.querySelector('.tx').textContent = label;
+}
+async function jfetch(url, opt){
+  const r = await fetch(url, Object.assign({headers:{'Content-Type':'application/json'}}, opt||{}));
+  let j = null;
+  try { j = await r.json(); } catch(e){ j = {ok:false, error:'响应解析失败 HTTP '+r.status}; }
+  j.__status = r.status;
+  return j;
+}
+
+/* ────── 验证码 ────── */
+let captchaId = null;
+async function refreshCaptcha(){
+  const box = $('capBox');
+  box.classList.add('loading');
+  const r = await jfetch('/api/auth/captcha');
+  box.classList.remove('loading');
+  if(r.ok){
+    captchaId = r.captcha_id;
+    $('capImg').src = r.image;
+    $('captcha').value = '';
+  } else {
+    $('capImg').removeAttribute('src');
+    alertBox('main', '验证码加载失败，请检查网络后点击「换一张」重试');
+  }
+}
+$('capBox').onclick = refreshCaptcha;
+$('capRefresh').onclick = refreshCaptcha;
+
+/* ────── 显示/隐藏密码 ────── */
+$('eyeBtn').onclick = () => {
+  const inp = $('password');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  $('eyeBtn').textContent = show ? '隐藏' : '显示';
+};
+
+/* ────── 登录 ────── */
+$('loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  hideAlert();
+  const username = $('username').value.trim();
+  const password = $('password').value;
+  const code = $('captcha').value.trim();
+
+  // 就近提示：把错误标在出问题的那一项上
+  ['username','password','captcha'].forEach(id => $(id).classList.remove('bad'));
+  if(!username){ $('username').classList.add('bad'); $('username').focus(); return alertBox('main','请输入用户名'); }
+  if(!password){ $('password').classList.add('bad'); $('password').focus(); return alertBox('main','请输入密码'); }
+  if(!code){ $('captcha').classList.add('bad'); $('captcha').focus(); return alertBox('main','请输入验证码'); }
+
+  const btn = $('submitBtn');
+  setBusy(btn, true, '登录中…');
+  const r = await jfetch('/api/auth/login', {
+    method:'POST',
+    body: JSON.stringify({username, password, captcha_id: captchaId, captcha_code: code})
+  });
+  setBusy(btn, false, '登录');
+
+  if(r.ok){
+    setBusy(btn, true, '登录成功');
+    $('submitBtn').style.background = 'var(--ok)';
+    try { localStorage.setItem('gcp_user', JSON.stringify({username: r.user.username})); } catch(e){}
+    if(r.user.must_change_password){
+      $('pwMask').classList.add('on');
+      $('oldPw').value = password;
+      setBusy(btn, false, '登录');
+      return;
+    }
+    location.href = '/';
+    return;
+  }
+
+  // 失败：重置验证码（已消费），按错误类型给不同文案
+  if(r.__status === 400 && /验证码/.test(r.error||'')){
+    alertBox('main', r.error, 'warn'); $('captcha').classList.add('bad'); $('captcha').focus();
+  } else if(r.__status === 429){
+    alertBox('main', r.error, 'warn');
+  } else {
+    alertBox('main', r.error || '登录失败，请重试');
+    $('password').classList.add('bad');
+  }
+  refreshCaptcha();
+};
+
+/* ────── 强制改密 ────── */
+function pwScore(pw){
+  let s = 0;
+  if(pw.length >= 8) s++;
+  if(pw.length >= 12) s++;
+  if(/[a-z]/.test(pw) && /[A-Z]/.test(pw)) s++;
+  if(/[0-9]/.test(pw) || /[^A-Za-z0-9]/.test(pw)) s++;
+  if(pw.length < 8) return 0;
+  return Math.min(s, MAX_PW);
+}
+$('newPw').oninput = () => {
+  const pw = $('newPw').value;
+  const bar = $('pwBar'), tip = $('pwTip'), i = bar.querySelector('i');
+  const colors = ['#e5484d','#f59e0b','#3b82f6','#10b981','#059669'];
+  const labels = ['很弱','弱','一般','较强','强'];
+  if(!pw){ bar.classList.remove('on'); tip.classList.remove('on'); return; }
+  const s = pwScore(pw);
+  bar.classList.add('on'); tip.classList.add('on');
+  i.style.width = ((s+1)/5*100)+'%';
+  i.style.background = colors[s];
+  tip.textContent = `强度：${labels[s]}` + (s < 3 ? '　建议再长一些或混合大小写/符号' : '');
+  tip.style.color = s >= 3 ? '#10b981' : '#e5484d';
+};
+$('pwSubmit').onclick = async () => {
+  const oldPw = $('oldPw').value, pw = $('newPw').value, pw2 = $('newPw2').value;
+  $('pwAlert').classList.remove('on');
+  const fail = msg => { $('pwAlert').className='alert err on'; $('pwAlertText').textContent = msg; };
+  if(!oldPw) return fail('请输入当前密码');
+  if(!pw) return fail('请输入新密码');
+  if(pw.length < 8) return fail('新密码至少 8 位');
+  if(pw !== pw2) return fail('两次输入的新密码不一致');
+  if(pw === oldPw) return fail('新密码不能与当前密码相同');
+  const btn = $('pwSubmit');
+  setBusy(btn, true, '提交中…');
+  const r = await jfetch('/api/auth/change_password', {
+    method:'POST', body: JSON.stringify({old_password: oldPw, new_password: pw})
+  });
+  setBusy(btn, false, '确认修改');
+  if(r.ok){ location.href = '/'; }
+  else fail(r.error || '修改失败，请重试');
+};
+
+/* ────── 初始化 ────── */
+(async function init(){
+  // 已登录则直接进控制台
+  const me = await jfetch('/api/auth/me');
+  if(me.ok && me.authenticated && !me.user.must_change_password){ location.href = '/'; return; }
+  if(me.ok && me.authenticated && me.user.must_change_password){
+    $('pwMask').classList.add('on');
+    $('username').value = me.user.username;
+  }
+  refreshCaptcha();
+  if(window.matchMedia('(min-width:901px)').matches) $('username').focus();
+  // 服务端错误兜底提示
+  const m = new URLSearchParams(location.search).get('reason');
+  if(m === 'expired') alertBox('main','会话已过期，请重新登录','warn');
+})();
+</script>
+</body>
+</html>
