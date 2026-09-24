@@ -668,19 +668,66 @@ class TaskManager:
             vms = {v["name"]: v for v in self.store.get_all_vms()}
             results = []
             by_account = {}
+
+            def locate(gcp, name, zone_hint=""):
+                """在项目里定位实例的真实 zone；找不到返回空串"""
+                if zone_hint:
+                    return zone_hint
+                try:
+                    for inst in gcp.list_instances():
+                        if inst.get("name") == name:
+                            return inst.get("zone") or ""
+                except Exception:
+                    pass
+                return ""
+
+            # 先按本地记录归组
+            unresolved = []
             for tgt in targets:
                 vm = vms.get(tgt) or {}
                 acc_id = str(vm.get("account_id") or "")
-                by_account.setdefault(acc_id, []).append({"name": tgt, "zone": vm.get("zone") or ""})
+                if acc_id and acc_id in accounts:
+                    by_account.setdefault(acc_id, []).append(
+                        {"name": tgt, "zone": vm.get("zone") or ""})
+                else:
+                    unresolved.append({"name": tgt, "zone": vm.get("zone") or ""})
+
+            # 本地没有记录的实例（预存在的、或用原版桌面工具建的），
+            # 不能直接判「未找到所属账号」—— 界面能列出它，就该能操作它。
+            # 逐个账号去各自项目里按名字找，找到即认领。
+            if unresolved and accounts:
+                for item in unresolved:
+                    placed = False
+                    for acc in accounts.values():
+                        try:
+                            gcp = self.account_service(acc)
+                        except Exception:
+                            continue
+                        zone = locate(gcp, item["name"], item["zone"])
+                        if zone:
+                            by_account.setdefault(str(acc["id"]), []).append(
+                                {"name": item["name"], "zone": zone})
+                            placed = True
+                            break
+                    if not placed:
+                        results.append({"name": item["name"], "ok": False,
+                                        "error": "未在任何已配置账号的项目中找到该实例"
+                                                 "（可能所属账号已删除或密钥已失效）"})
+            elif unresolved:
+                results += [{"name": i["name"], "ok": False, "error": "未配置任何账号"}
+                            for i in unresolved]
+
             for acc_id, items in by_account.items():
                 acc = accounts.get(acc_id)
                 if not acc:
-                    results += [{"name": i["name"], "ok": False, "error": "未找到所属账号"} for i in items]
+                    results += [{"name": i["name"], "ok": False, "error": "未找到所属账号"}
+                                for i in items]
                     continue
                 try:
                     gcp = self.account_service(acc)
                 except Exception as exc:
-                    results += [{"name": i["name"], "ok": False, "error": str(exc)} for i in items]
+                    results += [{"name": i["name"], "ok": False, "error": str(exc)}
+                                for i in items]
                     continue
                 fn = {"start": gcp.start_instance, "stop": gcp.stop_instance,
                       "reset": gcp.reset_instance, "delete": gcp.delete_instance}.get(action)
@@ -688,16 +735,7 @@ class TaskManager:
                     self.update_task(task_id, "failed", f"不支持的操作 {action}")
                     return
                 for i in items:
-                    zone = i["zone"]
-                    if not zone:
-                        # 未知 zone 时全量查一次
-                        try:
-                            for inst in gcp.list_instances():
-                                if inst["name"] == i["name"]:
-                                    zone = inst["zone"]
-                                    break
-                        except Exception:
-                            pass
+                    zone = locate(gcp, i["name"], i["zone"])
                     if not zone:
                         results.append({"name": i["name"], "ok": False, "error": "未知 zone"})
                         continue
@@ -707,12 +745,12 @@ class TaskManager:
                     results.append({"name": i["name"], "ok": ok, "message": msg})
                     if ok and action == "delete":
                         with self.store.lock:
-                            self.store.conn.execute("DELETE FROM vm_passwords WHERE name=?", (i["name"],))
+                            self.store.conn.execute("DELETE FROM vm_passwords WHERE name=?",
+                                                    (i["name"],))
                             self.store.conn.commit()
             ok_count = sum(1 for r in results if r.get("ok"))
             self.update_task(task_id, "done", f"{action}：{ok_count}/{len(results)} 成功",
                              {"results": results})
-
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True, "task_id": task_id}
 

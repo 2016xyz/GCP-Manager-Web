@@ -422,7 +422,7 @@ gcp-manager-web/
 ├── docker-compose.yml     compose 部署（默认只绑本机 + 命名卷持久化）
 ├── .dockerignore          镜像构建忽略清单
 ├── requirements.txt       Python 依赖
-├── tests_e2e.py           端到端验证（207 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（214 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -434,7 +434,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 207 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 214 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -447,6 +447,10 @@ python3 tests_e2e.py
   实例动作、命令执行、任务与日志
 - **F. 页面与前端**（36 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
   日志去重、验证码真实渲染（`ink_ratio` 回归）、极速预设入口、省钱优化面板
+
+- **F2. 实例操作**（6 项）：非本工具创建的实例（预存在的、原版桌面工具建的）
+  也能被 start/stop/reset/delete；本地无记录时遍历账号按名字定位真实 zone；
+  找不到时给出明确原因而非静默跳过；找不到时不执行任何动作
 
 - **G. 安装与部署产物**（28 项）：`install.sh` / `run.sh` 语法检查、
   依赖失败自动换源（PyPI→清华→阿里云）、耗时兜底而非仅探测连通性、

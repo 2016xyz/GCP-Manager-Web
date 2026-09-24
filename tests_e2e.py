@@ -851,6 +851,119 @@ r = client.get("/api/status")
 check("登出后接口再次 401", r.status_code == 401, str(r.status_code))
 
 # ═══════════════════════════════════════════════════════════════════════════
+# F2. 实例操作：非本工具创建的实例也必须能操作
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n── F2. 实例操作（含非本工具创建的实例）──")
+
+from core.tasks import TaskManager  # noqa: E402
+
+# 真实缺陷：submit_instance_action 只用本地 vm_passwords 记录反查所属账号与
+# zone。对「预存在的实例」或用原版桌面工具建的实例，本地没有记录，
+# 于是直接判「未找到所属账号」并 continue —— 而其后的 zone 兜底查询
+# 永远走不到。表现就是：实例列表里看得见，却删不掉/停不了。
+_OP_CALLED = []
+
+
+class _FakeGCPAction:
+    def __init__(self, project, instances):
+        self.project = project
+        self._instances = instances      # [(name, zone)]
+
+    def list_instances(self):
+        return [{"name": n, "zone": z} for n, z in self._instances]
+
+    def delete_instance(self, zone, name):
+        _OP_CALLED.append(("delete", self.project, zone, name))
+        return True, "删除成功"
+
+    def stop_instance(self, zone, name):
+        _OP_CALLED.append(("stop", self.project, zone, name))
+        return True, "已停止"
+
+    def start_instance(self, zone, name):
+        _OP_CALLED.append(("start", self.project, zone, name))
+        return True, "已启动"
+
+    def reset_instance(self, zone, name):
+        _OP_CALLED.append(("reset", self.project, zone, name))
+        return True, "已重启"
+
+
+class _FakeStore:
+    def __init__(self, accounts, vms):
+        self._accounts, self._vms = accounts, vms
+        self.lock = __import__("threading").Lock()
+        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self.conn.execute("CREATE TABLE vm_passwords(name TEXT)")
+        # LogSink 会往 logs 表批量写入，假库也得有
+        self.conn.execute("CREATE TABLE logs(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                          "ts REAL, task_id TEXT, level TEXT, message TEXT)")
+        for v in vms:
+            self.conn.execute("INSERT INTO vm_passwords(name) VALUES(?)", (v["name"],))
+        self.conn.commit()
+        self.tasks = {}
+
+    def get_accounts(self): return self._accounts
+    def get_all_vms(self): return self._vms
+    def create_task(self, *a, **k): self.tasks[a[0]] = {}
+    def update_task(self, tid, status=None, message=None, result=None, **kw):
+        self.tasks[tid] = {"status": status, "message": message, "result": result}
+    def get_tasks(self, *a, **k): return []
+    def add_log(self, *a, **k): pass
+    def get_logs(self, *a, **k): return []
+
+
+_acc = {"id": 7, "key_path": "/tmp/fake.json", "project_id": "proj-x",
+        "email": "sa@proj-x.iam.gserviceaccount.com", "proxy": "", "proxy_type": "HTTPS"}
+
+# 场景：实例在项目里真实存在，但本地 vm_passwords 没有任何记录
+_OP_CALLED.clear()
+_st = _FakeStore([_acc], [])
+_tm2 = TaskManager(_st)
+_tm2.account_service = lambda account: _FakeGCPAction(
+    account["project_id"], [("vm-external-1", "us-west1-b")])
+_r = _tm2.submit_instance_action("delete", ["vm-external-1"])
+time.sleep(2)
+_res = _st.tasks.get(_r["task_id"], {})
+_detail = (_res.get("result") or {}).get("results", [])
+check("★ 非本工具创建的实例：能通过遍历账号定位到并执行删除",
+      _OP_CALLED and _OP_CALLED[0][0] == "delete"
+      and _OP_CALLED[0][2] == "us-west1-b" and _OP_CALLED[0][3] == "vm-external-1",
+      str(_OP_CALLED))
+check("★ 非本工具创建的实例：不再报「未找到所属账号」",
+      bool(_detail) and all("未找到所属账号" not in (d.get("error") or "") for d in _detail),
+      json.dumps(_detail, ensure_ascii=False)[:200])
+check("★ 非本工具创建的实例：任务结果标为成功",
+      _res.get("status") == "done" and "1/1 成功" in (_res.get("message") or ""),
+      str(_res.get("message")))
+
+# 场景：本地有记录但实例在项目里已不存在，且账号列表为空
+_OP_CALLED.clear()
+_st2 = _FakeStore([], [])       # 一个账号都没配置
+_tm3 = TaskManager(_st2)
+_tm3.account_service = lambda account: _FakeGCPAction(account["project_id"], [])
+_r = _tm3.submit_instance_action("delete", ["vm-ghost"])
+time.sleep(2)
+_d2 = (_st2.tasks.get(_r["task_id"], {}).get("result") or {}).get("results", [])
+check("★ 未配置账号时给出明确原因（而非静默跳过）",
+      bool(_d2) and "未配置任何账号" in (_d2[0].get("error") or ""),
+      json.dumps(_d2, ensure_ascii=False)[:160])
+check("★ 找不到实例时不执行任何删除动作", not _OP_CALLED, str(_OP_CALLED))
+
+# 场景：有账号但项目里确实没有这个实例 → 报「未在任何已配置账号中找到」
+_OP_CALLED.clear()
+_st3 = _FakeStore([_acc], [])
+_tm4 = TaskManager(_st3)
+_tm4.account_service = lambda account: _FakeGCPAction(account["project_id"], [])
+_r = _tm4.submit_instance_action("delete", ["vm-not-exist"])
+time.sleep(2)
+_d3 = (_st3.tasks.get(_r["task_id"], {}).get("result") or {}).get("results", [])
+check("★ 遍历账号后仍找不到 → 明确说明并指出可能原因",
+      bool(_d3) and "未在任何已配置账号的项目中找到该实例" in (_d3[0].get("error") or ""),
+      json.dumps(_d3, ensure_ascii=False)[:200])
+check("★ 仍找不到时同样不执行删除动作", not _OP_CALLED, str(_OP_CALLED))
+
+# ═══════════════════════════════════════════════════════════════════════════
 # G. 安装 / 部署产物
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n── G. 安装与部署产物 ──")
