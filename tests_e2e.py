@@ -1053,6 +1053,180 @@ check("★ 仍找不到时同样不执行删除动作", not _OP_CALLED, str(_OP_
 # ═══════════════════════════════════════════════════════════════════════════
 # G. 安装 / 部署产物
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n── K. GCP 资源勘察（只读）──")
+
+# ── core/inspect.py 的结构与安全性质 ────────────────────────────────
+import core.inspect as gcp_inspect
+
+_INS_SRC = open(os.path.join(BASE_DIR, "core", "inspect.py"), encoding="utf-8").read()
+
+check("★ 勘察模块存在且可导入", callable(gcp_inspect.inspect_sections))
+check("★ 提供全部预期分区",
+      set(gcp_inspect.SECTIONS) >= {
+          "account", "project", "services", "billing", "serviceAccounts",
+          "regions", "zones", "machineTypes", "images", "networks",
+          "subnetworks", "firewalls", "disks", "snapshots", "addresses",
+          "summary", "extras"},
+      str(sorted(gcp_inspect.SECTIONS)))
+check("★ 快速节 / 深节划分正确",
+      gcp_inspect.DEFAULT_SECTIONS == ["account", "summary", "regions", "zones",
+                                       "networks", "subnetworks", "firewalls",
+                                       "disks", "snapshots", "addresses"]
+      and set(gcp_inspect.DEEP_SECTIONS) ==
+          {"project", "services", "billing", "serviceAccounts",
+           "machineTypes", "images", "extras"})
+
+# 只读承诺：源码里不得出现任何写操作调用
+_WRITE_CALLS = (".insert(", ".update(", ".delete(", ".patch(",
+                ".set_common_instance_metadata(", ".setIamPolicy",
+                ".addAccessConfig(", ".attachDisk(")
+_found = [w for w in _WRITE_CALLS if w in _INS_SRC]
+check("★ 勘察模块只读（无任何写操作调用）", not _found, str(_found))
+
+# 每个分区都必须有独立的异常隔离，不能一处失败拖垮整页
+check("★ 每节独立隔离异常（run() 统一兜底）",
+      "def run(self, fn):" in _INS_SRC and '"ok": False, "ms": _ms(t0), "error"' in _INS_SRC)
+
+# ── 分节函数：未知节名不炸，返回可读错误 ────────────────────────────
+_res = gcp_inspect.inspect_sections(
+    os.path.join(BASE_DIR, "data", "keys", "sa.json"), "no-such-project",
+    "x@y.iam.gserviceaccount.com", ["__nope__"])
+check("★ 未知分区不抛异常、返回明确原因",
+      _res["__nope__"]["ok"] is False and "未知的勘察节" in _res["__nope__"]["error"])
+
+# ── 逐分区调用真正的实现（打桩 GCP 客户端），确认字段映射不写错 ────
+import types as _types
+from google.cloud import compute_v1 as _c1
+
+
+class _Stub:
+    """最小桩：让各分区跑到「构造返回结构」这一步，验证字段名与类型"""
+    def __init__(self, **kw): self.__dict__.update(kw)
+
+
+_ins = gcp_inspect.Inspector(os.path.join(BASE_DIR, "data", "keys", "sa.json"),
+                             "proj", "sa@proj.iam.gserviceaccount.com")
+
+# ① zones：Zone 资源没有 available_machine_types（实测确认），只有 available_cpu_platforms。
+#    写错字段名会抛 "Unknown field for Zone"，整节失败。
+_z = _Stub(name="us-central1-a", status="UP", region="regions/us-central1",
+           available_cpu_platforms=["Intel Ice Lake"])
+_ins._clients[("ZonesClient", None)] = _Stub(list=lambda **k: [_z])
+check("★ zones 使用 available_cpu_platforms（不是 available_machine_types）",
+      _ins.zones()["data"][0]["cpuPlatforms"] == ["Intel Ice Lake"])
+
+# ② firewalls：Firewall 资源没有 action 字段，需由 allowed/denied 反推
+_f = _Stub(name="allow-x", network="networks/n", direction="INGRESS", priority=1000,
+           disabled=False, source_ranges=["0.0.0.0/0"], destination_ranges=[],
+           target_tags=[], source_tags=[], source_service_accounts=[],
+           target_service_accounts=[], allowed=[], denied=[], log_config=None,
+           creation_timestamp="2026-01-01T00:00:00Z")
+_ins._clients[("FirewallsClient", None)] = _Stub(list=lambda **k: [_f])
+_fw = _ins.firewalls()["data"][0]
+check("★ 防火墙 action 由 allowed/denied 反推（资源无 action 字段）",
+      _fw["action"] == "ALLOW" and _fw["openToWorld"] is True)
+
+# ③ disks：未挂载的盘要标记为孤儿盘（空转计费）
+_d = _Stub(name="d1", size_gb=30, type_="zones/z/diskTypes/pd-standard",
+           status="READY", users=[], source_image="", creation_timestamp="t",
+           physical_block_size_bytes=4096)
+_ins._clients[("DisksClient", None)] = _Stub(
+    aggregated_list=lambda **k: [("zones/us-central1-a", _Stub(disks=[_d]))])
+check("★ 磁盘标记未挂载（孤儿盘）",
+      _ins.disks()["data"][0]["orphan"] is True)
+
+# ④ 聚合响应的字段名与客户端类名不同构：必须动态探测，不能拼字符串。
+#    （RegionCommitmentsClient 的字段是 commitments 而非 region_commitments）
+_agg = _Stub(_pb=_Stub(DESCRIPTOR=_Stub(fields=[
+    _Stub(is_repeated=True, name="routers", message_type=None),
+    _Stub(is_repeated=True, name="warning", message_type=None)])))
+_ins._clients[("RoutersClient", None)] = _Stub(
+    aggregated_list=lambda **k: [("regions/us-central1", _agg)])
+check("★ 聚合响应字段名动态探测（类名与字段名不同构）",
+      "routers" in _ins.extras()["data"])
+
+# ⑤ 并发执行但**只在外层设置一次代理**
+#    ProxyEnvContext 改的是进程级 os.environ，每节各设各的会在并发时互踩
+check("★ 批量勘察在外层统一管理代理（避免并发互踩环境变量）",
+      "_proxy_managed" in _INS_SRC and "with ProxyEnvContext(ins.proxy_url):" in _INS_SRC
+      and "ThreadPoolExecutor" in _INS_SRC)
+
+# ── HTTP 端点 ───────────────────────────────────────────────────────
+# 前面的段落可能已经登出/换了会话，这里重新以 admin 登录一次
+login("admin", ADMIN_PW)
+client.post("/api/auth/logout")
+r = client.get("/api/inspect")
+check("★ 未登录访问 /api/inspect 被拒", r.status_code in (401, 302, 403), str(r.status_code))
+r = client.get("/api/inspect/sections")
+check("★ 未登录访问 /api/inspect/sections 被拒",
+      r.status_code in (401, 302, 403), str(r.status_code))
+
+login("admin", ADMIN_PW)
+r = client.get("/api/inspect/sections")
+_arr = r.json().get("default", []) if r.status_code == 200 else None
+check("★ /api/inspect/sections 返回分区清单",
+      r.status_code == 200 and _arr == gcp_inspect.DEFAULT_SECTIONS,
+      f"{r.status_code} {_arr}")
+
+# 打桩掉真正的 GCP 调用，验证端点拼装与缓存逻辑
+_orig_inspect = gcp_inspect.inspect_sections
+gcp_inspect.inspect_sections = lambda *a, **k: {
+    s: {"ok": True, "ms": 1, "data": []} for s in k.get("sections", a[3] if len(a) > 3 else [])}
+
+_accs = appmod.store.get_accounts()
+if _accs:
+    _aid = _accs[0]["id"]
+    r = client.get(f"/api/inspect?account_id={_aid}&quick=1")
+    _d = r.json()
+    check("★ /api/inspect 返回 ok 与分区结果",
+          r.status_code == 200 and _d.get("ok") is True
+          and set(_d["sections"]) == set(gcp_inspect.DEFAULT_SECTIONS),
+          str(_d.get("error") or list(_d.get("sections", {}).keys())))
+    check("★ 只读端点回传项目与账号标识",
+          _d.get("project_id") and _d.get("account_email"))
+    # 缓存：第二次请求必须命中（时间戳要记完成时刻，记开始时刻会立刻过期）
+    r2 = client.get(f"/api/inspect?account_id={_aid}&quick=1")
+    check("★ 45 秒内重复请求命中缓存", r2.json().get("cached") is True)
+    r3 = client.get(f"/api/inspect?account_id={_aid}&quick=1&fresh=1")
+    check("★ fresh=1 绕过缓存", r3.json().get("cached") is False)
+    # sections 参数可指定任意子集
+    r4 = client.get(f"/api/inspect?account_id={_aid}&sections=regions,zones")
+    check("★ sections 参数可指定子集并按序返回",
+          list(r4.json()["sections"]) == ["regions", "zones"])
+    # 传 zone 时归一到 region
+    r5 = client.get(f"/api/inspect?account_id={_aid}&region=us-central1-a&quick=1")
+    check("★ 传入 zone 自动归一到 region",
+          r5.json()["region"] == "us-central1", r5.json().get("region"))
+else:
+    check("★ 测试需要至少一个账号才能覆盖端点", False, "无账号，跳过等于没测")
+gcp_inspect.inspect_sections = _orig_inspect
+
+# ── 前端 ────────────────────────────────────────────────────────────
+_ct = client.get("/static/console.html").text
+check("★ 前端注册了 GCP 资源标签页",
+      "{id:'inspect'" in _ct and "label:'GCP 资源'" in _ct)
+check("★ 前端分区元信息齐全",
+      all(f"{{id:'{x}'," in _ct for x in gcp_inspect.SECTIONS))
+check("★ 前端区分快速节与深节",
+      "INSPECT_QUICK" in _ct and "INSPECT_DEEP" in _ct)
+# 模板作用域只能看到组件自身属性：模块级 const 必须经 computed 暴露，
+# 否则渲染期抛 "Cannot read properties of undefined" 并把 #app 清成白屏
+check("★ 列定义经 computed 暴露给模板（避免白屏）",
+      "inspectCols(){ return INSPECT_COLS; }" in _ct
+      and "INSPECT_COLS[m.id]" not in _ct)
+check("★ 模板不再直接引用模块级常量",
+      all(f"INSPECT_COLS[m.id]" not in _ct for _ in [0])
+      and "inspectCols[m.id]" in _ct)
+# cellVal 的解构下标：列定义 5 元组，fmt 在下标 4
+check("★ cellVal 按下标 4 取格式化方式（否则显示 [object Object]）",
+      "const [key, , , , fmt] = c;" in _ct)
+check("★ 已挂全局渲染错误兜底（不再无声白屏）",
+      "config.errorHandler" in _ct and "__vue_err__" in _ct)
+check("★ 汇总 KPI 与配额进度条均已实现",
+      'class="kpis"' in _ct and 'class="q"' in _ct)
+check("★ 明确标注只读，不误导",
+      "只读查询" in _ct and "不会创建或修改任何资源" in _ct)
+
 print("\n── G. 安装与部署产物 ──")
 
 import subprocess as _sp  # noqa: E402

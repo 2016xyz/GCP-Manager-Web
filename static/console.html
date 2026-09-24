@@ -44,6 +44,49 @@ body{
 button,input,select,textarea{font-family:inherit}
 a{color:var(--brand);text-decoration:none}
 
+
+/* ══════════ GCP 资源总览 ══════════ */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin:10px 0}
+.kpi{background:#f8fafc;border:1px solid #e2e8f0;border-radius:9px;padding:9px 10px;text-align:center}
+.kpi b{display:block;font-size:19px;color:var(--brand);line-height:1.25;font-variant-numeric:tabular-nums}
+.kpi b.ok{color:#10b981}
+.kpi b.dan{color:#e5484d}
+.kpi span{font-size:11px;color:#64748b}
+.insp-sec{border:1px solid #e2e8f0;border-radius:9px;margin-top:8px;overflow:hidden;background:#fff}
+.insp-hd{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;
+  background:#f8fafc;user-select:none}
+.insp-hd:hover{background:#f1f5f9}
+.insp-tt{font-weight:700;font-size:13px;color:var(--ink)}
+.insp-br{font-size:11.5px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.insp-ms{font-size:10.5px;color:#94a3b8;font-variant-numeric:tabular-nums;flex:none}
+.insp-ar{font-size:11px;color:#94a3b8;flex:none}
+.insp-bd{padding:10px 11px;border-top:1px solid #e2e8f0}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:2px 16px}
+.kv-r{display:flex;gap:9px;padding:3px 0;border-bottom:1px dashed #eef2f7;font-size:12.5px}
+.kv-k{color:#64748b;flex:0 0 132px;word-break:break-all}
+.kv-v{color:var(--ink);flex:1;word-break:break-all}
+.mini{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:10px}
+.mini-b h6{margin:0 0 4px;font-size:11.5px;color:#64748b;font-weight:700}
+.mini-b .kv-k{flex:0 0 84px;font-size:11.5px}
+.img-grp{margin-bottom:12px}
+.img-grp h6{margin:0 0 5px;font-size:12px;color:#334155;font-weight:700}
+.q{display:flex;align-items:center;gap:7px;margin:2px 0;font-size:11px}
+.q-m{flex:0 0 148px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.q-b{flex:1;height:7px;background:#eef2f7;border-radius:4px;overflow:hidden;min-width:44px}
+.q-b i{display:block;height:100%;border-radius:4px;background:#10b981}
+.q-b i.ok{background:#10b981}
+.q-b i.warn{background:#f59e0b}
+.q-b i.dan{background:#e5484d}
+.q-t{flex:0 0 132px;color:#64748b;text-align:right;font-variant-numeric:tabular-nums}
+.badge.warn{background:#fef3c7;color:#92400e}
+.badge.dan{background:#fee2e2;color:#b91c1c}
+.badge.off{background:#f1f5f9;color:#64748b}
+@media (max-width:768px){
+  .kv-k{flex:0 0 96px}
+  .q-m{flex:0 0 104px}.q-t{flex:0 0 96px}
+  .insp-br{display:none}
+}
+
 /* ══════════ 侧栏 / 导航 ══════════ */
 .sidebar{
   position:fixed;left:0;top:0;bottom:0;width:var(--sb-w);z-index:40;
@@ -833,6 +876,209 @@ pre.log.big{max-height:520px}
         </div>
       </template>
 
+      <!-- ═══════════════════ GCP 资源总览 ═══════════════════ -->
+      <template v-if="tab==='inspect'">
+        <div class="card">
+          <h2>GCP 资源总览
+            <small v-if="inspectProjectId">{{ inspectProjectId }}</small>
+          </h2>
+
+          <div class="row" style="margin-bottom:9px">
+            <select v-model.number="inspectAccount" style="max-width:230px">
+              <option :value="0">全部账号（取第一个）</option>
+              <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.email }}</option>
+            </select>
+            <input v-model="inspectRegion" placeholder="区域（可选，如 us-central1）" style="max-width:210px">
+            <input v-model="inspectZone" placeholder="可用区（可选，如 us-central1-a）" style="max-width:210px">
+            <button class="p" :disabled="inspecting" @click="loadInspect(true,'all')">
+              <span v-if="inspecting" class="inline-spin"></span>{{ inspecting?'读取中…':'↻ 全量刷新' }}
+            </button>
+            <button class="sm" :disabled="inspecting" @click="loadInspect(true,'quick')">仅快速节</button>
+            <span class="hint" v-if="inspectAt">更新于 {{ new Date(inspectAt).toLocaleTimeString() }}</span>
+          </div>
+
+          <div class="alert w on" v-if="inspectErr">
+            <span>⚠</span><span>{{ inspectErr }}</span>
+          </div>
+          <div class="alert w on" v-if="inspectFailed.length && !inspectErr">
+            <span>⚠</span><span>{{ inspectFailed.length }} 个分区读取失败（多为服务账号未开通对应 API）：
+              {{ inspectFailed.join('、') }} —— 展开对应分区可看到具体原因</span>
+          </div>
+
+          <div v-if="!inspectAt && !inspecting" class="empty">
+            <span class="ic">🛰</span>点击「全量刷新」读取 GCP 项目信息
+          </div>
+
+          <!-- ── 汇总 KPI ── -->
+          <div class="kpis" v-if="inspectSummary">
+            <div class="kpi"><b>{{ inspectSummary.instanceCount }}</b><span>实例总数</span></div>
+            <div class="kpi"><b class="ok">{{ inspectSummary.running }}</b><span>运行中</span></div>
+            <div class="kpi"><b>{{ inspectSummary.stopped }}</b><span>已停止</span></div>
+            <div class="kpi"><b>{{ inspectSummary.totalVCpu }}</b><span>vCPU 合计</span></div>
+            <div class="kpi"><b>{{ inspectSummary.preemptible }}</b><span>抢占式</span></div>
+            <div class="kpi"><b>{{ inspectSummary.spot }}</b><span>Spot</span></div>
+            <div class="kpi"><b>{{ inspectSummary.byZone ? Object.keys(inspectSummary.byZone).length : 0 }}</b><span>涉及可用区</span></div>
+            <div class="kpi"><b>{{ inspectSummary.byMachineType ? Object.keys(inspectSummary.byMachineType).length : 0 }}</b><span>机型种类</span></div>
+          </div>
+
+          <!-- ── 分区 ── -->
+          <div class="insp-sec" v-for="m in inspectList" :key="m.id">
+            <div class="insp-hd" @click="inspectOpen[m.id] = !inspectOpen[m.id]">
+              <span class="insp-tt">{{ m.icon }} {{ m.title }}</span>
+              <span class="badge" v-if="m.sec.ok" :class="secCount(m.id) ? '' : 'off'">{{ secCount(m.id) }}</span>
+              <span class="badge dan" v-else>失败</span>
+              <span class="insp-br">{{ secBrief(m.id) }}</span>
+              <span class="insp-ms">{{ m.sec.ms }}ms</span>
+              <span class="insp-ar">{{ inspectOpen[m.id] ? '▾' : '▸' }}</span>
+            </div>
+
+            <div class="insp-bd" v-show="inspectOpen[m.id]">
+              <!-- 读取失败：显示 GCP 的原始原因 -->
+              <div v-if="!m.sec.ok" class="alert w on">
+                <span>⚠</span><span>{{ m.sec.error }}</span>
+              </div>
+
+              <!-- ① 键值型（服务账号 / 项目 / 计费）-->
+              <div v-else-if="secKind(m.id)==='kv'" class="kv">
+                <div class="kv-r" v-for="r in kvRows(m.sec.data)" :key="r.k">
+                  <span class="kv-k">{{ r.k }}</span><span class="kv-v mono">{{ kvVal(r.v) }}</span>
+                </div>
+              </div>
+
+              <!-- ② 汇总型：按状态 / 区域 / 机型分布 + 实例明细 -->
+              <template v-else-if="secKind(m.id)==='summary'">
+                                <div class="mini">
+                  <div class="mini-b">
+                    <h6>按状态</h6>
+                    <div class="kv-r" v-for="(v,k) in m.sec.data.byStatus" :key="k">
+                      <span class="kv-k">{{ k }}</span><span class="kv-v">{{ v }}</span></div>
+                    <div class="hint" v-if="!Object.keys(m.sec.data.byStatus || {}).length">暂无</div>
+                  </div>
+                  <div class="mini-b">
+                    <h6>按可用区</h6>
+                    <div class="kv-r" v-for="(v,k) in m.sec.data.byZone" :key="k">
+                      <span class="kv-k mono">{{ k }}</span><span class="kv-v">{{ v }}</span></div>
+                    <div class="hint" v-if="!Object.keys(m.sec.data.byZone || {}).length">暂无</div>
+                  </div>
+                  <div class="mini-b">
+                    <h6>按机型</h6>
+                    <div class="kv-r" v-for="(v,k) in m.sec.data.byMachineType" :key="k">
+                      <span class="kv-k mono">{{ k }}</span><span class="kv-v">{{ v }}</span></div>
+                    <div class="hint" v-if="!Object.keys(m.sec.data.byMachineType || {}).length">暂无</div>
+                  </div>
+                </div>
+                <div class="tw" v-if="m.sec.data.instances && m.sec.data.instances.length">
+                  <table class="resp">
+                    <thead><tr><th>实例名</th><th>可用区</th><th>状态</th><th>机型</th>
+                      <th>公网 IP</th><th>内网 IP</th><th>CPU 平台</th><th>磁盘</th><th>标签</th></tr></thead>
+                    <tbody>
+                      <tr v-for="i in m.sec.data.instances" :key="i.name">
+                        <td data-l="实例名" class="mono">{{ i.name }}</td>
+                        <td data-l="可用区" class="mono">{{ i.zone }}</td>
+                        <td data-l="状态"><span class="badge" :class="tagClass('status',i.status)">{{ i.status }}</span></td>
+                        <td data-l="机型" class="mono">{{ i.machineType }}</td>
+                        <td data-l="公网IP" class="mono cp" @click="copy(i.ip||'')">{{ i.ip || '—' }}</td>
+                        <td data-l="内网IP" class="mono cp" @click="copy(i.privateIp||'')">{{ i.privateIp || '—' }}</td>
+                        <td data-l="CPU平台">{{ i.cpuPlatform || '—' }}</td>
+                        <td data-l="磁盘">{{ i.disks }}</td>
+                        <td data-l="标签" class="mono">{{ (i.tags||[]).join(' ') || '—' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <!-- ③ 区域：区域列表 + 配额进度条 -->
+              <template v-else-if="secKind(m.id)==='regions'">
+                <div class="tw">
+                  <table class="resp">
+                    <thead><tr><th>区域</th><th>状态</th><th>可用区数</th><th>配额使用（用量最高的 5 项）</th></tr></thead>
+                    <tbody>
+                      <tr v-for="r in m.sec.data" :key="r.name">
+                        <td data-l="区域" class="mono">{{ r.name }}</td>
+                        <td data-l="状态"><span class="badge" :class="tagClass('status',r.status)">{{ r.status }}</span></td>
+                        <td data-l="可用区数">{{ r.zoneCount }}</td>
+                        <td data-l="配额">
+                          <div class="q" v-for="q in topQuotas(r)" :key="q.metric">
+                            <span class="q-m mono">{{ q.metric }}</span>
+                            <span class="q-b"><i :class="quotaCls(q.pct)" :style="{width: Math.min(q.pct,100)+'%'}"></i></span>
+                            <span class="q-t mono">{{ q.usage }} / {{ q.limit }}（{{ q.pct }}%）</span>
+                          </div>
+                          <span v-if="!topQuotas(r).length" class="hint">无配额数据</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <!-- ④ 镜像族：按项目分组 -->
+              <template v-else-if="secKind(m.id)==='images'">
+                <div v-for="(v,k) in m.sec.data" :key="k" class="img-grp">
+                  <h6>{{ k }} <span class="hint" v-if="Array.isArray(v)">{{ v.length }} 个镜像族</span></h6>
+                  <div v-if="!Array.isArray(v)" class="alert w on"><span>⚠</span><span>{{ v.error }}</span></div>
+                  <div class="tw" v-else-if="v.length">
+                    <table class="resp">
+                      <thead><tr><th>镜像族</th><th>最新镜像</th><th>磁盘(GB)</th><th>创建时间</th></tr></thead>
+                      <tbody>
+                        <tr v-for="im in v" :key="im.name">
+                          <td data-l="镜像族" class="mono">{{ im.family }}</td>
+                          <td data-l="最新镜像" class="mono">{{ im.name }}</td>
+                          <td data-l="磁盘">{{ im.diskSizeGb }}</td>
+                          <td data-l="创建时间">{{ fmtTime(im.creationTimestamp) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+
+              <!-- ⑤ 其他资源：一行一类 -->
+              <template v-else-if="secKind(m.id)==='extras'">
+                <div class="tw">
+                  <table class="resp">
+                    <thead><tr><th>资源类型</th><th>数量</th><th>明细</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(v,k) in m.sec.data" :key="k">
+                        <td data-l="资源类型" class="mono">{{ k }}</td>
+                        <td data-l="数量"><span class="badge" :class="v.count?'ok':'off'">{{ v.count }}</span></td>
+                        <td data-l="明细" class="mono">
+                          <template v-if="v.error"><span class="badge dan">无权限</span> {{ v.error }}</template>
+                          <template v-else>{{ (v.items||[]).join('  ') || '—' }}</template>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+
+              <!-- ⑥ 通用表格 -->
+              <div v-else-if="secCount(m.id)" class="tw">
+                <table class="resp">
+                  <thead><tr><th v-for="c in inspectCols[m.id] || []" :key="c[0]">{{ c[1] }}</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(row,ri) in m.sec.data" :key="ri">
+                      <td v-for="c in inspectCols[m.id] || []" :key="c[0]"
+                          :data-l="c[1]" :class="c[2] ? 'mono' : ''">
+                        <span v-if="c[3] && c[3]!=='risk'" class="badge" :class="tagClass(c[3], row[c[0]])">{{ cellVal(row,c) }}</span>
+                        <span v-else-if="c[3]==='risk'" class="badge" :class="tagClass('risk', row[c[0]])">{{ row[c[0]] ? '⚠ 是' : '否' }}</span>
+                        <template v-else>{{ cellVal(row,c) }}</template>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="empty"><span class="ic">📭</span>该项目下暂无此类资源</div>
+            </div>
+          </div>
+
+          <div class="hint" style="margin-top:8px">
+            说明：本页全部为只读查询（get / list / aggregatedList），不会创建或修改任何资源。
+            分区标注「失败」通常是服务账号未开通对应 API（Resource Manager / Service Usage / Cloud Billing / IAM）。
+          </div>
+        </div>
+      </template>
+
       <!-- ═══════════════════ 命令执行 ═══════════════════ -->
       <template v-if="tab==='exec'">
         <div class="card">
@@ -1106,6 +1352,7 @@ const TABS = [
   {id:'create',   icon:'🚀', label:'创建实例', desc:'自定义机型 / 镜像 / 磁盘 / 区域'},
   {id:'accounts', icon:'👤', label:'账号管理', desc:'导入与管理 GCP 服务账号'},
   {id:'instances',icon:'📋', label:'实例列表', desc:'同步、启停、重启、删除'},
+  {id:'inspect',  icon:'🛰', label:'GCP 资源', desc:'项目 / 配额 / 网络 / 存储 / API 全览'},
   {id:'exec',     icon:'💻', label:'命令执行', desc:'批量 SSH 执行命令'},
   {id:'tasks',    icon:'🗂', label:'任务日志', desc:'任务队列与实时日志'},
   {id:'users',    icon:'👥', label:'用户管理', desc:'用户 / 角色 / 会话 / 审计', perm:'user'},
@@ -1117,6 +1364,83 @@ const TABS = [
    · disable_ops_agent=true    不产生日志/监控费用
    · no_backup=true            不挂快照时间表/备份策略
    · deletion_protection=false 便于随时回收，避免持续计费 */
+/* ══════════════════════════════════════════════════════════════════
+   GCP 资源勘察：分区元信息
+   每个分区对应后端 /api/inspect 的一个「节」。
+   quick=1 只取前 10 节（纯 compute 只读权限即可）：
+     account summary regions zones networks subnetworks
+     firewalls disks snapshots addresses
+   deep 节常需要额外权限（CRM / ServiceUsage / CloudBilling / IAM），
+   服务账号没开通对应 API 时该节显示原因，不影响其余节。
+   ══════════════════════════════════════════════════════════════════ */
+const INSPECT_META = [
+  {id:'summary',         icon:'📊', title:'计算资源汇总'},
+  {id:'account',         icon:'🔑', title:'服务账号'},
+  {id:'project',         icon:'📁', title:'项目信息'},
+  {id:'billing',         icon:'💳', title:'计费状态'},
+  {id:'services',        icon:'🧩', title:'已启用的 API'},
+  {id:'serviceAccounts', icon:'🧑‍💼', title:'IAM 服务账号'},
+  {id:'regions',         icon:'🌐', title:'区域与配额'},
+  {id:'zones',           icon:'📍', title:'可用区'},
+  {id:'machineTypes',    icon:'⚙️', title:'机器类型'},
+  {id:'images',          icon:'💿', title:'公共镜像族'},
+  {id:'networks',        icon:'🕸', title:'VPC 网络'},
+  {id:'subnetworks',     icon:'🔗', title:'子网'},
+  {id:'firewalls',       icon:'🛡', title:'防火墙规则'},
+  {id:'disks',           icon:'💾', title:'磁盘'},
+  {id:'snapshots',       icon:'📸', title:'快照'},
+  {id:'addresses',       icon:'🌍', title:'静态 IP'},
+  {id:'extras',          icon:'📦', title:'其他资源'},
+];
+
+const INSPECT_QUICK = ['account','summary','regions','zones','networks',
+                       'subnetworks','firewalls','disks','snapshots','addresses'];
+const INSPECT_DEEP  = ['project','services','billing','serviceAccounts',
+                       'machineTypes','images','extras'];
+const INSPECT_ALL   = INSPECT_QUICK.concat(INSPECT_DEEP);
+
+/* 各分区表格列定义。
+   key    取值字段
+   label  表头
+   mono   等宽字体
+   tag    以徽章形式渲染（status / fw / disk / risk / ok）
+   fmt    取值后的格式化方式：date / list / bool / json                  */
+const INSPECT_COLS = {
+  services:        [['name','API 名称',1],['title','说明']],
+  serviceAccounts: [['email','服务账号邮箱',1],
+                    ['displayName','显示名'],
+                    ['disabled','已停用','','ok']],
+  regions:         [['name','区域',1],['status','状态','','ok'],
+                    ['zoneCount','可用区数'],['__quota','配额使用（前 5 项）']],
+  zones:           [['name','可用区',1],['status','状态','','ok'],
+                    ['region','所属区域'],
+                    ['cpuPlatforms','CPU 平台','','', 'list']],
+  machineTypes:    [['name','机型',1],['guestCpus','vCPU'],
+                    ['memoryGb','内存(GB)'],['isSharedCpu','共享核','','ok'],
+                    ['architecture','架构'],['maxPds','最大磁盘数']],
+  images:          [['family','镜像族',1],['name','最新镜像',1],
+                    ['diskSizeGb','磁盘(GB)'],['creationTimestamp','创建时间','','','date']],
+  networks:        [['name','VPC 名称',1],['autoCreateSubnetworks','自动子网','','ok'],
+                    ['mtu','MTU'],['routingMode','路由模式'],['subnetworkCount','子网数']],
+  subnetworks:     [['name','子网',1],['region','区域'],['network','所属 VPC'],
+                    ['ipCidrRange','CIDR',1],['gatewayAddress','网关',1],
+                    ['privateIpGoogleAccess','私有 Google 访问','','ok']],
+  firewalls:       [['name','规则名',1],['direction','方向'],['action','动作','','fw'],
+                    ['priority','优先级'],
+                    ['sourceRanges','来源范围','','', 'list'],
+                    ['allowed','允许协议端口','','', 'ports'],
+                    ['openToWorld','对公网开放','','risk'],['disabled','已停用','','ok']],
+  disks:           [['name','磁盘名',1],['zone','可用区'],['sizeGb','容量(GB)'],
+                    ['type','类型'],['status','状态','','ok'],
+                    ['users','挂载于','','', 'list'],['orphan','孤儿盘','','risk']],
+  snapshots:       [['name','快照名',1],['status','状态','','ok'],
+                    ['diskSizeGb','源盘(GB)'],['storageBytesGb','占用(GB)'],
+                    ['sourceDisk','源磁盘',1],['creationTimestamp','创建时间','','','date']],
+  addresses:       [['name','名称',1],['address','IP 地址',1],['region','区域'],
+                    ['scope','范围'],['type','类型'],['status','状态','','ok'],
+                    ['inUse','已绑定','','ok']],
+};
+
 const EMPTY_SPEC = () => ({
   machine_type:'e2-micro', image_key:'ubuntu-minimal-2204', disk_type:'pd-standard',
   disk_size_gb:30, region_mode:'auto_free', region:'us-central1',
@@ -1129,7 +1453,7 @@ const EMPTY_SPEC = () => ({
   preemptible:false, spot:false,
 });
 
-createApp({
+const __APP_REF__ = createApp({
   data(){ return {
     booted:false, online:false, tab:'create',
     me:{username:'', display_name:'', role:'', role_label:''},
@@ -1151,6 +1475,9 @@ createApp({
     accForm:{key_path:'', folder:'', proxy:'', proxy_type:'HTTPS'},
     userForm:{username:'', password:'', role:'operator', display_name:'', must_change:true},
     pwForm:{old_password:'', new_password:'', confirm:''},
+    inspect:{}, inspecting:false, inspectErr:'', inspectAt:0,
+    inspectAccount:0, inspectRegion:'', inspectZone:'',
+    inspectProjectId:'', inspectFailed:[], inspectOpen:{}, inspectLoaded:'',
     modal:null, toasts:[], toastSeq:0,
     roleOptions:[
       {value:'admin', label:'管理员', desc:'全部权限'},
@@ -1164,6 +1491,22 @@ createApp({
       return TABS.filter(t => !t.perm || this.can(t.perm));
     },
     currentTab(){ return TABS.find(t=>t.id===this.tab) || TABS[0]; },
+    /* 已拿到的分区，按 META 顺序排列，便于模板遍历 */
+    inspectList(){
+      return INSPECT_META
+        .filter(m => this.inspect[m.id])
+        .map(m => ({...m, sec:this.inspect[m.id]}));
+    },
+    /* 列定义必须经 computed 暴露：模板作用域只能看到组件自身的
+       data/computed/methods，直接写模块级 const（INSPECT_COLS）会是
+       undefined，取下标即抛 "Cannot read properties of undefined"，
+       且因为发生在渲染期，会把整个 #app 清空成白屏。 */
+    inspectCols(){ return INSPECT_COLS; },
+    /* summary 节的统计口径，模板直接用 */
+    inspectSummary(){
+      const s = this.inspect.summary;
+      return (s && s.ok && s.data) ? s.data : null;
+    },
     allRegions(){
       return [...(this.catalog.free_regions||[]).map(r=>({...r,tier:'free'})),
               ...(this.catalog.paid_regions||[]).map(r=>({...r,tier:'paid'}))];
@@ -1283,6 +1626,162 @@ createApp({
     async patch(path, data){ return this.raw(path, {method:'PATCH', body:JSON.stringify(data||{})}); },
     fail(r, fallback){ this.toast((r && (r.error||r.detail)) || fallback || '操作失败', 'r'); },
 
+    /* ───────── GCP 资源勘察 ───────── */
+    sec(id){ const s = this.inspect[id]; return (s && s.ok) ? s.data : null; },
+
+    /* 分区的条目数：数组取长度，dict 取 count 字段 */
+    secCount(id){
+      const d = this.sec(id);
+      if(Array.isArray(d)) return d.length;
+      if(d && typeof d === 'object'){
+        if(typeof d.count === 'number') return d.count;
+        if(Array.isArray(d.items)) return d.items.length;
+        return Object.keys(d).length;
+      }
+      return 0;
+    },
+
+    /* 把后端返回的对象拍平成 [{k,v}]，用于 kv 卡片 */
+    kvRows(d){
+      if(!d || typeof d !== 'object') return [];
+      return Object.keys(d).map(k => ({k, v:d[k]}));
+    },
+    kvVal(v){
+      if(v === null || v === undefined || v === '') return '—';
+      if(typeof v === 'boolean') return v ? '是' : '否';
+      if(Array.isArray(v)) return v.length ? v.join(', ') : '—';
+      if(typeof v === 'object') return JSON.stringify(v, null, 0);
+      return String(v);
+    },
+
+    /* 表格取值 */
+    cellVal(row, c){
+      /* 列定义是 [key, label, mono, tag, fmt] 共 5 个位置，fmt 在下标 4。
+         早先写成 6 个空位 [key, , , , , fmt] 会取到下标 5（undefined），
+         导致 fmt 永远不生效 —— 防火墙的 allowed 是对象数组，
+         于是落到 String(v) 分支，页面上直接显示 "[object Object]"。 */
+      const [key, , , , fmt] = c;
+      let v = row[key];
+      if(fmt === 'date') return this.fmtTime(v);
+      if(fmt === 'list') return (Array.isArray(v) && v.length) ? v.join(' ') : '—';
+      if(fmt === 'ports'){
+        if(!Array.isArray(v) || !v.length) return '—';
+        return v.map(a => a.protocol + (a.ports && a.ports.length ? ':' + a.ports.join(',') : ''))
+                .join('  ');
+      }
+      if(v === null || v === undefined || v === '') return '—';
+      if(typeof v === 'boolean') return v ? '是' : '否';
+      if(Array.isArray(v)) return v.length ? v.join(', ') : '—';
+      return String(v);
+    },
+    fmtTime(v){
+      if(!v) return '—';
+      const t = Date.parse(v);
+      if(isNaN(t)) return String(v);
+      const d = new Date(t);
+      const p = n => String(n).padStart(2,'0');
+      return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+    /* 徽章配色 */
+    tagClass(tag, v){
+      if(tag === 'status'){
+        const u = String(v||'').toUpperCase();
+        if(['RUNNING','UP','READY','ACTIVE'].includes(u)) return 'ok';
+        if(['TERMINATED','STOPPED','INACTIVE'].includes(u)) return 'off';
+        if(['PROVISIONING','STAGING','REPAIRING'].includes(u)) return 'warn';
+        return '';
+      }
+      if(tag === 'fw'){
+        return String(v).toUpperCase() === 'DENY' ? 'dan' : 'ok';
+      }
+      /* risk：true 才亮红，用于「对公网开放」「孤儿盘」这类要点 */
+      if(tag === 'risk') return v ? 'dan' : 'off';
+      if(tag === 'ok')  return v ? 'ok' : 'off';
+      return '';
+    },
+    /* 区域配额：只展示用量最高的 5 项，按百分比 */
+    topQuotas(region){
+      const q = (region && region.quotas) || [];
+      const list = q.filter(x => typeof x.pct === 'number').sort((a,b)=>b.pct-a.pct);
+      return list.slice(0, list.length ? 5 : 0);
+    },
+    quotaCls(p){ return p >= 90 ? 'dan' : (p >= 70 ? 'warn' : 'ok'); },
+
+    /* 分区标题右侧的摘要文案 */
+    secBrief(id){
+      const d = this.sec(id);
+      if(id === 'summary' && d) return `实例 ${d.instanceCount} 台 · 运行 ${d.running} · vCPU 合计 ${d.totalVCpu}`;
+      if(id === 'project' && d)     return `${d.name||''} · ${d.state||''}`;
+      if(id === 'billing' && d)     return d.billingEnabled ? '已开启计费' : '未关联计费账号';
+      if(id === 'account' && d)     return d.client_email || '';
+      if(id === 'extras' && d){
+        const all = Object.keys(d);
+        const has = all.filter(k => d[k] && d[k].count).length;
+        const noPerm = all.filter(k => d[k] && d[k].error).length;
+        return `已检查 ${all.length} 类：有内容 ${has} 类` +
+               (noPerm ? ` · 无权限 ${noPerm} 类` : '');
+      }
+      if(id === 'machineTypes' && d) return `${d.length} 个机型（该可用区）`;
+      if(id === 'images' && d){
+        return Object.keys(d)
+          .map(p => `${p} ${Array.isArray(d[p]) ? d[p].length : 0} 族`).join(' · ');
+      }
+      return '';
+    },
+
+    /* 哪一节用哪种渲染方式 */
+    secKind(id){
+      if(id === 'summary') return 'summary';
+      if(['account','project','billing'].includes(id)) return 'kv';
+      if(id === 'extras') return 'extras';
+      if(id === 'regions') return 'regions';
+      if(id === 'images') return 'images';
+      return 'table';
+    },
+
+    async loadInspect(force, mode){
+      if(this.inspecting) return;
+      this.inspecting = true;
+      if(force || !this.inspectAt) this.inspectErr = '';
+      try{
+        const q = new URLSearchParams();
+        q.set('account_id', this.inspectAccount || 0);
+        if(this.inspectRegion) q.set('region', this.inspectRegion);
+        if(this.inspectZone)   q.set('zone',   this.inspectZone);
+        if(force) q.set('fresh', '1');
+        if(mode === 'quick')      q.set('quick', '1');
+        else if(mode === 'deep')  q.set('sections', INSPECT_DEEP.join(','));
+        else                      q.set('sections', INSPECT_ALL.join(','));
+
+        const r = await this.api('/api/inspect?' + q.toString());
+        if(!r || !r.ok){ this.inspectErr = (r && r.error) || '读取失败'; return; }
+        /* 深节合并进已有结果，避免覆盖掉快速节的数据 */
+        this.inspect = (mode === 'deep')
+          ? {...this.inspect, ...(r.sections||{})}
+          : (r.sections || {});
+        this.inspectProjectId = r.project_id || '';
+        this.inspectFailed = r.failed || [];
+        this.inspectAt = Date.now();
+        this.inspectLoaded = (mode === 'deep') ? 'all' : (mode || 'all');
+        /* 首屏默认展开：汇总 / 项目 / 网络 / 防火墙 */
+        INSPECT_META.forEach(m => {
+          if(!(m.id in this.inspectOpen))
+            this.inspectOpen[m.id] = ['summary','account','firewalls','subnetworks'].includes(m.id);
+        });
+      }catch(e){
+        this.inspectErr = (e && e.message) || String(e);
+      }finally{ this.inspecting = false; }
+    },
+
+    /* 打开该页：先快速节（约 10 秒），再自动补深节（约 20 秒） */
+    async enterInspect(){
+      if(this.inspectAt && this.inspectLoaded === 'all') return;
+      const first = !this.inspectAt;
+      await this.loadInspect(false, 'quick');
+      if(this.inspectErr && first) return;
+      await this.loadInspect(false, 'deep');
+    },
+
     /* ───────── 导航 ───────── */
     go(id){ this.tab = id; this.onEnter(id); },
     onEnter(id){
@@ -1291,6 +1790,7 @@ createApp({
       else if(id==='tasks'){ this.loadTasks(); this.loadLogsTail(); }
       else if(id==='users' && this.can('user')){ this.loadUsers(); this.loadSessions(); this.loadAudit(); }
       else if(id==='exec' && !this.instances.length) this.loadInstances(false);
+      else if(id==='inspect') this.enterInspect();
     },
 
     /* ───────── 启动 ───────── */
@@ -1814,7 +2314,28 @@ createApp({
   },
 
   mounted(){ this.boot(); },
-}).mount('#app');
+});
+
+/* 全局渲染错误兜底。
+   背景：模板里一旦访问到 undefined 的属性（例如模块级常量没经 computed 暴露），
+   Vue 会在渲染期抛错并直接把 #app 清空 —— 页面全白且没有任何提示，
+   排查只能靠翻控制台。这里显式兜底：把错误显示在页面上，并保留其余内容。 */
+const __app = __APP_REF__;
+__app.config.errorHandler = (err, instance, info) => {
+  const msg = (err && err.message) || String(err);
+  console.error('[Vue]', info, err);
+  const bar = document.getElementById('__vue_err__') || (() => {
+    const d = document.createElement('div');
+    d.id = '__vue_err__';
+    d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;background:#fee2e2;'
+      + 'color:#b91c1c;font-size:12px;padding:6px 12px;border-top:2px solid #e5484d;'
+      + 'font-family:monospace;white-space:pre-wrap;max-height:32vh;overflow:auto';
+    document.body.appendChild(d);
+    return d;
+  })();
+  bar.textContent = `[渲染错误 · ${info}] ${msg}\n（页面其余部分仍可使用；若整页空白请按 F5 刷新）`;
+};
+__app.mount('#app');
 </script>
 </body>
 </html>

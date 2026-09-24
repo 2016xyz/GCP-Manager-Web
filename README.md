@@ -8,6 +8,8 @@
    不再像原版那样把 `e2-micro + Ubuntu Minimal 22.04 + pd-standard 30GB` 硬编码在源码常量里。
 2. **Vue 3 响应式控制台** —— 手机 / 平板 / 电脑自适应，配色依据色彩心理学选型。
 3. **登录鉴权** —— 账号 + 密码 + 图形验证码，多角色权限，后台可改密、可加用户。
+4. **GCP 资源总览** —— 17 个分区只读勘察：项目 / 配额 / 区域 / 机型 / 镜像 /
+   网络 / 子网 / 防火墙 / 磁盘 / 快照 / 静态 IP / API / IAM（见「六、GCP 资源总览」）。
    登录页视觉对齐 [2016xyz/sysuahb](https://github.com/2016xyz/sysuahb)（见「登录页设计」一节）。
 
 对齐 v7.4+ 的**极致省钱**默认行为：
@@ -447,7 +449,66 @@ STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
 
 ---
 
-## 六、REST API
+## 六、GCP 资源总览
+
+新增「🛰 GCP 资源」页，把服务账号能看到的项目信息尽量都摊开。
+**全部只读**（`get` / `list` / `aggregatedList`），不创建也不修改任何资源。
+
+### 17 个分区
+
+| 分区 | 内容 | 权限要求 |
+|---|---|---|
+| 📊 计算资源汇总 | 实例数/运行/停止/vCPU 合计/按状态·区域·机型分布 + 实例明细 | compute |
+| 🔑 服务账号 | 本地 JSON 的邮箱、项目、私钥是否可解析 | 无（本地读取） |
+| 📁 项目信息 | 项目号、名称、状态、创建时间、label、上级组织 | Resource Manager API |
+| 💳 计费状态 | 是否已关联计费账号、计费账号 ID | Cloud Billing API |
+| 🧩 已启用的 API | 项目里启用的全部 API（含分页） | Service Usage API |
+| 🧑‍💼 IAM 服务账号 | 项目下的服务账号列表（含停用状态） | IAM API |
+| 🌐 区域与配额 | 43 个区域的可用区 + **每区域配额用量进度条** | compute |
+| 📍 可用区 | 全部 zone、状态、所属区域、CPU 平台 | compute |
+| ⚙️ 机器类型 | 指定可用区下的机型：vCPU / 内存 / 共享核 / 架构 / 最大磁盘数 | compute |
+| 💿 公共镜像族 | ubuntu / debian / cos / rocky / windows 的最新镜像族 | compute |
+| 🕸 VPC 网络 | 网络名、自动子网、MTU、路由模式、子网数 | compute |
+| 🔗 子网 | 42 个子网：CIDR、网关、私有 Google 访问、用途 | compute |
+| 🛡 防火墙规则 | 方向/动作/优先级/来源/协议端口/标签，**对公网开放的标红** | compute |
+| 💾 磁盘 | 容量、类型、状态、挂载于谁，**未挂载的标为孤儿盘** | compute |
+| 📸 快照 | 源盘、源盘容量、实际占用、创建时间 | compute |
+| 🌍 静态 IP | 区域级 + 全局，是否已绑定 | compute |
+| 📦 其他资源 | 路由器/VPN/转发规则/实例组/模板/健康检查/后端服务/保留/承诺 | compute |
+
+### 设计要点
+
+- **逐分区隔离**：每节独立 try/except。服务账号通常只有 compute 权限，
+  没开通 Resource Manager / Service Usage / Cloud Billing / IAM 时，
+  只有那一节显示「失败」并给出 GCP 的原始原因，不影响其余 15 节。
+  失败原因会原样展示（例如 `HTTP 403 Cloud Resource Manager API has not been used in project …`）。
+- **快速节 + 深节**：进入页面先拉 10 个快速节（纯 compute 只读权限，约 11 秒），
+  再自动补 7 个深节（约 22 秒）。也可以只用「仅快速节」或「全量刷新」。
+- **服务端 45 秒缓存**：重复刷新不打 GCP，实测二次请求 91ms。
+  `fresh=1` 可强制绕过。
+- **并发 + 单次代理**：各节并发执行（默认 5 线程），整套从 88 秒降到 33 秒。
+  代理只在批量外层设置一次 —— `ProxyEnvContext` 改的是进程级环境变量，
+  每节各设各的会在并发时互相清掉。
+- **零数据也如实显示**：磁盘/快照/静态 IP 为 0 时给中性徽章，
+  不做「看起来有内容」的误导。
+
+### 端点上
+
+```http
+GET /api/inspect/sections
+    → {default:[…10 个快速节], deep:[…7 个深节], all:[…全部]}
+
+GET /api/inspect?account_id=&sections=&region=&zone=&fresh=1&quick=1
+    → {ok, project_id, account_email, region, zone, cached, elapsed_ms,
+       failed:[失败节名], sections:{节名:{ok, ms, data|error}}}
+```
+
+`sections` 留空取快速节 + 深节；`quick=1` 只取快速节。
+`region` 传 zone（如 `us-central1-a`）会自动归一到 `us-central1`。
+
+---
+
+## 七、REST API
 
 基础地址 `http://<host>:<port>`，交互式文档 `/docs`。
 除公开接口外，全部需要登录（Cookie `gcp_sid`，也支持 `Authorization: Bearer <token>`）。
@@ -536,7 +597,7 @@ curl -b /tmp/cj -X POST http://127.0.0.1:8000/api/create \
 
 ---
 
-## 七、目录结构
+## 八、目录结构
 
 ```
 gcp-manager-web/
@@ -544,6 +605,7 @@ gcp-manager-web/
 ├── run.sh                 一键启动
 ├── requirements.txt
 ├── core/
+│   ├── inspect.py         GCP 资源只读勘察（17 个分区）
 │   ├── auth.py            密码哈希 / 会话 / 图形验证码 / 登录限速 / 权限矩阵
 │   ├── users.py           用户 / 会话 / 审计 存储层
 │   ├── catalog.py         机型/镜像/磁盘/区域/价格 目录（自定义配置数据源）
@@ -565,19 +627,19 @@ gcp-manager-web/
 ├── requirements.txt       Python 依赖
 ├── tools/
 │   └── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
-├── tests_e2e.py           端到端验证（246 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（275 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
 ---
 
-## 八、验证
+## 九、验证
 
 ```bash
 python3 tests_e2e.py
 ```
 
-共 246 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 275 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -600,6 +662,13 @@ python3 tests_e2e.py
   语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
   `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
   16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
+- **K. GCP 资源勘察**（29 项）：只读承诺（源码内无任何写操作调用）、17 个分区齐全、
+  快速/深节划分、未知节名不炸、逐节异常隔离、zones 用 `available_cpu_platforms`、
+  防火墙 action 由 allowed/denied 反推、孤儿盘识别、聚合响应字段名动态探测、
+  并发下代理只设一次、未登录 401、缓存命中与 `fresh=1` 绕过、
+  zone→region 归一、前端分区元信息/列定义经 computed 暴露（防白屏）、
+  全局渲染错误兜底
+
 - **J. 升级通道**（10 项）：`update.sh` 可执行、绝不触碰 `data/`、保留本地改动（stash）、git 与 tarball 双路径、`--check` 只读模式、重启并校验服务存活、失败换国内源、管道模式安全、`install.sh` 与 README 均有升级引导
 
 - **I. 测试夹具隔离**（3 项）：产品 `app.py` 无任何 `__probe` 路由、
@@ -623,7 +692,7 @@ python3 tests_e2e.py
 
 ---
 
-## 九、实测记录（真实 GCP 项目）
+## 十、实测记录（真实 GCP 项目）
 
 用真实服务账号 `80717428802-compute@developer.gserviceaccount.com`
 （项目 `sincere-axon-354618`）端到端跑通，非 mock。
@@ -700,7 +769,7 @@ inode 与时间戳完全不变。
 
 ---
 
-## 十、安全说明
+## 十一、安全说明
 
 - **服务账号 JSON 与 Root 密码是高敏感数据**：`data/` 目录不要提交到公开仓库
   （`.gitignore` 已排除）。

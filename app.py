@@ -35,6 +35,7 @@ from core.store import Store                               # noqa: E402
 from core.users import UserStore                           # noqa: E402
 from core.tasks import TaskManager                         # noqa: E402
 from core.gcp import GCPService, build_instance_spec       # noqa: E402
+from core import inspect as gcp_inspect                    # noqa: E402
 from core import ssh as ssh_mod                            # noqa: E402
 
 # 默认配置一致性自检
@@ -611,6 +612,113 @@ def api_project_zones(request: Request, account_id: int = 0, region: str = ""):
         return {"ok": True, "region": region, "zones": gcp.list_zones(region)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ----------------------------------------------------------------------
+# GCP 资源勘察（只读）
+#
+# 目标：把服务账号能看到的项目信息尽量都呈现出来。
+# 每节独立成败 —— 服务账号往往只有 compute 相关权限，
+# 没有 resourcemanager / serviceusage / cloudbilling，
+# 那种情况下只让对应那一节显示原因，不影响其余节。
+# ----------------------------------------------------------------------
+_INSPECT_CACHE = {}          # {(account_id, sections, region, zone): (ts, payload)}
+INSPECT_TTL = 45             # 秒；重复刷新页面不必反复打 GCP
+
+
+def _pick_account(account_id):
+    accs = store.get_accounts()
+    if account_id:
+        accs = [a for a in accs if a["id"] == account_id]
+    return accs[0] if accs else None
+
+
+def _norm_region(r):
+    r = (r or "").strip()
+    if r.count("-") >= 2:               # 传进来的是 zone，归一到 region
+        r = r.rsplit("-", 1)[0]
+    return r
+
+
+@app.get("/api/inspect/sections")
+def api_inspect_sections(request: Request):
+    """列出可勘察的节，供前端渲染勾选项"""
+    require(request, "view")
+    return {"ok": True,
+            "default": gcp_inspect.DEFAULT_SECTIONS,
+            "deep": gcp_inspect.DEEP_SECTIONS,
+            "all": sorted(gcp_inspect.SECTIONS)}
+
+
+@app.get("/api/inspect")
+def api_inspect(request: Request, account_id: int = 0, sections: str = "",
+                region: str = "", zone: str = "", fresh: int = 0,
+                quick: int = 0):
+    """
+    批量勘察 GCP 资源。
+
+    sections  逗号分隔的节名；留空取默认节（quick=1 时只取默认节）
+    region    限定区域（regions/zones/subnetworks 用）
+    zone      限定可用区（machineTypes 用）
+    fresh=1   绕过 45s 缓存，强制重新拉取
+    """
+    require(request, "view")
+    acc = _pick_account(account_id)
+    if not acc:
+        return {"ok": False, "error": "没有可用账号"}
+
+    if sections:
+        want = [x.strip() for x in sections.split(",") if x.strip()]
+    elif quick:
+        want = list(gcp_inspect.DEFAULT_SECTIONS)
+    else:
+        want = list(gcp_inspect.DEFAULT_SECTIONS) + list(gcp_inspect.DEEP_SECTIONS)
+    # 去重且保序
+    seen, ordered = set(), []
+    for w in want:
+        if w not in seen:
+            seen.add(w)
+            ordered.append(w)
+
+    region = _norm_region(region)
+    zone = (zone or "").strip()
+    if not zone and region:
+        zone = region + "-a"
+
+    ck = (acc["id"], tuple(ordered), region, zone)
+    now = time.time()
+    if not fresh and ck in _INSPECT_CACHE:
+        ts, cached = _INSPECT_CACHE[ck]
+        if now - ts < INSPECT_TTL:
+            return {**cached, "cached": True, "age": int(now - ts)}
+
+    try:
+        res = gcp_inspect.inspect_sections(
+            acc["key_path"], acc["project_id"], acc["email"], ordered,
+            params={"region": region, "zone": zone},
+            proxy=acc.get("proxy", ""), proxy_type=acc.get("proxy_type", "HTTPS"))
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    payload = {
+        "ok": True, "cached": False,
+        "account_id": acc["id"],
+        "project_id": acc["project_id"],
+        "account_email": acc["email"],
+        "region": region, "zone": zone,
+        "sections": res,
+        "failed": [k for k, v in res.items() if not v.get("ok")],
+        "elapsed_ms": sum(v.get("ms", 0) for v in res.values()),
+    }
+    # 时间戳取「完成时刻」而非开始时刻：整套勘察可能跑 20-90 秒，
+    # 若记开始时刻，条目一存进去就已经超过 TTL，缓存永远不命中。
+    _INSPECT_CACHE[ck] = (time.time(), payload)
+    # 缓存别无限涨
+    if len(_INSPECT_CACHE) > 32:
+        oldest = sorted(_INSPECT_CACHE.items(), key=lambda kv: kv[1][0])[:8]
+        for k, _ in oldest:
+            _INSPECT_CACHE.pop(k, None)
+    return payload
 
 
 @app.get("/api/config")
