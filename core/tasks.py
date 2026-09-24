@@ -155,13 +155,60 @@ class TaskManager:
             pool = [r for r in pool if r in catalog.ALL_REGIONS] or pool
             return pool or list(catalog.FREE_REGIONS.keys()), max_per_region, False
         if region_mode == "single":
-            region = spec.get("region") or "us-central1"
+            # region 可能被写成 zone（us-west1-b）或空值：统一归一化为 region，
+            # 否则后续按 region 拼 zone 会得到 us-west1-b-b 这类不存在的 zone
+            region = str(spec.get("region") or "").strip() or "us-central1"
+            if region.count("-") >= 2:
+                region = region.rsplit("-", 1)[0]
             return [region], 10 ** 6, True
         pool = list(catalog.FREE_REGIONS.keys())
         return pool, max_per_region, False
 
-    def zones_for_region(self, region):
-        return [f"{region}-{s}" for s in ("a", "b", "c", "d", "f")]
+    # 已知各 region 的 zone 后缀并不统一（us-west1 无 d/f，us-east1 无 a）。
+    # 这里作为**离线兜底**仅用于无网络/无权限时；运行时优先向 GCP 拉真实 zone。
+    ZONE_SUFFIX_FALLBACK = ("a", "b", "c", "d", "f")
+
+    def zones_for_region(self, region, gcp=None):
+        """
+        解析某个 region 下真实存在的 zone 列表。
+
+        修复两个真实缺陷：
+          1) 入参可能是 region（us-west1）也可能是 zone（us-west1-b）。
+             早先不做区分，把 us-west1-b 当 region 再拼后缀，得到
+             us-west1-b-a / us-west1-b-b 这种不存在的 zone，
+             API 报 "Permission denied on 'locations/us-west1-b-b'"，
+             把「zone 不存在」伪装成「权限不足」。
+          2) 后缀硬编码为 a/b/c/d/f，但各 region 实际后缀不同，
+             us-west1 只有 a/b/c —— 总会先撞上不存在的 d/f。
+        现在：优先用 GCP 返回的真实 zone；拿不到再退回后缀拼接，
+        且拼接前先把入参归一化为 region。
+        """
+        region = (region or "").strip()
+        # 若传入的是 zone（形如 us-west1-b），归一化为 region
+        if region.count("-") >= 2:
+            region = region.rsplit("-", 1)[0]
+
+        cache = getattr(self, "_zone_cache", None)
+        if cache is None:
+            cache = self._zone_cache = {}
+        if region in cache:
+            return list(cache[region])
+
+        real = []
+        try:
+            if gcp is None:
+                # 无 gcp 实例时（例如单元测试）直接走兜底
+                raise RuntimeError("no gcp client")
+            real = gcp.list_zones(region) or []
+        except Exception:
+            real = []
+
+        if real:
+            cache[region] = list(real)
+            return list(real)
+
+        fallback = [f"{region}-{s}" for s in self.ZONE_SUFFIX_FALLBACK]
+        return fallback
 
     # ------------------------------------------------------------------
     # 创建任务
@@ -374,7 +421,7 @@ class TaskManager:
             last_err = ""
             res = None
             for region in ordered_regions:
-                zone_list = [z for z in self.zones_for_region(region) if z not in tried]
+                zone_list = [z for z in self.zones_for_region(region, gcp) if z not in tried]
                 random.shuffle(zone_list)
                 for zone in zone_list:
                     if self._is_cancelled(task_id):
@@ -405,7 +452,7 @@ class TaskManager:
                     r2, _ = reserve()
                     if not r2:
                         break
-                    z2 = random.choice(self.zones_for_region(r2))
+                    z2 = random.choice(self.zones_for_region(r2, gcp))
                     a_spec = dict(spec)
                     a_spec["region"] = r2
                     self.log(f"[{label}] {name} 重试 {attempt + 1}/{retries} → {z2}：{last_err}", task_id, "warn")

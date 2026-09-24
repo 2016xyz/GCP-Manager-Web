@@ -468,15 +468,38 @@ pre.log.big{max-height:520px}
               </div>
 
               <div class="sep"></div>
+              <div class="row" style="margin-bottom:6px">
+                <button class="s" @click="loadNetworks">↻ 读取项目真实网络</button>
+                <span class="hint" v-if="netInfo.loaded">
+                  区域 {{ netInfo.region }}：
+                  {{ netInfo.networks.length }} 个 VPC / {{ netInfo.subnets.length }} 个子网
+                </span>
+                <span class="hint" v-else>默认值 default 未必存在于你的项目，建议先读取一次</span>
+              </div>
               <div class="grid g3">
-                <label class="f">网络<input v-model.trim="spec.network" class="mono"></label>
-                <label class="f">子网<input v-model.trim="spec.subnet" class="mono"></label>
+                <label class="f">网络
+                  <select v-if="netInfo.networks.length" v-model.trim="spec.network">
+                    <option v-for="n in netInfo.networks" :value="n">{{ n }}</option>
+                  </select>
+                  <input v-else v-model.trim="spec.network" class="mono">
+                </label>
+                <label class="f">子网
+                  <select v-if="netInfo.subnets.length" v-model.trim="spec.subnet">
+                    <option v-for="s in netInfo.subnets" :value="s">{{ s }}</option>
+                  </select>
+                  <input v-else v-model.trim="spec.subnet" class="mono">
+                </label>
                 <label class="f">网络层级
                   <select v-model="spec.network_tier">
                     <option value="STANDARD">STANDARD（标准，出站 200GB/月免费）</option>
                     <option value="PREMIUM">PREMIUM（高级）</option>
                   </select>
                 </label>
+              </div>
+              <div v-if="netInfo.loaded && !netInfo.has_default_network" class="alert e on" style="margin:11px 0 0">
+                <span>⚠</span><span>该项目不存在名为 <code>default</code> 的 VPC。若继续使用默认值，
+                  创建会失败并报 <code>The referenced network resource cannot be found</code>。
+                  已自动切换到 <code>{{ netInfo.networks[0] }}</code>。</span>
               </div>
               <div class="row" style="margin-top:12px">
                 <label class="sw rd" :class="{on:spec.auto_open_firewall}">
@@ -1122,6 +1145,7 @@ createApp({
     opts:{count:1, concurrency:3, account_workers:1, retry_count:2,
           ssh_timeout:300, idle_timeout:180, command_timeout:1800, verify_timeout:180},
     est:{}, creating:false, savings:{items:[],enabled:0,total:0},
+    netInfo:{loaded:false, region:'', networks:[], subnets:[], has_default_network:true},
     execForm:{scope:'all', command:'', concurrency:10, idle_timeout:120, command_timeout:600},
     execOut:'',
     accForm:{key_path:'', folder:'', proxy:'', proxy_type:'HTTPS'},
@@ -1362,6 +1386,35 @@ createApp({
       this.toast('已套用「极速部署」预设：全部省钱优化已开启','g');
       this.recalc();
     },
+    /* 读取项目真实 VPC / 子网：default 网络未必存在，不能想当然 */
+    async loadNetworks(){
+      const accId = this.checkedAccountIds[0] || (this.accounts[0] && this.accounts[0].id) || 0;
+      if(!accId){ return this.toast('请先在「账号管理」导入 GCP 服务账号','a'); }
+      this.toast('正在读取项目网络…','i');
+      try{
+        const r = await this.api('GET',
+          `/api/project_networks?account_id=${accId}&region=${encodeURIComponent(this.primaryRegion||'')}`);
+        if(!r || !r.ok){ return this.toast((r&&r.error)||'读取失败','e'); }
+        this.netInfo = {loaded:true, region:r.region, networks:r.networks||[],
+                        subnets:r.subnets||[], has_default_network:r.has_default_network};
+        if(!this.netInfo.networks.length){
+          return this.toast('该项目下没有可用的 VPC 网络，请先在 GCP 控制台创建','e');
+        }
+        // 当前选择不在真实列表里 → 自动纠正，避免创建时报「network not found」
+        if(!this.netInfo.networks.includes(this.spec.network)){
+          this.spec.network = this.netInfo.networks[0];
+        }
+        if(this.netInfo.subnets.length && !this.netInfo.subnets.includes(this.spec.subnet)){
+          const same = this.netInfo.subnets.find(s=>s===this.spec.network);
+          this.spec.subnet = same || this.netInfo.subnets[0];
+        }
+        const warn = this.netInfo.has_default_network ? '' : '（注意：本项目无 default 网络，已自动切换）';
+        this.toast(`已读取 ${this.netInfo.networks.length} 个 VPC / ${this.netInfo.subnets.length} 个子网${warn}`,
+                   this.netInfo.has_default_network ? 'g' : 'a');
+        this.recalc();
+      }catch(e){ this.toast('读取网络失败：'+e.message,'e'); }
+    },
+
     /* 显式放开全开防火墙：二次确认后开启 */
     openFirewallMode(){
       if(this.spec.auto_open_firewall){

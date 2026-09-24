@@ -143,6 +143,16 @@ def build_instance_spec(user_spec):
         spec["network_url"] = f"global/networks/{spec.get('network')}"
 
     subnet = str(spec.get("subnet") or "default")
+    # 子网 URL 必须与实例所在 region 匹配，否则 API 报
+    # "Scope of the specified subnetwork doesn't match the scope of the instance"
+    # 因此 region 必须存在：缺省时给出兜底，并接受 zone 形式入参。
+    region = str(spec.get("region") or "").strip()
+    if not region:
+        region = "us-central1"
+    if region.count("-") >= 2:          # 传的是 zone（us-west1-b）→ 归一化为 region
+        region = region.rsplit("-", 1)[0]
+    spec["region"] = region
+
     if subnet == "default":
         spec["subnet_url"] = DEFAULT_SUBNET.format(region=spec["region"])
     elif subnet.startswith("regions/"):
@@ -426,6 +436,55 @@ class GCPService:
             except Exception:
                 pass
             return out
+
+        try:
+            return self._with_proxy(run)
+        except Exception:
+            return []
+
+    def list_zones(self, region=""):
+        """
+        拉取项目真实存在的 zone（而非按后缀硬编码猜测）。
+
+        为什么要这么做：GCP 各 region 的 zone 后缀并不统一，例如
+        us-west1 只有 a/b/c（没有 d/f），us-east1 只有 b/c/d（没有 a）。
+        早先按 ("a","b","c","d","f") 硬编码拼接，会生成
+        us-west1-d 这类不存在的 zone，被 API 拒绝为
+        "Permission denied on 'locations/us-west1-d'"，从而把「区域不存在」
+        误判成「权限不足」，排查方向被严重误导。
+        """
+        def run():
+            out = []
+            client = compute_v1.ZonesClient.from_service_account_json(self.key_path)
+            for z in client.list(project=self.project_id):
+                if region and not z.name.startswith(region + "-"):
+                    continue
+                if z.status and z.status != "UP":
+                    continue
+                out.append(z.name)
+            return sorted(out)
+
+        try:
+            return self._with_proxy(run)
+        except Exception:
+            return []
+
+    def list_networks(self):
+        """列出项目中的 VPC 网络（用于确认 default 网络是否存在）"""
+        def run():
+            client = compute_v1.NetworksClient.from_service_account_json(self.key_path)
+            return sorted(n.name for n in client.list(project=self.project_id))
+
+        try:
+            return self._with_proxy(run)
+        except Exception:
+            return []
+
+    def list_subnetworks(self, region):
+        """列出指定区域中的子网（VPC 名与子网名常常一致，但不是必然）"""
+        def run():
+            client = compute_v1.SubnetworksClient.from_service_account_json(self.key_path)
+            return sorted(s.name for s in client.list(project=self.project_id, region=region))
 
         try:
             return self._with_proxy(run)

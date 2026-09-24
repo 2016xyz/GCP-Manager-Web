@@ -48,7 +48,10 @@ for _k in ("disable_ops_agent", "no_backup", "no_snapshot_schedule"):
 assert catalog.DEFAULT_CONFIG["deletion_protection"] is False, \
     "删除保护默认应为关闭（便于回收，避免持续计费）"
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# 数据目录可通过环境变量覆盖，便于测试/多实例隔离，
+# 避免测试脚本误删生产库（历史缺陷：tests_e2e.py 直接删除 data/gcp_web.db，
+# 导致运行中的服务持有已删除 inode，表现为"数据凭空消失"）
+DATA_DIR = os.environ.get("GCPWEB_DATA_DIR") or os.path.join(BASE_DIR, "data")
 KEY_DIR = os.path.join(DATA_DIR, "keys")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 os.makedirs(KEY_DIR, exist_ok=True)
@@ -548,6 +551,66 @@ def api_savings(request: Request, payload: dict):
     require(request, "view")
     return {"ok": True, "savings": catalog.savings_status({
         **catalog.DEFAULT_CONFIG, **(payload or {})})}
+
+
+@app.get("/api/project_networks")
+def api_project_networks(request: Request, account_id: int = 0, region: str = ""):
+    """
+    列出账号所在项目的真实 VPC 网络与子网。
+
+    为什么需要：程序早年硬编码 network="default"/subnet="default"，
+    但不少项目（尤其共享 VPC 或 default 网络被删除的项目）并不存在 default 网络，
+    创建时会被 API 拒绝为
+    "The referenced network resource cannot be found"，
+    而界面上的文本框又让人以为 default 一定可用。
+    """
+    require(request, "view")
+    accs = store.get_accounts()
+    if account_id:
+        accs = [a for a in accs if a["id"] == account_id]
+    if not accs:
+        return {"ok": False, "error": "没有可用账号"}
+    acc = accs[0]
+    region = (region or "").strip() or "us-central1"
+    if region.count("-") >= 2:
+        region = region.rsplit("-", 1)[0]
+    try:
+        gcp = GCPService(acc["key_path"], acc["project_id"], acc["email"],
+                         acc.get("proxy", ""), acc.get("proxy_type", "HTTPS"))
+        nets = gcp.list_networks()
+        subs = gcp.list_subnetworks(region)
+        return {"ok": True, "region": region, "networks": nets, "subnets": subs,
+                "has_default_network": "default" in nets}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/api/project_zones")
+def api_project_zones(request: Request, account_id: int = 0, region: str = ""):
+    """
+    列出区域内真实存在的 zone。
+
+    为什么需要：各 region 的 zone 后缀不统一（us-west1 仅 a/b/c），
+    早先按 a/b/c/d/f 硬编码猜测会撞上不存在的 zone，
+    而 GCP 对不存在的 zone 返回 "Permission denied"，极易被误读为
+    「服务账号权限不足」。这里直接向 GCP 要真实列表。
+    """
+    require(request, "view")
+    accs = store.get_accounts()
+    if account_id:
+        accs = [a for a in accs if a["id"] == account_id]
+    if not accs:
+        return {"ok": False, "error": "没有可用账号"}
+    acc = accs[0]
+    region = (region or "").strip()
+    if region.count("-") >= 2:
+        region = region.rsplit("-", 1)[0]
+    try:
+        gcp = GCPService(acc["key_path"], acc["project_id"], acc["email"],
+                         acc.get("proxy", ""), acc.get("proxy_type", "HTTPS"))
+        return {"ok": True, "region": region, "zones": gcp.list_zones(region)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.get("/api/config")

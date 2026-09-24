@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,8 +26,23 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 KEY_DIR = os.path.join(DATA_DIR, "keys")
 os.makedirs(KEY_DIR, exist_ok=True)
 
-# 每次从干净库开始，保证可重复
+# ⚠ 测试必须使用独立的临时库，绝不允许删除生产库 data/gcp_web.db。
+# 历史缺陷：此处直接 os.remove(PROD_DB)，若服务正在运行，进程仍持有已删除
+# inode 的文件句柄，客户端看到的是"数据库忽然空了 / 会话全部失效"，
+# 排查方向会被严重误导。这里改为在 tests_e2e 专用目录下建库，
+# 并通过环境变量告知 app.py 使用该目录（否则 app.py 仍会绑定生产库）。
+DATA_DIR = os.environ.get("GCPWEB_DATA_DIR") or tempfile.mkdtemp(prefix="gcpweb-test-")
+os.environ["GCPWEB_DATA_DIR"] = DATA_DIR
+KEY_DIR = os.path.join(DATA_DIR, "keys")
+os.makedirs(KEY_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "gcp_web.db")
+
+# 启动前断言：测试库绝不能等于生产库路径
+PROD_DB = os.path.join(BASE_DIR, "data", "gcp_web.db")
+assert os.path.abspath(DB_PATH) != os.path.abspath(PROD_DB), \
+    f"测试库路径与生产库相同（{PROD_DB}），拒绝运行以免误删生产数据"
+
+# 仅清理测试专用库（若存在），生产库不在其中
 for p in (DB_PATH, DB_PATH + "-wal", DB_PATH + "-shm",
           os.path.join(DATA_DIR, "INITIAL_ADMIN.txt")):
     if os.path.exists(p):
@@ -580,6 +596,63 @@ pool, _, _ = tmm.resolve_region_pool({"region_mode": "custom", "regions": ["asia
 check("区域模式 custom", pool == ["asia-east1", "asia-northeast1"], str(pool))
 pool, _, single = tmm.resolve_region_pool({"region_mode": "single", "region": "europe-west3"})
 check("区域模式 single", pool == ["europe-west3"] and single, str(pool))
+
+# ---- 回归：zone/region 混淆与真实 zone 拉取 ----
+# 缺陷：传 zone（us-west1-b）入 single 模式时未归一化，后续按 region 拼后缀
+# 得到 us-west1-b-b 这种不存在的 zone，GCP 报 Permission denied，
+# 把「zone 不存在」伪装成「权限不足」。
+pool, _, _ = tmm.resolve_region_pool({"region_mode": "single", "region": "us-west1-b"})
+check("★ single 模式下 zone 入参归一化为 region",
+      pool == ["us-west1"], str(pool))
+pool, _, _ = tmm.resolve_region_pool({"region_mode": "single", "region": ""})
+check("single 模式空 region 兜底为 us-central1", pool == ["us-central1"], str(pool))
+
+_zs = tmm.zones_for_region("us-west1-b")
+check("★ zones_for_region 接受 zone 入参并归一化（兜底路径）",
+      all(z.startswith("us-west1-") and not z.startswith("us-west1-b-") for z in _zs),
+      str(_zs))
+check("zones_for_region 离线兜底仍返回非空列表", len(_zs) > 0, str(_zs))
+
+
+# 关键：有 GCP 客户端时必须用真实 zone，而不是 hardcode 后缀猜测。
+# us-west1 真实只有 a/b/c，没有 d/f；早先硬编码 a/b/c/d/f 会撞上不存在的 zone，
+# 被 GCP 报成 Permission denied，把「区域不存在」误读成「权限不足」。
+class _FakeGCP:
+    def __init__(self, zones): self._zones = zones
+    def list_zones(self, region=""):
+        return [z for z in self._zones if not region or z.startswith(region + "-")]
+
+
+tmm._zone_cache = {}
+_real = tmm.zones_for_region("us-west1", _FakeGCP(["us-west1-a", "us-west1-b", "us-west1-c"]))
+check("★ 有 GCP 客户端时使用真实 zone 列表",
+      _real == ["us-west1-a", "us-west1-b", "us-west1-c"], str(_real))
+check("★ 真实 zone 路径下不产出不存在的 us-west1-d/f",
+      "us-west1-d" not in _real and "us-west1-f" not in _real, str(_real))
+check("★ zone 列表被缓存（同一 region 不重复请求）",
+      tmm.zones_for_region("us-west1", _FakeGCP(["WRONG"])) == _real,
+      str(tmm.zones_for_region("us-west1")))
+tmm._zone_cache = {}
+
+# build_instance_spec：region 缺失/为 zone 时子网 URL 必须合法
+from core.gcp import build_instance_spec  # noqa: E402
+_s = build_instance_spec({"region": "us-west1-b", "subnet": "default"})
+check("★ build_instance_spec 归一化 zone→region",
+      _s["region"] == "us-west1", _s["region"])
+check("★ 子网 URL 与 region 匹配",
+      _s["subnet_url"] == "regions/us-west1/subnetworks/default", _s["subnet_url"])
+_s = build_instance_spec({"subnet": "default"})
+check("★ region 缺失时子网 URL 不含空段（regions//...）",
+      "regions//" not in _s["subnet_url"] and _s["subnet_url"].startswith("regions/"),
+      _s["subnet_url"])
+
+# 新接口须登录才可访问（不允许未授权读项目网络拓扑）。
+# 用独立客户端做匿名检查，避免影响主客户端的登录态。
+_anon = TestClient(appmod.app)
+r = _anon.get("/api/project_networks")
+check("★ /api/project_networks 未登录返回 401", r.status_code == 401, str(r.status_code))
+r = _anon.get("/api/project_zones")
+check("★ /api/project_zones 未登录返回 401", r.status_code == 401, str(r.status_code))
 
 r = client.get("/api/catalog?region=us-central1").json()
 check("目录机型数 ≥ 30", len(r["machine_types"]) >= 30, str(len(r["machine_types"])))

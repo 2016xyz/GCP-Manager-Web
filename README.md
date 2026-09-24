@@ -227,8 +227,12 @@ Rocky 9 / 8、AlmaLinux 9、CentOS Stream 9、Container-Optimized OS、FreeBSD 1
 
 **区域**：免费区 3 个（us-central1 / us-east1 / us-west1）+ 付费区 39 个。
 
-**网络与启动**：网络/子网、STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
+**网络与启动**：网络/子网（**从项目真实 VPC 列表下拉选择**，见「八、实测记录」）、
+STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
 是否放开全开放防火墙、是否禁用 Ops Agent、抢占式 / Spot、自定义网络标签。
+
+**区域与可用性**：区域列表、zone 列表、VPC 列表均来自 GCP 真实返回，
+不再依赖本地硬编码猜测（各 region 的 zone 后缀并不统一）。
 
 **登录方式**：Root 密码模式（随机或自定义，`startup-script` 自动改密并放开 Root SSH）
 或 SSH 密钥模式（粘贴公钥、读服务器公钥文件、在线生成密钥对）。
@@ -382,7 +386,84 @@ python3 tests_e2e.py
 
 ---
 
-## 八、安全说明
+## 八、实测记录（真实 GCP 项目）
+
+用真实服务账号 `80717428802-compute@developer.gserviceaccount.com`
+（项目 `sincere-axon-354618`）端到端跑通，非 mock。
+
+### 创建结果
+
+| 项 | 实例 1 | 实例 2 |
+|---|---|---|
+| 名称 | `vm-hermes-probe-1` | `vm-1-48904-1-7286` |
+| zone | `us-west1-b` | `us-west1-c` |
+| 公网 IP | 35.212.163.193 | 35.212.222.149 |
+| 内网 IP | 10.138.0.2 | — |
+| 机型 / 盘 | e2-micro / pd-standard 30GB | 同 |
+| 创建耗时 | 17.4 s | 17.8 s |
+| Root 密码 SSH | ✅ `whoami → root` | ✅ `whoami → root` |
+| OS | Ubuntu 22.04.5 LTS | Ubuntu 22.04.5 LTS |
+| 外网出口 | — | 35.212.222.149 |
+
+### 省钱项在真实实例上逐条核对（8/8 通过）
+
+```
+✅ google-logging-enabled    = false      ← Ops Agent 日志关闭
+✅ google-monitoring-enabled = false      ← Ops Agent 监控关闭
+✅ google-ops-agent-enabled  = false      ← Ops Agent 本体禁用
+✅ deletion_protection       = False      ← 可随时回收
+✅ disk.resource_policies    = []         ← 未挂快照时间表/备份策略
+✅ disk.source_snapshot      = (空)       ← 非快照来源
+✅ network_tier              = STANDARD   ← 出站 200GB/月免费
+✅ startup-script 已执行     exit status 0 → /root/.gcp_root_mode_ok
+```
+
+### 实测中发现并修复的三个真实缺陷
+
+**1. zone 不存在被误报成「权限不足」**（严重，会误导排查方向）
+
+`zones_for_region()` 把已是 zone 的 `us-west1-b` 当作 region 再拼后缀，
+生成 `us-west1-b-b` / `us-west1-b-a` 这类不存在的 zone；且后缀硬编码为
+`a/b/c/d/f`，而 `us-west1` 实际只有 `a/b/c`。GCP 对不存在的 zone 返回
+`Permission denied on 'locations/us-west1-b-b'`，看起来像服务账号缺权限，
+实为 zone 名错误。修复：优先向 GCP 拉真实 zone（`GCPService.list_zones`），
+并对 region/zone 入参做归一化。
+
+**2. 硬编码 `network="default"`**（严重，直接导致创建失败）
+
+程序假设项目一定有 `default` VPC。实测项目用的是自定义 VPC `jxihegwg`，
+`default` 已被删除，创建报
+`The referenced network resource cannot be found`。
+修复：新增 `/api/project_networks`，界面下拉选择真实 VPC/子网，
+并在检测到无 `default` 网络时给出醒目告警并自动切换。
+
+**3. 子网与实例区域不匹配**
+
+`build_instance_spec()` 未对缺失的 `region` 兜底，导致
+`regions//subnetworks/default` 这类非法子网 URL，报
+`Scope of the specified subnetwork doesn't match the scope of the instance`。
+修复：region 缺省兜底 + zone→region 归一化。
+
+**4. 测试脚本误删生产数据库**（严重，会伪装成「数据凭空消失」）
+
+`tests_e2e.py` 原本直接 `os.remove(data/gcp_web.db)`。若服务正在运行，
+进程仍持有已删除 inode 的文件句柄，客户端看到的是
+「会话全部失效 / 账号库忽然空了」，排查方向被严重误导。
+修复：测试改用独立临时库（`tempfile.mkdtemp`），
+并通过 `GCPWEB_DATA_DIR` 环境变量告知 `app.py`，
+另加断言「测试库路径不得等于生产库路径」。已验证测试前后生产库
+inode 与时间戳完全不变。
+
+### 新增接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/project_networks?account_id=&region=` | 项目真实 VPC 与子网 |
+| GET | `/api/project_zones?account_id=&region=` | 区域内真实可用 zone |
+
+---
+
+## 九、安全说明
 
 - **服务账号 JSON 与 Root 密码是高敏感数据**：`data/` 目录不要提交到公开仓库
   （`.gitignore` 已排除）。
