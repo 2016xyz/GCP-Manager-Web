@@ -45,7 +45,17 @@ curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/instal
 # 只在当前目录装好环境，不注册 systemd（容器 / 手动启动场景）
 curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh \
   | NO_SERVICE=1 bash
+
+# 只下载源码，不安装（想先看看或自己接管环境）
+curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh \
+  | ONLY_FETCH=1 bash
 ```
+
+管道模式下会把源码下载到 `./gcp-manager-web`（有 git 用 `git clone`，没有则下
+`main.tar.gz`）；在已克隆的仓库里执行 `bash install.sh` 则就地安装，不会重复下载。
+
+> 若你的 shell 已经为别的程序设了 `PORT`，会被脚本继承（安装时会明确标注
+> 「来自环境变量 PORT」）。想固定端口就显式传 `PORT=8000`。
 
 ### 方式二：Docker Compose
 
@@ -412,7 +422,7 @@ gcp-manager-web/
 ├── docker-compose.yml     compose 部署（默认只绑本机 + 命名卷持久化）
 ├── .dockerignore          镜像构建忽略清单
 ├── requirements.txt       Python 依赖
-├── tests_e2e.py           端到端验证（200 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（207 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -424,7 +434,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 200 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 207 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -438,10 +448,11 @@ python3 tests_e2e.py
 - **F. 页面与前端**（36 项）：Vue 本地托管、响应式断点、`mounted` 调用 boot、
   日志去重、验证码真实渲染（`ink_ratio` 回归）、极速预设入口、省钱优化面板
 
-- **G. 安装与部署产物**（21 项）：`install.sh` / `run.sh` 语法检查、
+- **G. 安装与部署产物**（28 项）：`install.sh` / `run.sh` 语法检查、
   依赖失败自动换源（PyPI→清华→阿里云）、耗时兜底而非仅探测连通性、
   systemd 注册与开机自启、数据目录权限 700、Dockerfile 非 root + 健康检查、
-  compose 默认只绑本机 + 命名卷持久化
+  compose 默认只绑本机 + 命名卷持久化、**管道模式自举**（模拟 `curl | bash`
+  真正没有 `BASH_SOURCE` 的场景，断言能自举出源码且 stderr 无「未绑定」）
 
 另有 **省钱与默认值专项**（19 项）：全开防火墙默认关闭、Ops Agent 默认禁用、
 无备份默认开启、删除保护默认关闭、省钱清单 7 项计数、`/api/savings` 实时计算、
