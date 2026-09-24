@@ -121,6 +121,79 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ---
 
+## 升级到最新版
+
+```bash
+cd /opt/gcp-manager-web && bash update.sh
+```
+
+`update.sh` 会拉取最新代码、更新依赖、重启服务，**全程不碰 `data/` 目录**
+（账号、密钥、数据库都在那里，升级不会丢）。
+
+只想知道有没有新版本、不想动手：
+
+```bash
+bash update.sh --check
+```
+
+### 常用参数
+
+| 命令 | 作用 |
+|---|---|
+| `bash update.sh` | 更新到最新版并重启服务 |
+| `bash update.sh --check` | 只比对版本，不做任何改动 |
+| `APP_DIR=/opt/gcp-manager-web bash update.sh` | 部署目录不在当前目录时指定 |
+| `FORCE=1 bash update.sh` | 本地有未提交改动时也强制更新（**改动会被丢弃**） |
+| `NO_RESTART=1 bash update.sh` | 只更新代码，不重启服务 |
+| `PIP_TIMEOUT=600 bash update.sh` | 网络慢时放宽依赖安装超时 |
+
+联网直接执行（不用先进目录）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/update.sh | bash
+```
+
+### 更新过程做了什么
+
+1. 记录 `data/` 的文件指纹（只读，用于事后校验）
+2. 停止前校验：本地有未提交改动时先 `git stash` 保存，**不静默丢弃**
+3. 拉取最新代码
+   - 是 git 仓库 → `git fetch` + `git reset --hard origin/main`（能精确回滚）
+   - 不是 git 仓库（装机时无 git，走的是 tarball）→ 下载 tarball 覆盖源码
+4. 比对 `data/` 指纹，确认未被改动，有变化会告警
+5. 用已有虚拟环境更新 `requirements.txt` 依赖（默认源失败自动换清华源）
+6. 重启 systemd 服务并检查是否 `active`
+
+### 回滚
+
+git 安装会打印更新前的提交号，照着回退即可：
+
+```bash
+cd /opt/gcp-manager-web
+git reset --hard <更新前的提交号>
+sudo systemctl restart gcp-manager-web
+```
+
+### tarball 模式的一个已知限制
+
+非 git 部署用 `cp -a` 覆盖源码，只会**覆盖同名文件、不会删除**新版本里已移除的文件。
+所以若某次升级删掉了某个源文件，它会在 tarball 部署里残留。
+残留文件不影响运行（Python 只 import 用到的模块），但要彻底干净，
+建议用 git 方式部署，或升级后删掉已知废弃文件。
+
+### 为什么不能直接重跑安装命令
+
+`install.sh` 里这一行是刻意设计的：
+
+```bash
+if [ ! -f "$APP_DIR/app.py" ]; then   # 已有代码就跳过下载
+```
+
+它的目标是**幂等**——重复执行不会覆盖既有环境、不会重置账号数据。
+副作用就是：**它不会更新代码**。所以升级要用 `update.sh`。
+
+---
+
 ## 一、登录与权限
 
 ### 登录流程
@@ -483,6 +556,7 @@ gcp-manager-web/
 │   ├── console.html       Vue 3 响应式控制台
 │   └── vendor/
 │       └── vue.global.prod.js   Vue 3.5.13（本地托管）
+├── update.sh              升级脚本（更新代码 + 重启，不动 data/）
 ├── install.sh             一键安装部署（venv + systemd + 自动换源重试）
 ├── run.sh                 手动启动脚本（优先复用 .venv）
 ├── Dockerfile             容器镜像（非 root 运行 + 健康检查）
@@ -491,7 +565,7 @@ gcp-manager-web/
 ├── requirements.txt       Python 依赖
 ├── tools/
 │   └── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
-├── tests_e2e.py           端到端验证（236 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（246 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -503,7 +577,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 236 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 246 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -526,6 +600,8 @@ python3 tests_e2e.py
   语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
   `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
   16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
+- **J. 升级通道**（10 项）：`update.sh` 可执行、绝不触碰 `data/`、保留本地改动（stash）、git 与 tarball 双路径、`--check` 只读模式、重启并校验服务存活、失败换国内源、管道模式安全、`install.sh` 与 README 均有升级引导
+
 - **I. 测试夹具隔离**（3 项）：产品 `app.py` 无任何 `__probe` 路由、
   运行中的 app 无 `__probe` 路由、夹具强制只监听 127.0.0.1
 

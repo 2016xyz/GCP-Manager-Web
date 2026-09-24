@@ -245,6 +245,31 @@ check("未登录访问 / → 302 跳登录页", r.status_code == 302 and "/login
       f"{r.status_code} {r.headers.get('location')}")
 r = client.get("/login")
 check("登录页可匿名访问", r.status_code == 200 and "验证码" in r.text)
+# ── 升级脚本（update.sh）──────────────────────────────────────────────
+_u = open(os.path.join(BASE_DIR, "update.sh"), encoding="utf-8").read()
+check("★ update.sh 存在且可执行",
+      os.path.isfile(os.path.join(BASE_DIR, "update.sh"))
+      and os.access(os.path.join(BASE_DIR, "update.sh"), os.X_OK))
+check("★ 升级脚本绝不触碰 data/",
+      'rm -rf "$APP_DIR/data"' not in _u and "rm -rf ${APP_DIR}/data" not in _u
+      and "data_fingerprint" in _u and "data/ 目录未被改动" in _u)
+check("★ 升级保留本地未提交改动（stash 而非静默丢弃）",
+      "git stash push" in _u and "FORCE" in _u)
+check("★ 升级支持 git 与 tarball 两条路径",
+      "git reset --hard" in _u and "REPO_TARBALL" in _u and "tar xzf" in _u)
+check("★ 升级支持 --check 只读模式",
+      '--check' in _u and "CHECK_ONLY" in _u)
+check("★ 升级会重启 systemd 服务并校验存活",
+      "systemctl restart" in _u and "is-active --quiet" in _u)
+check("★ 升级失败自动换国内源",
+      "pypi.tuna.tsinghua.edu.cn" in _u)
+check("★ 升级脚本在管道模式下安全（BASH_SOURCE 兜底）",
+      'SELF="${BASH_SOURCE[0]:-}"' in _u)
+check("★ install.sh 会引导用户使用 update.sh",
+      "update.sh" in open(os.path.join(BASE_DIR, "install.sh"), encoding="utf-8").read())
+check("★ README 有升级说明章节",
+      "## 升级到最新版" in open(os.path.join(BASE_DIR, "README.md"), encoding="utf-8").read())
+
 # 测试夹具（tools/ui_login_probe.py）会暴露验证码明文，绝不能出现在产品里
 check("★ 产品代码 app.py 不含任何 __probe 调试路由",
       "__probe" not in open(os.path.join(BASE_DIR, "app.py"), encoding="utf-8").read())

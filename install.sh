@@ -294,6 +294,7 @@ if [ "${NO_SERVICE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
   printf "    查看状态  systemctl status %s\n" "$SERVICE_NAME"
   printf "    实时日志  journalctl -u %s -f\n" "$SERVICE_NAME"
   printf "    重启      systemctl restart %s\n" "$SERVICE_NAME"
+  printf "    升级      bash %s/update.sh    ${C_DIM}(更新到最新版，不动 data/)\n" "$APP_DIR"
 fi
 
 printf "\n  ${C_ERR}安全提醒${C_0}\n"
