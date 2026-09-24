@@ -1227,6 +1227,81 @@ check("★ 汇总 KPI 与配额进度条均已实现",
 check("★ 明确标注只读，不误导",
       "只读查询" in _ct and "不会创建或修改任何资源" in _ct)
 
+print("\n── L. 按钮体系与响应式不变量 ──")
+
+_ct2 = client.get("/static/console.html").text
+
+# ── 按钮：Windows 渲染差异处理 ──────────────────────────────────────
+check("★ 按钮 appearance:none（抹掉 Windows 系统立体边框）",
+      "appearance:none;-webkit-appearance:none;" in _ct2)
+check("★ 按钮边框统一 1px（1.5px 在 Windows 缩放下会被舍成 1 或 2px）",
+      "border:1.5px solid var(--line);background:#fff;color:var(--ink-2);cursor:pointer" not in _ct2)
+check("★ 按钮用 inline-flex + gap 对齐图标与文字",
+      "display:inline-flex;align-items:center;justify-content:center;gap:7px;" in _ct2)
+check("★ 行高固定 1.2（微软雅黑行高偏大会把按钮撑高）",
+      "font-weight:600;line-height:1.2;" in _ct2)
+
+# 焦点环：逗号列表里出现 none 会让整条 box-shadow 非法被丢弃
+check("★ 焦点环占位不用 none（否则 box-shadow 整条失效）",
+      "--btn-ring:0 0 0 0 rgba(26,115,232,0);" in _ct2
+      and "--btn-ring:none" not in _ct2)
+check("★ 禁用/幽灵态的 box-shadow 也不用 none",
+      "--btn-sh:0 0 0 0 rgba(0,0,0,0)" in _ct2
+      and "--btn-sh:none" not in _ct2)
+check("★ 有 :focus-visible 焦点环（键盘可达性）",
+      "button:focus-visible{outline:none;--btn-ring:0 0 0 3px rgba(26,115,232,.32)}" in _ct2)
+check("★ 主色按钮带品牌色投影（不是纯平色块）",
+      "button.p{" in _ct2 and "rgba(26,115,232,.22)" in _ct2)
+check("★ 成功/危险按钮各自有匹配的投影色",
+      "rgba(16,185,129,.20)" in _ct2 and "rgba(229,72,77,.10)" in _ct2)
+
+# 触屏与无障碍
+check("★ 触屏设备抬高最小点击高度（@media hover:none）",
+      "@media (hover:none){" in _ct2 and "button{min-height:42px}" in _ct2)
+check("★ 尊重 prefers-reduced-motion（关闭位移动画）",
+      "@media (prefers-reduced-motion:reduce){" in _ct2
+      and "button:hover:not(:disabled),button:active:not(:disabled){transform:none}" in _ct2)
+check("★ Windows 高对比度模式有兜底（forced-colors）",
+      "@media (forced-colors:active){" in _ct2 and "ButtonText" in _ct2)
+
+# ── 响应式：栅格轨道不能被内容撑破 ──────────────────────────────────
+# 1fr 等价 minmax(auto,1fr)，auto 最小值取内容的 min-content，
+# 长文案/固定宽输入框会把整条轨道顶宽 → 窄屏横向溢出
+check("★ 单列栅格一律用 minmax(0,1fr)（防内容撑破轨道）",
+      ".split{grid-template-columns:1fr}" not in _ct2
+      and ".split{grid-template-columns:minmax(0,1fr)}" in _ct2)
+check("★ 其余单列栅格同样加了 0 最小值",
+      ".g2,.g3,.g4{grid-template-columns:1fr}" not in _ct2
+      and ".mini{grid-template-columns:1fr;gap:8px}" not in _ct2)
+
+# ── 响应式：断点齐备 ───────────────────────────────────────────────
+for _bp in ("@media (max-width:1279px)", "@media (max-width:1023px)",
+            "@media (max-width:768px)"):
+    check(f"★ 断点存在 {_bp}", _bp in _ct2)
+
+# ── 勘察页的窄屏适配 ───────────────────────────────────────────────
+check("★ 勘察工具栏控件在窄屏铺满（不再固定 max-width）",
+      ".insp-in,.insp-in-acc{flex:1 1 100%;max-width:none;width:100%}" in _ct2
+      and 'class="insp-in insp-in-acc"' in _ct2)
+check("★ 勘察表在窄屏给下限宽度并横向滚动，不把列挤成豆腐块",
+      ".insp-bd table{min-width:660px}" in _ct2 and ".insp-bd table{min-width:560px}" in _ct2)
+check("★ 配额条在窄屏换行显示（指标名独占一行）",
+      ".q-m{flex:1 1 100%;white-space:normal}" in _ct2)
+check("★ 勘察键值卡在窄屏改上下排列",
+      ".insp-bd .kv-r{flex-direction:column;gap:1px;padding:5px 0}" in _ct2)
+check("★ KPI 在手机上收敛为多列小卡",
+      "grid-template-columns:repeat(auto-fit,minmax(78px,1fr))" in _ct2)
+check("★ 小手机隐藏分区摘要（信息密度让位）",
+      ".insp-br{display:none}" in _ct2)
+
+# ── 既有能力不能被改回去 ───────────────────────────────────────────
+check("★ 表格仍在 ≤768 转卡片流", "table.resp thead{display:none}" in _ct2)
+check("★ 输入框仍 ≥16px（防 iOS 聚焦缩放）",
+      "input,select{padding:11px 12px;font-size:16px}" in _ct2)
+check("★ 登录页未受影响",
+      client.get("/login").status_code == 200
+      and "wow-login-card" in client.get("/login").text)
+
 print("\n── G. 安装与部署产物 ──")
 
 import subprocess as _sp  # noqa: E402

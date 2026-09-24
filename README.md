@@ -361,7 +361,68 @@ if [ ! -f "$APP_DIR/app.py" ]; then   # 已有代码就跳过下载
 
 ---
 
-## 四、与原版 v7.6 对照 + 需求功能落地
+## 四、按钮体系与多端适配
+
+### 按钮
+
+统一的一套按钮系统，针对 **Windows 的渲染差异**做了专门处理：
+
+| 处理 | 原因 |
+|---|---|
+| `appearance:none` | 抹掉 Windows 对 `<button>` 施加的系统立体边框与背景，否则在不同主题下会出现半像素描边、按下时的系统凹陷 |
+| 边框统一 `1px`（原来是 1.5px） | Windows 在 125%/150% 缩放下会把 1.5px 舍入成 1px 或 2px，同一行按钮粗细不一致 |
+| `line-height:1.2` | 微软雅黑的行高偏大，不锁定会把按钮撑高 |
+| 字体栈含 `"Microsoft YaHei","Segoe UI"` | Windows 中文字体优先 |
+| `@media (forced-colors:active)` | Windows 高对比度模式会抹掉渐变，必须有描边兜底 |
+
+视觉层次：
+
+- 主色/成功按钮用极浅垂直渐变 + 顶部内高光，按住时位移 1px 并压入内阴影
+- 投影与配色绑定：主色蓝 `rgba(26,115,232,.22)`、成功绿、危险红各用各的投影色
+- 危险按钮默认柔和描边（不血腥），悬停才加强，避免视觉噪音
+- `:focus-visible` 焦点环 `0 0 0 3px rgba(26,115,232,.32)`，键盘可达
+
+> **一个容易踩的坑**：焦点环与投影共用 `box-shadow` 变量组合时，
+> 占位值必须写 `0 0 0 0 rgba(...,0)` 而**不能写 `none`** ——
+> CSS 规范里 `none` 只能作为 `box-shadow` 的唯一值，
+> 出现在逗号列表里会让整条声明非法被丢弃，结果连投影一起消失。
+> 这个问题是靠读计算样式发现的（所有按钮 `box-shadow` 都是 `none`），肉眼很难察觉。
+
+### 多端适配
+
+整体断点策略见「三、响应式与视觉设计」。本轮在此之上补了两点：
+
+- 触屏设备（`hover:none`）自动抬高最小点击高度：普通按钮 42px、小按钮 34px；
+  桌面（有鼠标）保持 36px，不牺牲信息密度。
+- 勘察页（GCP 资源）的专项适配：
+
+- 工具栏控件在窄屏铺满整行（原本是写死的 `max-width`）
+- 勘察表列数多（防火墙 8 列），窄屏给 `min-width` 后横向滚动，
+  而不是把 CIDR / 协议端口挤成豆腐块
+- 配额进度条在窄屏改成两行：指标名独占一行，进度条 + 数值一行
+- 键值卡改上下排列，长邮箱/URL 不再被标签挤成竖排
+- KPI 收成 3~4 个一行，小手机隐藏分区摘要
+
+> **另一个关键坑**：单列栅格必须写 `minmax(0,1fr)` 而不是 `1fr`。
+> `1fr` 等价于 `minmax(auto,1fr)`，其中 `auto` 的最小值是内容的 min-content；
+> 本页有长文案和固定宽度的输入框，min-content 超过可用宽度时会把整条
+> 栅格轨道顶宽 —— 实测 360px 宽手机上产生 **22px 横向溢出**（页面能左右拖动）。
+> 已在所有单列覆盖里统一改为 `minmax(0,1fr)`。
+
+### 用脚本验证，不靠肉眼
+
+```bash
+python3 tools/responsive_check.py /tmp/shots   # 5 个视口截图 + 布局指标
+python3 tools/overflow_audit.py                # 4 视口 × 5 页面 的破版审计
+```
+
+`overflow_audit.py` 会逐元素检查三件事：文档级横向溢出、元素顶出视口、
+内容被裁（只认 `overflow:hidden/clip`，`visible` 的 1~3px 舍入差不计）。
+当前结果：**20 个「视口 × 页面」组合全部无破版**。
+
+---
+
+## 五、与原版 v7.6 对照 + 需求功能落地
 
 | 能力 | 原版 v7.6（PyQt6 桌面） | 本 Web 版 |
 |---|---|---|
@@ -414,7 +475,7 @@ if [ ! -f "$APP_DIR/app.py" ]; then   # 已有代码就跳过下载
 
 ---
 
-## 五、可自定义的服务器配置项
+## 六、可自定义的服务器配置项
 
 **机型**（33 种，按区域自动过滤可用性）
 
@@ -449,7 +510,7 @@ STANDARD 或 PREMIUM 网络层级、是否分配公网 IP、
 
 ---
 
-## 六、GCP 资源总览
+## 七、GCP 资源总览
 
 新增「🛰 GCP 资源」页，把服务账号能看到的项目信息尽量都摊开。
 **全部只读**（`get` / `list` / `aggregatedList`），不创建也不修改任何资源。
@@ -508,7 +569,7 @@ GET /api/inspect?account_id=&sections=&region=&zone=&fresh=1&quick=1
 
 ---
 
-## 七、REST API
+## 八、REST API
 
 基础地址 `http://<host>:<port>`，交互式文档 `/docs`。
 除公开接口外，全部需要登录（Cookie `gcp_sid`，也支持 `Authorization: Bearer <token>`）。
@@ -597,7 +658,7 @@ curl -b /tmp/cj -X POST http://127.0.0.1:8000/api/create \
 
 ---
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 gcp-manager-web/
@@ -615,9 +676,13 @@ gcp-manager-web/
 │   └── tasks.py           任务引擎（创建/执行/运维/刷新）
 ├── static/
 │   ├── login.html         登录页（含强制改密弹层）
+│   ├── login.css          登录页样式（自 sysuahb 提取）
 │   ├── console.html       Vue 3 响应式控制台
-│   └── vendor/
-│       └── vue.global.prod.js   Vue 3.5.13（本地托管）
+│   └── vendor/            全部本地托管，无 CDN（内网可用）
+│       ├── vue.global.prod.js          Vue 3.5.13
+│       ├── jquery-3.7.1.min.js         登录页交互
+│       ├── bootstrap.min.css           登录页基线样式
+│       └── fontawesome/                登录页图标字体（css + woff2/woff/ttf）
 ├── update.sh              升级脚本（更新代码 + 重启，不动 data/）
 ├── install.sh             一键安装部署（venv + systemd + 自动换源重试）
 ├── run.sh                 手动启动脚本（优先复用 .venv）
@@ -626,20 +691,22 @@ gcp-manager-web/
 ├── .dockerignore          镜像构建忽略清单
 ├── requirements.txt       Python 依赖
 ├── tools/
-│   └── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
-├── tests_e2e.py           端到端验证（275 项，无需真实 GCP 账号）
+│   ├── ui_login_probe.py  登录页端到端验证夹具（仅测试，强制只绑本机）
+│   ├── responsive_check.py 多视口截图 + 布局指标
+│   └── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
+├── tests_e2e.py           端到端验证（301 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
 ---
 
-## 九、验证
+## 十、验证
 
 ```bash
 python3 tests_e2e.py
 ```
 
-共 275 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 301 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -662,6 +729,12 @@ python3 tests_e2e.py
   语言切换按 `li[lang]` 驱动、资源全本地（无 CDN）、无残留模板变量、
   `static/login.css` 含品牌色与三组动画、上游五组断点、减少动效偏好、
   16px 字号、spinner 选择器修正、读取后端 `detail`、本地资源可达性
+- **L. 按钮与响应式不变量**（26 项）：appearance:none、边框 1px、行高锁定、
+  焦点环占位不用 none、各语义按钮的投影色、触屏最小点击高度、
+  prefers-reduced-motion、Windows 高对比度兜底、单列栅格一律 minmax(0,1fr)、
+  断点齐备、勘察页窄屏适配（工具栏铺满/表格滚动/配额条换行/键值卡堆叠）、
+  既有能力不被改回去
+
 - **K. GCP 资源勘察**（29 项）：只读承诺（源码内无任何写操作调用）、17 个分区齐全、
   快速/深节划分、未知节名不炸、逐节异常隔离、zones 用 `available_cpu_platforms`、
   防火墙 action 由 allowed/denied 反推、孤儿盘识别、聚合响应字段名动态探测、
@@ -692,7 +765,7 @@ python3 tests_e2e.py
 
 ---
 
-## 十、实测记录（真实 GCP 项目）
+## 十一、实测记录（真实 GCP 项目）
 
 用真实服务账号 `80717428802-compute@developer.gserviceaccount.com`
 （项目 `sincere-axon-354618`）端到端跑通，非 mock。
@@ -769,7 +842,7 @@ inode 与时间戳完全不变。
 
 ---
 
-## 十一、安全说明
+## 十二、安全说明
 
 - **服务账号 JSON 与 Root 密码是高敏感数据**：`data/` 目录不要提交到公开仓库
   （`.gitignore` 已排除）。

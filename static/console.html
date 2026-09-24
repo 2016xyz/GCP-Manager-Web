@@ -87,6 +87,66 @@ a{color:var(--brand);text-decoration:none}
   .insp-br{display:none}
 }
 
+
+/* ── 勘察页工具栏宽度（桌面限宽，窄屏自动铺满）── */
+.insp-in{max-width:210px}
+.insp-in-acc{max-width:240px}
+
+/* ── 平板（≤1023，侧栏已收成图标条）──
+   勘察表列数多（防火墙 8 列、机器类型 6 列），压扁会让
+   CIDR / 协议端口这类关键值折行难读，这里给表设下限宽度，
+   交给 .tw 横向滚动，而不是把列挤成豆腐块。 */
+@media (max-width:1023px){
+  .insp-bd .tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .insp-bd table{min-width:660px}
+  .insp-in,.insp-in-acc{max-width:none;flex:1 1 190px}
+}
+
+/* ── 手机 / 平板竖屏（≤768）── */
+@media (max-width:768px){
+  /* 工具栏：控件铺满一行，按钮整行排列，触控更好按 */
+  .insp-in,.insp-in-acc{flex:1 1 100%;max-width:none;width:100%}
+  .card .row>.insp-in,.card .row>.insp-in-acc{width:100%}
+
+  /* KPI：手机上收到 3~4 个一行，数字仍然清楚 */
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;margin:8px 0}
+  .kpi{padding:7px 5px;border-radius:8px}
+  .kpi b{font-size:16px}
+  .kpi span{font-size:10px;line-height:1.25}
+
+  /* 分区头：状态与耗时优先，摘要让位 */
+  .insp-hd{padding:9px 10px;gap:6px}
+  .insp-tt{font-size:12.5px}
+  .insp-ms{display:none}
+  .insp-br{font-size:11px;min-width:0}
+  .insp-bd{padding:9px 10px}
+  .insp-bd table{min-width:560px}
+
+  /* 配额条：窄屏改两行（指标名一行，进度+数值一行），不再横向挤压 */
+  .q{flex-wrap:wrap;gap:3px 7px;margin:6px 0}
+  .q-m{flex:1 1 100%;white-space:normal}
+  .q-b{flex:1 1 auto;min-width:60px}
+  .q-t{flex:0 0 auto;text-align:right}
+
+  /* 键值卡片：改上下排列，长邮箱/URL 不再被标签挤成竖排 */
+  .insp-bd .kv{grid-template-columns:minmax(0,1fr);gap:2px}
+  .insp-bd .kv-r{flex-direction:column;gap:1px;padding:5px 0}
+  .insp-bd .kv-k{flex:none;font-size:11px}
+  .insp-bd .kv-v{font-size:12.5px}
+
+  .mini{grid-template-columns:minmax(0,1fr);gap:8px}
+  .img-grp h6{font-size:11.5px}
+}
+
+/* ── 小手机（≤480）── */
+@media (max-width:480px){
+  .insp-br{display:none}                 /* 摘要让位，只剩标题+计数 */
+  .kpis{grid-template-columns:repeat(3,1fr)}
+  .kpi b{font-size:15px}
+  .insp-bd table{min-width:480px}
+  .insp-hd{padding:8px 9px}
+}
+
 /* ══════════ 侧栏 / 导航 ══════════ */
 .sidebar{
   position:fixed;left:0;top:0;bottom:0;width:var(--sb-w);z-index:40;
@@ -177,23 +237,120 @@ input.mono{font-family:var(--mono);font-size:12.5px}
 .hint{font-size:11.5px;color:var(--muted);line-height:1.5}
 .sep{height:1px;background:var(--line);margin:13px 0}
 
-/* ══════════ 按钮 ══════════ */
-button{font:inherit;font-size:13px;font-weight:600;padding:9px 14px;border-radius:var(--r-s);
-  border:1.5px solid var(--line);background:#fff;color:var(--ink-2);cursor:pointer;
-  transition:background .14s,border-color .14s,transform .07s;white-space:nowrap}
-button:hover:not(:disabled){background:#f8fafc;border-color:var(--line-2)}
-button:active:not(:disabled){transform:translateY(1px)}
-button:disabled{opacity:.5;cursor:not-allowed}
-button.p{background:var(--brand);border-color:var(--brand);color:#fff}
-button.p:hover:not(:disabled){background:var(--brand-d);border-color:var(--brand-d)}
-button.s{background:var(--ok);border-color:var(--ok);color:#fff}
-button.s:hover:not(:disabled){background:#0d9c6e;border-color:#0d9c6e}
-button.d{background:#fff;border-color:#f4c7c7;color:var(--bad)}
-button.d:hover:not(:disabled){background:var(--bad-l)}
-button.sm{padding:5px 9px;font-size:12px;border-radius:7px}
-button.gh{border-color:transparent;background:transparent;color:var(--muted)}
-button.gh:hover:not(:disabled){background:#f1f5f9}
-button.wide{width:100%;justify-content:center}
+/* ══════════ 按钮 ══════════
+   设计要点（含 Windows 上的渲染差异处理）
+   · appearance:none —— 抹掉 Windows 对 <button> 施加的系统立体边框与背景，
+     否则在不同 Windows 主题下会出现半像素描边、按下时的系统凹陷
+   · 边框用 1px 而非 1.5px —— Windows 在 125%/150% 缩放下会把 1.5px
+     舍入成 1px 或 2px，导致同一行按钮粗细不一致
+   · inline-flex + gap —— 图标与文字垂直居中、间距一致；行高固定 1.2，
+     避免 Windows 中文字体（微软雅黑）行高偏大把按钮撑高
+   · 焦点环与投影用同一个 box-shadow 变量组合 —— 直接写 box-shadow
+     会在 focus-visible 时把投影覆盖掉，导致按钮"跳一下"
+   · 主色/成功按钮用极浅垂直渐变 + 顶部内高光，做出轻微凸起；
+     按下时位移 1px 并压入内阴影，给出明确的触觉反馈
+   · 过渡统一 cubic-bezier(.4,0,.2,1)，接近 Material 的标准缓动      */
+button{
+  /* 焦点环的「无」必须写成 0 0 0 0 透明色，不能写 none：
+     box-shadow 的逗号列表里只要有一个分量为 none，整条声明即非法被丢弃，
+     结果连投影一起消失（实测所有按钮 box-shadow 都变成 none）。 */
+  --btn-ring:0 0 0 0 rgba(26,115,232,0);
+  --btn-sh:0 1px 1px rgba(15,23,42,.04);
+  appearance:none;-webkit-appearance:none;
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  font:inherit;font-size:13px;font-weight:600;line-height:1.2;
+  padding:9px 15px;border-radius:var(--r-s);
+  border:1px solid var(--line);
+  background:linear-gradient(180deg,#fff,#fbfcfe);
+  color:var(--ink-2);cursor:pointer;white-space:nowrap;text-decoration:none;
+  box-shadow:var(--btn-ring),var(--btn-sh);
+  transition:background .15s cubic-bezier(.4,0,.2,1),
+             border-color .15s cubic-bezier(.4,0,.2,1),
+             box-shadow .15s cubic-bezier(.4,0,.2,1),
+             color .15s cubic-bezier(.4,0,.2,1),
+             transform .08s cubic-bezier(.4,0,.2,1);
+}
+button:hover:not(:disabled){
+  background:linear-gradient(180deg,#fff,#f2f7fd);
+  border-color:var(--line-2);color:var(--ink);
+  --btn-sh:0 2px 6px rgba(15,23,42,.09);
+  transform:translateY(-1px);
+}
+button:active:not(:disabled){
+  transform:translateY(0);
+  --btn-sh:inset 0 1px 3px rgba(15,23,42,.09);
+}
+button:focus-visible{outline:none;--btn-ring:0 0 0 3px rgba(26,115,232,.32)}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none;
+  --btn-sh:0 0 0 0 rgba(0,0,0,0);filter:grayscale(.15)}
+
+/* 主色按钮 */
+button.p{
+  background:linear-gradient(180deg,#3d8df1,var(--brand) 62%);
+  border-color:#1668d6;color:#fff;
+  --btn-sh:0 1px 2px rgba(21,87,176,.30),0 4px 12px rgba(26,115,232,.22),
+           inset 0 1px 0 rgba(255,255,255,.22);
+}
+button.p:hover:not(:disabled){
+  background:linear-gradient(180deg,#4f97f2,#1a6fdd 62%);border-color:#135fbe;
+  --btn-sh:0 3px 7px rgba(21,87,176,.32),0 8px 20px rgba(26,115,232,.26),
+           inset 0 1px 0 rgba(255,255,255,.26);
+}
+button.p:active:not(:disabled){
+  --btn-sh:inset 0 2px 5px rgba(9,48,105,.34);
+}
+
+/* 成功按钮 */
+button.s{
+  background:linear-gradient(180deg,#2fcf95,var(--ok) 62%);
+  border-color:#0d9c6e;color:#fff;
+  --btn-sh:0 1px 2px rgba(13,156,110,.30),0 4px 12px rgba(16,185,129,.20),
+           inset 0 1px 0 rgba(255,255,255,.24);
+}
+button.s:hover:not(:disabled){
+  background:linear-gradient(180deg,#40d7a1,#0fa876 62%);border-color:#0a8a61;
+  --btn-sh:0 3px 7px rgba(13,156,110,.32),0 8px 20px rgba(16,185,129,.24),
+           inset 0 1px 0 rgba(255,255,255,.28);
+}
+button.s:active:not(:disabled){--btn-sh:inset 0 2px 5px rgba(6,90,63,.32)}
+
+/* 危险按钮：默认柔和描边，不血腥但足够醒目 */
+button.d{
+  background:linear-gradient(180deg,#fff,#fef7f7);border-color:#f0c4c6;
+  color:#c9302f;--btn-sh:0 1px 1px rgba(229,72,77,.10);
+}
+button.d:hover:not(:disabled){
+  background:linear-gradient(180deg,#fff6f6,#fdeaea);border-color:#e6a0a3;
+  color:#b02524;
+  --btn-sh:0 2px 8px rgba(229,72,77,.20);
+}
+button.d:active:not(:disabled){--btn-sh:inset 0 1px 3px rgba(201,48,47,.18)}
+
+/* 幽灵按钮 */
+button.gh{border-color:transparent;background:transparent;color:var(--muted);
+  --btn-sh:0 0 0 0 rgba(0,0,0,0)}
+button.gh:hover:not(:disabled){background:#eef2f7;border-color:transparent;
+  --btn-sh:0 0 0 0 rgba(0,0,0,0);color:var(--ink-2);transform:none}
+
+/* 尺寸 */
+button.sm{padding:6px 11px;font-size:12px;border-radius:7px;gap:5px}
+button.lg{padding:11px 20px;font-size:14px;border-radius:10px}
+button.wide{width:100%}
+/* 触屏设备抬高最小点击区，避免误触（不影响桌面观感） */
+@media (hover:none){
+  button{min-height:42px}
+  button.sm{min-height:34px}
+}
+/* 尊重系统「减少动态效果」 */
+@media (prefers-reduced-motion:reduce){
+  button{transition:background .01s,border-color .01s,color .01s}
+  button:hover:not(:disabled),button:active:not(:disabled){transform:none}
+}
+/* Windows 高对比度模式：渐变会被抹掉，必须保证描边与文字对比 */
+@media (forced-colors:active){
+  button{border:1px solid ButtonBorder;box-shadow:none;background:ButtonFace;color:ButtonText}
+  button.p,button.s,button.d{border-color:Highlight;color:ButtonText;background:ButtonFace}
+}
 
 /* ══════════ 开关 / 芯片 ══════════ */
 .sw{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);
@@ -287,7 +444,12 @@ pre.log.big{max-height:520px}
    · ≤480 手机：顶部导航 + 卡片化表格 + 全宽按钮
    ══════════════════════════════════════════ */
 @media (max-width:1279px){
-  .split{grid-template-columns:1fr}
+  /* 必须写 minmax(0,1fr) 而不是 1fr。
+     1fr 等价于 minmax(auto,1fr)，其中 auto 的最小值是内容的 min-content；
+     本页有长文案与固定宽度的输入框，min-content 会超过可用宽度，
+     把整条栅格轨道顶宽 —— 实测 360px 宽手机上产生 22px 横向溢出。
+     minmax(0,1fr) 把最小值锁为 0，轨道才会老实贴合容器。 */
+  .split{grid-template-columns:minmax(0,1fr)}
   .content{max-width:100%}
 }
 @media (max-width:1023px){
@@ -347,7 +509,7 @@ pre.log.big{max-height:520px}
   table.resp td.acts{flex-wrap:wrap;margin-top:5px;padding-top:9px;border-top:1px dashed var(--line)}
   table.resp td.acts::before{display:none}
   .toasts{left:12px;right:12px;bottom:calc(12px + var(--safe-b));max-width:none}
-  .g2,.g3,.g4{grid-template-columns:1fr}
+  .g2,.g3,.g4{grid-template-columns:minmax(0,1fr)}
   .cost .big{font-size:24px}
 }
 @media (max-width:480px){
@@ -884,12 +1046,12 @@ pre.log.big{max-height:520px}
           </h2>
 
           <div class="row" style="margin-bottom:9px">
-            <select v-model.number="inspectAccount" style="max-width:230px">
+            <select v-model.number="inspectAccount" class="insp-in insp-in-acc">
               <option :value="0">全部账号（取第一个）</option>
               <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.email }}</option>
             </select>
-            <input v-model="inspectRegion" placeholder="区域（可选，如 us-central1）" style="max-width:210px">
-            <input v-model="inspectZone" placeholder="可用区（可选，如 us-central1-a）" style="max-width:210px">
+            <input v-model="inspectRegion" placeholder="区域（可选，如 us-central1）" class="insp-in">
+            <input v-model="inspectZone" placeholder="可用区（可选，如 us-central1-a）" class="insp-in">
             <button class="p" :disabled="inspecting" @click="loadInspect(true,'all')">
               <span v-if="inspecting" class="inline-spin"></span>{{ inspecting?'读取中…':'↻ 全量刷新' }}
             </button>
