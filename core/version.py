@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,19 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.2.1",
+        "date": "2026-09-25",
+        "notes": [
+            "安全修复：/api/sshkey/read 原可读取任意文件（operator 权限即可读出"
+            "/etc/passwd 与本工具生成的管理员初始密码文件，构成提权路径）；"
+            "现改为只放行公钥内容，封禁 data/ 目录与私钥文件，越权尝试写审计",
+            "修复手机版「目标账号」表格压住下方「机器备注」的重叠问题"
+            "（内联 max-height 压制了窄屏媒体查询）",
+            "新增 tools/audit_authz.py 与 audit_authz_matrix.py：路由鉴权与越权巡检",
+            "新增 tools/detect_overlap.py：逐文字块的重叠检测（含滚动容器裁剪校正）",
+        ],
+    },
     {
         "version": "1.2.0",
         "date": "2026-09-25",

@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.2.0-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.1-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -1064,8 +1064,14 @@ gcp-manager-web/
 │   ├── overflow_audit.py   窄屏破版审计（逐元素查溢出/裁切）
 │   ├── smoke_proxy_counts.py 接口冒烟：账号改代理（含非法值拒绝）与机器数统计
 │   ├── verify_proxy_ui.py  浏览器实测：创建页账号列精简 + 账号页改代理
+│   ├── audit_authz.py      路由 × 权限巡检（找漏鉴权 / 写操作权限过低）
+│   ├── audit_authz_matrix.py 权限矩阵实测（低权角色逐个打写接口）
+│   ├── poc_sshk_read.py    sshkey 任意文件读取的 PoC 与修复回归验证
+│   ├── detect_overlap.py   逐文字块的窄屏重叠检测（含滚动容器裁剪校正）
+│   ├── probe_overlap.py    重叠问题的几何量测（表格/单元格/元素坐标）
+│   └── diag_overlap.py     重叠根因定点诊断（容器盒高 vs 内容高、溢出方向）
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（515 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（534 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -1077,7 +1083,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 515 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 534 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -1120,6 +1126,13 @@ python3 tests_e2e.py
   创建页账号表只剩「备注/已有机器」两列、不再引用被接口抹掉的 `a.proxy`、
   保留密钥缺失警告、代理编辑框不回填打码值（否则把 `***` 当密码存进去）、
   提供「清空(改直连)」、改完提示去测连通性、机器数查询不挂在 loadAccounts 上
+
+- **P. 窄屏重叠 / sshkey 任意文件读取修复**（19 项）：
+  账号表限高改用 CSS 类（内联 style 会压制媒体查询）、`.tw-acc` 定义与窄屏放开、
+  `_is_readable_pubkey` 存在、只放行公钥内容、按文件名拒私钥、
+  `data/` 目录整体保护、`realpath` 防穿越、8KB 上限、
+  二进制不再抛 500、拒绝写审计、端到端拒读 4 类敏感文件、
+  正常读 `.pub` 功能保留、私钥伪装成公钥仍被拒、穿越写法被拒
 
 - **M. 版本号 / 导航分组 / 按钮排序**（42 项）：版本号符合语义化格式且 ≥1.0.1、
   FastAPI 元数据与 version 模块一致、`/api/version` 匿名可读且不泄露账号信息、
@@ -1263,3 +1276,65 @@ inode 与时间戳完全不变。
 - Root 密码模式会开启 Root 的 SSH 密码登录，仅在可控环境使用。
 - 首次启动生成的 `data/INITIAL_ADMIN.txt` 请在改密后删除。
 - 会话有效期 12 小时（滑动续期）；改密会吊销该用户全部其它会话。
+
+### 已修的安全缺陷：`/api/sshkey/read` 任意文件读取
+
+这个接口的用途是「从服务器读一个已有的 `.pub` 填进创建表单」，
+原实现却是：
+
+```python
+with open(req.pubkey_path, "r", encoding="utf-8") as f:   # 路径完全由请求方指定
+    return {"ok": True, "public_key": f.read().strip()}
+```
+
+也就是把用户给的路径直接打开返回，没有任何目录限制或格式校验。
+后果：拥有 `operate` 权限的角色（`operator`，**不是**管理员）可以读取
+服务进程有权限的任意文件。实测读出了：
+
+```
+✗ /etc/passwd                                    200  1889 字节
+✗ data/INITIAL_ADMIN.txt                         200   157 字节
+     | 用户名: admin
+     | 密码:   ***REDACTED-PASSWORD***
+✗ app.py                                         200 50261 字节
+```
+
+因为 `data/INITIAL_ADMIN.txt` 里是**管理员密码明文**，
+这条路等于 `operator → admin` 的提权链；对容器化部署还能读环境变量与
+service account token。另外传二进制路径会抛 `UnicodeDecodeError`，
+以未捕获异常返回 500。
+
+修复后的边界（`_is_readable_pubkey`）：
+
+| 约束 | 目的 |
+|---|---|
+| 内容必须以 `ssh-rsa`/`ssh-ed25519`/`ecdsa-sha2-` 等开头 | 一条就挡住 `/etc/passwd`、数据库、源码等一切非公钥内容 |
+| 文件名以 `id_` 开头且非 `.pub`，或 `*.pem`/`*.key`/`*.ppk`… | 私钥绝不经此接口外发 |
+| `data/` 目录整体禁止（仅放行其中的 `ssh_keys/`、`keys/` 下的 `.pub`） | 保护管理员密码、数据库、服务账号私钥 |
+| `os.path.realpath` 解析后再比对 | 防符号链接与 `../` 穿越 |
+| 单文件 ≤ 8KB、必须是文本 | 公钥都很短；同时避免二进制触发解码异常 |
+| 拒绝时写 `read_sshkey_denied` 审计 | 有人在探测这个接口，本身值得留痕 |
+
+为什么**没有**简单地把可读范围锁死在 `data/` 内：前端默认值就是
+`/root/.ssh/id_rsa.pub`（复用服务器上已有公钥是正常用法），那样会把功能改坏。
+所以采取「路径不限、内容必须像公钥」的策略。
+
+验证脚本 `tools/poc_sshk_read.py` 覆盖 20 项：正常读 `.pub` 仍可用、
+8 类敏感路径（含穿越写法）全被拒、伪装成公钥的私钥被拒、
+`data/` 根部文件被拒、viewer 被 403、拒绝行为留审计。
+
+### 自查工具
+
+仓库自带三个检查脚本，改代码后建议都跑一遍：
+
+```bash
+python3 tests_e2e.py                        # 端到端断言（含鉴权与安全用例）
+python3 tools/audit_authz.py                # 路由 × 权限 巡检：找漏鉴权的接口
+python3 tools/audit_authz_matrix.py         # 权限矩阵实测：低权角色逐个打写接口
+python3 tools/poc_sshk_read.py              # sshkey 任意文件读取的回归验证
+python3 tools/detect_overlap.py             # 逐文字块的窄屏重叠检测
+```
+
+`audit_authz.py` 会列出所有路由及其要求的权限，并对「未鉴权且不在白名单」
+与「写操作却只要 view 权限」两类打标。它顺带纠正过一个误报：
+`/ws/logs` 走的是 Cookie 会话校验而不是 `require()`，需要单独识别。

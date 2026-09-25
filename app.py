@@ -1281,13 +1281,102 @@ class SSHKeyReadRequest(BaseModel):
     pubkey_path: str
 
 
+# 允许读取公钥的目录白名单：本工具自己生成的密钥目录。
+# 这个接口的设计用途是「从服务器读一个已有的 .pub 填进创建表单」，
+# 前端默认值就是 /root/.ssh/id_rsa.pub —— 所以不能简单地把可读范围锁死在
+# data/ 内，那会把正常功能改坏。改为：路径不限，但**内容必须是公钥**，
+# 且封掉本工具自己的数据目录（那里放的是管理员密码、数据库、服务账号私钥）。
+SSHKEY_READ_DIRS = [
+    os.path.join(DATA_DIR, "ssh_keys"),
+    os.path.join(DATA_DIR, "keys"),
+]
+
+# 公钥内容前缀（只认这些，读到的任何其它内容一律拒绝）
+_PUBKEY_PREFIXES = ("ssh-rsa", "ssh-ed25519", "ssh-dss", "ecdsa-sha2-",
+                    "sk-ssh-ed25519", "sk-ecdsa-sha2-", "ssh-rsa-cert",
+                    "ssh-ed25519-cert", "ecdsa-sha2-nistp256-cert")
+# 明显是私钥的文件名，一律不读
+_PRIVATE_KEY_HINTS = (".pem", ".key", ".ppk", ".pfx", ".p12", ".jks", ".keystore")
+_MAX_PUBKEY_BYTES = 8192
+
+
+def _is_readable_pubkey(path):
+    """
+    判断给定路径能否作为「公钥」返回，返回 (ok, 内容或错误原因)。
+
+    安全边界（原来是完全没有的，等于任意文件读取）：
+      1. 必须是普通文件，且内容像 SSH 公钥 —— 这一条就挡住了
+         /etc/passwd、数据库、源码、密码文件等一切非公钥内容。
+      2. 拒绝明显是私钥的文件名（id_rsa / *.pem / *.key …），
+         即使它就躺在某个 .pub 旁边。
+      3. 除本工具自己的 ssh_keys/keys 目录外，禁止读取 data/ 下的任何文件 ——
+         那里有 INITIAL_ADMIN.txt（管理员密码明文）与 gcp_web.db（含 root 密码）。
+      4. 限长 8KB（公钥都很短），避免被用来慢速拖大文件。
+    用 realpath 解析后再判断：符号链接与 `../` 穿越都要在解析后比对。
+    """
+    if not path or not str(path).strip():
+        return False, "路径为空"
+    raw = str(path).strip()
+    try:
+        real = os.path.realpath(os.path.expanduser(raw))
+    except Exception as exc:
+        return False, f"路径无法解析：{exc}"
+
+    if not os.path.isfile(real):
+        return False, "文件不存在，或不是普通文件"
+
+    name = os.path.basename(real)
+    low = name.lower()
+    if low.startswith("id_") and not low.endswith(".pub"):
+        return False, "这看起来是私钥，不允许读取"
+    if any(low.endswith(h) for h in _PRIVATE_KEY_HINTS):
+        return False, "这看起来是私钥或证书库文件，不允许读取"
+
+    # data/ 目录整体保护，只放行其中我们生成的公钥
+    data_root = os.path.realpath(DATA_DIR)
+    if real == data_root or real.startswith(data_root + os.sep):
+        allowed = [os.path.realpath(d) for d in SSHKEY_READ_DIRS]
+        if not any(real.startswith(a + os.sep) or real == a for a in allowed):
+            return False, ("拒绝读取 data/ 目录下的文件（该目录含管理员密码、"
+                           "数据库与服务账号私钥）；只允许读取其中的公钥")
+        if not low.endswith(".pub"):
+            return False, "只允许读取 data/ 目录下的 .pub 公钥文件"
+
+    try:
+        size = os.path.getsize(real)
+    except OSError as exc:
+        return False, f"无法获取文件大小：{exc}"
+    if size == 0:
+        return False, "文件为空"
+    if size > _MAX_PUBKEY_BYTES:
+        return False, f"文件过大（{size} 字节），不像是公钥"
+
+    try:
+        with open(real, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except UnicodeDecodeError:
+        return False, "文件不是文本格式，无法作为公钥读取"
+    except OSError as exc:
+        return False, f"读取失败：{exc}"
+
+    if not content.startswith(_PUBKEY_PREFIXES):
+        return False, ("文件内容不是 SSH 公钥（应以 ssh-rsa / ssh-ed25519 / "
+                       "ecdsa-sha2- 等开头）")
+    return True, content
+
+
 @app.post("/api/sshkey/read")
 def api_read_sshkey(req: SSHKeyReadRequest, request: Request):
-    require(request, "operate")
-    if not os.path.exists(req.pubkey_path):
-        raise HTTPException(400, f"公钥文件不存在：{req.pubkey_path}")
-    with open(req.pubkey_path, "r", encoding="utf-8") as f:
-        return {"ok": True, "public_key": f.read().strip()}
+    user = require(request, "operate")
+    ok, payload = _is_readable_pubkey(req.pubkey_path)
+    if not ok:
+        # 拒绝也要留痕：有人在拿非公钥路径探测这个接口，本身值得记录
+        users_store.audit(user["username"], client_ip(request), "read_sshkey_denied",
+                          target=str(req.pubkey_path)[:200], detail=payload, ok=False)
+        raise HTTPException(400, payload)
+    users_store.audit(user["username"], client_ip(request), "read_sshkey",
+                      target=str(req.pubkey_path)[:200])
+    return {"ok": True, "public_key": payload}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

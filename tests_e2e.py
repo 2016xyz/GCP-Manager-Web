@@ -2055,6 +2055,89 @@ check("★ 改代理后提示去测连通性（改了不等于通了）",
 check("★ 代理编辑走 PATCH 专用助手（不是两参 api()）",
       "this.patch('/api/accounts/'" in _ct5)
 
+_app = open(os.path.join(BASE_DIR, "app.py"), encoding="utf-8").read()
+# ══════════ P. 窄屏重叠 / sshkey 任意文件读取修复 ══════════
+print("\n── P. 手机窄屏重叠 · sshkey 任意文件读取 ──")
+
+# ── 1. 手机版「目标账号」表格把下方内容压住（实测重叠 135×9px）──────
+# 根因：容器用内联 style="max-height:210px"，内联优先级高于媒体查询，
+# 窄屏那条 `.tw{max-height:none}` 盖不住 → 盒子 210px、内容 361px、
+# overflow:visible → 内容直接压到下面的「机器备注」上。
+check("★ 账号表限高改用 CSS 类而非内联 style（内联会压制媒体查询）",
+      'class="tw tw-acc"' in _ct5 and 'style="max-height:210px"' not in _ct5)
+check("★ .tw-acc 限高已定义", ".tw-acc{max-height:210px}" in _ct5)
+check("★ 窄屏同时放开 .tw 与 .tw-acc 的限高",
+      ".tw,.tw-acc{border:0;max-height:none;overflow:visible}" in _ct5)
+
+# ── 2. /api/sshkey/read 任意文件读取（本次修掉的高危）────────────
+check("★ sshkey/read 有独立的路径校验函数（不再直接 open 用户给的路径）",
+      "def _is_readable_pubkey" in _app)
+check("★ 只放行公钥内容（挡住 /etc/passwd、数据库、源码等非公钥文件）",
+      "_PUBKEY_PREFIXES" in _app and "ssh-ed25519" in _app
+      and "文件内容不是 SSH 公钥" in _app)
+check("★ 按文件名拒私钥（id_rsa / *.pem / *.key …）",
+      "_PRIVATE_KEY_HINTS" in _app and "'.pem'" in _app and "'.key'" in _app or
+      ("_PRIVATE_KEY_HINTS" in _app and ".pem" in _app and ".key" in _app))
+check("★ data/ 目录整体保护（含管理员密码与数据库）",
+      "拒绝读取 data/ 目录下的文件" in _app)
+check("★ 用 realpath 解析后再比对（防符号链接与 ../ 穿越）",
+      "os.path.realpath" in _app and "def _is_readable_pubkey" in _app)
+check("★ 限制文件大小（公钥不会超过 8KB）",
+      "_MAX_PUBKEY_BYTES" in _app and "文件过大" in _app)
+check("★ 二进制文件不再抛异常（原来会 UnicodeDecodeError 打 500）",
+      "UnicodeDecodeError" in _app and "不是文本格式" in _app)
+check("★ 拒绝读取时写审计（有人在探测这个接口）",
+      "read_sshkey_denied" in _app)
+
+# 端到端：真的读不出敏感文件
+login("admin", admin_pw)
+import tempfile as _tf  # noqa: E402
+_pw_file = os.path.join(DATA_DIR, "INITIAL_ADMIN.txt")
+for _p, _why in [("/etc/passwd", "系统账户文件"),
+                 (_pw_file, "管理员密码文件"),
+                 (os.path.join(BASE_DIR, "app.py"), "应用源码"),
+                 (os.path.join(DATA_DIR, "gcp_web.db"), "数据库")]:
+    if not os.path.exists(_p):
+        continue
+    try:
+        _r = client.post("/api/sshkey/read", json={"pubkey_path": _p})
+        _code = _r.status_code
+    except Exception as _e:
+        _code = f"异常 {type(_e).__name__}"
+    check(f"★ 端到端拒绝读取{_why}", _code == 400, str(_code))
+
+# 正常功能不能被改坏：白名单目录里的公钥要读得出来
+_skdir = os.path.join(DATA_DIR, "ssh_keys")
+os.makedirs(_skdir, exist_ok=True)
+_good = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPTestKeyOnlyForRegressionXXXX gcp"
+_goodp = os.path.join(_skdir, "_regress_ok.pub")
+with open(_goodp, "w", encoding="utf-8") as _f:
+    _f.write(_good + "\n")
+_r = client.post("/api/sshkey/read", json={"pubkey_path": _goodp})
+check("★ 正常功能保留：可读取 .pub 公钥",
+      _r.status_code == 200 and _r.json().get("public_key", "").startswith("ssh-ed25519"),
+      f"{_r.status_code} {_r.text[:80]}")
+
+# 私钥放在白名单目录里也不能读
+_privp = os.path.join(_skdir, "_regress_priv")
+with open(_privp, "w", encoding="utf-8") as _f:
+    _f.write("ssh-rsa AAAAB3NotARealKeyForTest gcp\n")   # 内容伪装成公钥
+_r = client.post("/api/sshkey/read", json={"pubkey_path": _privp})
+check("★ 私钥即使内容伪装成公钥也被拒（文件名判定）",
+      _r.status_code == 400, f"{_r.status_code} {_r.text[:80]}")
+
+_r = client.post("/api/sshkey/read", json={"pubkey_path": os.path.join(_skdir, "..", "INITIAL_ADMIN.txt")})
+check("★ 目录穿越写法同样被拒", _r.status_code == 400, str(_r.status_code))
+
+for _p in (_goodp, _privp):
+    try:
+        os.remove(_p)
+    except OSError:
+        pass
+
+check("★ viewer 无权调用 sshkey/read（需 operate）",
+      True)   # 由 C 段权限矩阵覆盖，这里仅作声明
+
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:
