@@ -66,6 +66,17 @@ class UserStore:
         username = (username or "").strip()
         if not username:
             raise ValueError("用户名不能为空")
+        # ★ 用户名校验必须在服务端做：前端 console.html 虽然有正则，
+        # 但直接调 API 可以绕过 —— 实测用 <img src=x onerror=...> 当用户名
+        # 能成功建号，并原样回显在响应里（成为潜在的存储型 XSS 载荷）。
+        # 允许字母/数字/下划线/点/横线/@，长度 2-40，与前端口径一致。
+        if len(username) < 2 or len(username) > 40:
+            raise ValueError("用户名长度需在 2-40 之间")
+        if not all((c.isalnum() and c.isascii()) or c in "_.@-" for c in username):
+            raise ValueError("用户名只能包含字母、数字、下划线、点、横线或 @")
+        display_name = (display_name or "").strip()[:80]
+        if any(ord(c) < 32 for c in display_name):
+            raise ValueError("显示名不能包含控制字符")
         if role not in ROLES:
             raise ValueError(f"非法角色：{role}")
         pw_hash, salt = hash_password(password)

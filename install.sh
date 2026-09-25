@@ -229,6 +229,34 @@ elif ! command -v systemctl >/dev/null 2>&1; then
 else
   step "配置 systemd 服务"
 
+  # ★ 服务降权：默认不要让控制台以 root 跑。
+  # 原因：这个进程能读 data/ 下的管理员密码、数据库、GCP 服务账号私钥，
+  # 还能被「读公钥」这类接口触碰文件系统。以 root 运行意味着一旦出现
+  # 任意文件读取/写入类缺陷，影响面直接是整台机器（/etc/shadow、SSH 私钥）。
+  # 容器部署本来就用非 root（见 Dockerfile 的 appuser），这里保持一致。
+  SVC_USER="${SERVICE_USER:-gcpweb}"
+  if [ "$SVC_USER" != "root" ] && id "$SVC_USER" >/dev/null 2>&1; then
+    ok "服务将使用既有用户 $SVC_USER"
+  elif [ "$SVC_USER" != "root" ]; then
+    if $SUDO useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin \
+                    --no-create-home "$SVC_USER" >/dev/null 2>&1; then
+      ok "已创建系统用户 $SVC_USER（无登录 shell）"
+    else
+      warn "创建用户 $SVC_USER 失败，将回退到 root 运行（建议手工创建后重装）"
+      SVC_USER="root"
+    fi
+  fi
+  # 数据目录与代码目录都要让该用户可读写：data 下要写库、密码与密钥
+  if [ "$SVC_USER" != "root" ]; then
+    $SUDO chown -R "$SVC_USER":"$SVC_USER" "$APP_DIR/data" 2>/dev/null || true
+    $SUDO chown -R "$SVC_USER":"$SVC_USER" "$APP_DIR/.venv" 2>/dev/null || true
+    $SUDO chown "$SVC_USER":"$SVC_USER" "$APP_DIR" 2>/dev/null || true
+    $SUDO chmod 700 "$APP_DIR/data" 2>/dev/null || true
+  fi
+  if [ "$SVC_USER" = "root" ]; then
+    warn "服务以 root 运行 —— 生产环境建议设 SERVICE_USER=<专用用户> 重装"
+  fi
+
   UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
   $SUDO tee "$UNIT" >/dev/null <<EOF
 [Unit]
@@ -239,6 +267,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=$SVC_USER
+Group=$SVC_USER
 WorkingDirectory=$APP_DIR
 Environment=GCPWEB_DATA_DIR=$APP_DIR/data
 Environment=PORT=$PORT
@@ -252,6 +282,10 @@ StandardError=journal
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
 ReadWritePaths=$APP_DIR/data
 
 [Install]

@@ -110,17 +110,30 @@ class CaptchaStore:
         self._last_gc = 0
 
     def _gc(self):
-        now = time.time()
-        if now - self._last_gc < 30:
-            return
-        self._last_gc = now
+        """
+        清理过期验证码。
+
+        ★ 原来只在检查 _items 时持锁、遍历却在锁外，属于数据竞争：
+        并发登录时另一个线程 pop/del 会让 `for k, v in self._items.items()`
+        抛 RuntimeError: dictionary changed size during iteration。
+        另外 _last_gc 的「读—判断—写」也没保护，多线程会同时进来重复清理。
+        现在整个判断+清理都在同一把锁内完成。
+        """
         with self._lock:
+            now = time.time()
+            if now - self._last_gc < 30:
+                return
+            self._last_gc = now
             for k in [k for k, v in self._items.items() if v["expire"] < now]:
                 self._items.pop(k, None)
 
     def new(self):
         self._gc()
-        code = "".join(random.choice(_CAPTCHA_ALPHABET) for _ in range(CAPTCHA_LEN))
+        # 验证码用 secrets 而不是 random：random 是可预测的 Mersenne Twister，
+        # 攻击者若能观察到足够多的验证码样本即可推算后续取值，
+        # 从而绕开「验证码」这个防爆破环节（也就绕开了登录限速的成本）。
+        # 字符集 32 个、长度 4，用加密安全随机源抽。
+        code = "".join(secrets.choice(_CAPTCHA_ALPHABET) for _ in range(CAPTCHA_LEN))
         cid = secrets.token_urlsafe(16)
         with self._lock:
             self._items[cid] = {"code": code.upper(), "expire": time.time() + CAPTCHA_TTL}
@@ -317,10 +330,42 @@ class CaptchaStore:
 # 登录失败限速
 # ---------------------------------------------------------------------------
 class LoginGuard:
+    """
+    登录失败限速：按「用户名」与「IP」双维度计数，超阈值临时锁定。
+
+    ★ 表必须有上限：键都来自请求方输入（用户名可任意构造、IP 可伪造），
+    原本两个 dict 只增不减 —— 攻击者用海量不同的用户名/IP 发失败请求
+    就能把内存撑爆（实测每个键约百字节，百万级试探即可吃掉上百 MB）。
+    这里做容量上限 + 满时清理已解锁的条目 + 兜底淘汰最旧的。
+    """
+
+    MAX_TRACKED = 20000      # 每张表最多记这么多键
+
     def __init__(self):
         self._by_user = {}
         self._by_ip = {}
         self._lock = threading.Lock()
+
+    def _prune(self, table, now):
+        """
+        表满时清理。
+
+        ★ 这里有个容易写错的地方：不能用 `not v.get("until")` 判断「已解锁」——
+        刚建出来的计数记录是 `{"count": 1, "until": 0}`，until=0 是 falsy，
+        那样会把**正在累计的活跃计数器**全部清掉，等于让攻击者靠不断换用户名
+        只清「确实锁定过且已到期」的条目。
+        另外注意剪枝目标要比上限少 1：调用方 _prune() 之后还会 setdefault 插入
+        当前这个键，若剪到正好等于上限，插完就变成上限+1（实测确实出现 20001）。
+        """
+        if len(table) < self.MAX_TRACKED:
+            return
+        # 第一步：只清「锁定已到期」的条目
+        for k in [k for k, v in table.items() if v.get("until") and v["until"] <= now]:
+            table.pop(k, None)
+        # 第二步：仍然超限说明是真被灌了（大量互不相同的键），
+        # 按插入顺序淘汰最旧的（dict 保序），保证内存有上界
+        while len(table) >= self.MAX_TRACKED:
+            table.pop(next(iter(table)), None)
 
     def _check(self, table, key, limit):
         now = time.time()
@@ -348,6 +393,7 @@ class LoginGuard:
         with self._lock:
             for table, key, limit in ((self._by_user, (username or "").lower(), MAX_FAIL_PER_ACCOUNT),
                                       (self._by_ip, ip or "-", MAX_FAIL_PER_IP)):
+                self._prune(table, now)
                 rec = table.setdefault(key, {"count": 0, "until": 0})
                 rec["count"] += 1
                 if rec["count"] >= limit:

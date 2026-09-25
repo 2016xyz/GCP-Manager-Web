@@ -39,7 +39,10 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import _fixtures as FX  # noqa: E402
 
 ADMIN = FX.ADMIN_USER
-PW = "***REDACTED-PASSWORD***"
+# ★ 不要在这里写死密码：改密后本文件会立刻失效（历史上就吃过这个亏，
+# 5 个脚本集体登录超时，看起来像产品坏了）。统一走 _fixtures 的口径：
+# 先读 GCPWEB_ADMIN_PW，再读 data/INITIAL_ADMIN.txt。
+PW = FX.admin_password()
 LOGIN_URL = "http://127.0.0.1:8001/login"
 CONSOLE_URL = "http://127.0.0.1:8001/"   # 与夹具同源，便于继续读验证码
 

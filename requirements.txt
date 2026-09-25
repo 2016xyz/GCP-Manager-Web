@@ -1,10 +1,22 @@
-google-cloud-compute>=1.54.0
-google-api-core>=2.38.0
-fastapi>=0.110
-uvicorn>=0.29
-python-multipart>=0.0.9
-paramiko>=3.4
-PySocks>=1.7.1
-requests>=2.31
-pydantic>=2.6
-Pillow>=10.1
+# GCP Manager Web · 运行依赖
+#
+# 说明（审计后补充）：
+#   1. 全部改成「>=x,<y」区间，而不是只写 >=。
+#      只写下限的话，pip 每次安装都可能拉到更新的次版本 —— 上游一个破坏性
+#      变更就会让产品直接起不来（本项目没有构建步骤、没有锁文件）。
+#      上限取到「当前已验证的次版本 + 1」，升级时手动放开并重跑测试。
+#   2. python-multipart 必须 >=0.0.18：
+#      <0.0.18 存在 DoS 漏洞（CVE-2024-53981，畸形 multipart 边界导致 CPU 打满）。
+#      本项目有文件上传接口（/api/accounts/upload），受影响。
+#   3. 实测环境（已验证全量测试通过）：fastapi 0.141.1 / uvicorn 0.53.0 /
+#      paramiko 5.0.0 / PySocks 1.7.1 / Pillow 12.2.0 / google-cloud-compute 1.54.0
+google-cloud-compute>=1.54.0,<2
+google-api-core>=2.38.0,<3
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+python-multipart>=0.0.18,<1
+paramiko>=3.4,<6
+PySocks>=1.7.1,<2
+requests>=2.31,<3
+pydantic>=2.6,<3
+Pillow>=10.1,<13

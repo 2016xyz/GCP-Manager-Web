@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,73 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.2.4",
+        "date": "2026-09-25",
+        "notes": [
+            "安全审计（逐函数逐分支）后的集中修复，共 17 项。每项都先写 PoC "
+            "实测确认可达，再改代码，最后补回归断言锁定；605 项测试全通过",
+            "★ 高危 登录限速可被绕过：限速按客户端 IP 计数，而 IP 取自 "
+            "X-Forwarded-For 请求头。该头客户端可任意伪造，实测「伪造 XFF + "
+            "轮换用户名」可连续爆破 60 次不被拦（不伪造时第 21 次即锁定）。"
+            "现只在直连来源属于可信代理网段时才采信该头，可用 "
+            "GCPWEB_TRUSTED_PROXIES 配置（默认仅本机与私有网段，设为 - 表示"
+            "完全不信任任何代理头）",
+            "★ 高危 首次登录强制改密形同虚设：must_change_password 只在前端提示，"
+            "服务端不拦。实测未改密仍可调用 /api/status、/api/accounts、"
+            "/api/create。现由中间件强制，未改密前仅放行改密/登出/查自己，"
+            "其余返回 403 且 code=must_change_password",
+            "★ 高危 安装脚本以 root 运行服务：install.sh 生成的 systemd 单元没有 "
+            "User=，全程也没建服务账号，而容器版本早就用非 root 的 appuser。"
+            "该进程能读 data/ 下的管理员密码、会话库与服务账号私钥，一旦出现"
+            "任意文件读写缺陷，影响面就是整台机器。现默认降权到专用系统账号 "
+            "gcpweb（无登录 shell），并加 ProtectHome / ProtectKernelTunables / "
+            "ProtectControlGroups / RestrictSUIDSGID；建号失败时回退 root 并告警",
+            "★ 中危 SSH 静默信任主机密钥：paramiko 的 AutoAddPolicy 会无条件接受"
+            "任何主机密钥，中间人可借此截获实例 root 凭据。改用 TOFU（首次记录"
+            "指纹、之后不一致即中断连接）",
+            "★ 中危 用户接口接受含 HTML 的用户名：实测 "
+            "username=<img src=x onerror=...> 能建号成功并原样回显。现服务端校验"
+            "（2-40 位、仅字母数字与 _ . @ -、必须 ASCII），显示名截断 80 字符并"
+            "拒绝控制字符",
+            "★ 中危 实例数量无上限：count 传 999999 也被受理，一次误操作即可造成"
+            "费用灾难。现限制 1-200",
+            "★ 中危 登录限速表无界增长：每个失败用户名/IP 都永久留一条记录，"
+            "攻击者可用海量随机用户名把内存打满。现设 20000 条上限并按需清理"
+            "（只清锁定已到期的，不能清正在累计的计数器 —— 否则等于送攻击者"
+            "一个「换用户名即重置计数」的后门）",
+            "★ 中危 验证码清理存在数据竞争：遍历字典时未持锁，并发下会抛 "
+            "RuntimeError: dictionary changed size during iteration。现全程持锁",
+            "中危 验证码用 random 模块生成，属可预测的 Mersenne Twister。改 "
+            "secrets.choice",
+            "低危 默认监听 0.0.0.0：本控制台持有 GCP 凭据与实例 root 密码，默认"
+            "绑全网卡等于把管理台直接送上网。现默认 127.0.0.1，需要对外时用 "
+            "HOST=0.0.0.0 并打印醒目警告",
+            "低危 会话令牌回传响应体：登录/改密/会话列表会把 token 放进 JSON，"
+            "前端其实只靠 HttpOnly Cookie。现不再回传，并给 Cookie 补 Secure "
+            "标记（GCPWEB_COOKIE_SECURE 可覆盖）",
+            "低危 无任何安全响应头。现补 CSP（object-src 'none'、"
+            "frame-ancestors 'none'）、X-Frame-Options: DENY、"
+            "X-Content-Type-Options、Referrer-Policy、Permissions-Policy",
+            "低危 审计/任务/日志接口的 limit 无上限，一次请求可拉全表。现封顶",
+            "低危 并发访问 GCP 勘察缓存无锁（共享可变字典），且同一目标被并发"
+            "请求时会各自发起一次全量勘察（每次几十个 API 调用）。现加锁并防"
+            "缓存击穿",
+            "低危 跨线程共享的 sqlite 连接有 5 处 commit 未持锁，会与内部持锁"
+            "写操作交错。现统一持锁提交",
+            "依赖 给 requirements.txt 加版本上限区间（原来只写 >=，上游一个"
+            "破坏性变更就会让产品起不来），并明确 python-multipart>=0.0.18"
+            "（更低版本有 CVE-2024-53981 畸形 multipart 边界 DoS，本项目有"
+            "文件上传接口）",
+            "★ 中危 WebSocket 未受强制改密约束：/ws/logs 走独立握手路径，不经过 "
+            "HTTP 中间件。实测未改密账号在 HTTP 侧被 403 拦住，却仍能连上 "
+            "日志流 —— 属「策略覆盖不全」，同一账号拿到日志流会泄露实例与"
+            "运维信息。现握手时单独再判一次，未改密即以 4403 关闭",
+            "新增 34 项安全回归断言（S 段），含「未改密真的被拦」「重置密码后"
+            "也要先改密」「未改密连不上 /ws/logs」的端到端实测；测试总数 "
+            "568 → 605",
+        ],
+    },
     {
         "version": "1.2.3",
         "date": "2026-09-25",

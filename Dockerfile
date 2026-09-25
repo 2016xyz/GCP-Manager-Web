@@ -6,7 +6,7 @@ FROM python:3.12-slim
 # 便于 `docker inspect` 直接看出这是哪个版本。
 # 版本号与 core/version.py 保持一致（升级时一并改）。
 LABEL org.opencontainers.image.title="GCP Manager Web" \
-      org.opencontainers.image.version="1.2.3" \
+      org.opencontainers.image.version="1.2.4" \
       org.opencontainers.image.source="https://github.com/2016xyz/GCP-Manager-Web" \
       org.opencontainers.image.url="https://github.com/2016xyz/GCP-Manager-Web" \
       org.opencontainers.image.licenses="MIT"

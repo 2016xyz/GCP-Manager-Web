@@ -15,13 +15,14 @@ import json
 import os
 import stat
 import sys
+import threading
 import time
 
-from fastapi import (FastAPI, UploadFile, File, Form, HTTPException, Request,
+from fastapi import (FastAPI, UploadFile, File, Form, HTTPException, Request, Query,
                      WebSocket, WebSocketDisconnect, Cookie, Response)
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -123,9 +124,96 @@ def is_public(path):
     return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
 
 
+# ---------------------------------------------------------------------------
+# 客户端 IP 解析
+# ---------------------------------------------------------------------------
+# 只有当**直连来源**（TCP 层看到的那个 IP）本身落在受信任的代理网段里，
+# 才采信它带来的 X-Forwarded-For；否则一律用直连 IP。
+#
+# 为什么必须这样：登录限速是按 IP 维度计数的，而 XFF 是客户端可以随便写的头。
+# 实测过：每个请求换一个伪造的 XFF + 轮换用户名 → 连续 60 次爆破请求
+# **一次限速都没触发**（不伪造时第 21 次就会被拦）。
+#
+# 默认信任本机与私有网段（控制台部署在反向代理后面的常见形态）。
+# 如果反代不在这些网段，用 GCPWEB_TRUSTED_PROXIES 覆盖，
+# 逗号分隔的 IP 或 CIDR；显式设为 "-" 表示不信任任何代理头。
+# ⚠ 关键前提：反代必须**覆盖** XFF 头（nginx: proxy_set_header X-Forwarded-For
+#   $remote_addr），而不是透传客户端传来的值。
+TRUSTED_PROXIES_RAW = os.environ.get(
+    "GCPWEB_TRUSTED_PROXIES",
+    "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+)
+
+
+def _parse_trusted_proxies(raw):
+    import ipaddress
+    nets = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            # 单写一个 IP 也接受（按 /32 或 /128 处理）
+            try:
+                nets.append(ipaddress.ip_network(
+                    ipaddress.ip_address(part).exploded + ("/32" if ":" not in part else "/128"),
+                    strict=False))
+            except ValueError:
+                # 无法解析的项直接跳过，不影响启动（宁少信也不错信）
+                continue
+    return nets
+
+
+_TRUSTED_PROXIES = _parse_trusted_proxies(TRUSTED_PROXIES_RAW)
+
+
+def _ip_in_trusted(ip):
+    import ipaddress
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _TRUSTED_PROXIES)
+
+
 def client_ip(request):
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return fwd or (request.client.host if request.client else "-")
+    """
+    取客户端 IP：直连地址可信时才用 XFF 的第一跳，否则用直连地址本身。
+    拒绝把「客户端可任意伪造的头」当作限速依据。
+    """
+    peer = (request.client.host if request.client else "") or ""
+    if _TRUSTED_PROXIES and _ip_in_trusted(peer):
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if fwd:
+            # 头部里可能带端口（如 1.2.3.4:5678），取 IP 部分
+            return fwd.split(":")[0] if fwd.count(":") == 1 else fwd
+    return peer or "-"
+
+
+def _cookie_secure(request):
+    """
+    是否给会话 Cookie 加 Secure 标记。
+
+    默认规则：请求走 HTTPS（或前面有可信反代声明了 X-Forwarded-Proto=https）就加。
+    纯内网 HTTP 部署时 Secure 会导致浏览器根本不回传 cookie、直接登录不上，
+    所以提供 GCPWEB_COOKIE_SECURE=0/1 显式覆盖。
+    """
+    override = (os.environ.get("GCPWEB_COOKIE_SECURE") or "").strip().lower()
+    if override in ("0", "false", "no", "off"):
+        return False
+    if override in ("1", "true", "yes", "on"):
+        return True
+    if request.url.scheme == "https":
+        return True
+    peer = (request.client.host if request.client else "") or ""
+    if _TRUSTED_PROXIES and _ip_in_trusted(peer):
+        return ((request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+                == "https")
+    return False
 
 
 def require(request, perm):
@@ -161,7 +249,62 @@ async def auth_middleware(request: Request, call_next):
     request.state.user = sess
     request.state.token = token
     request.state.must_change = bool(sess.get("must_change"))
+
+    # ★ 强制改密：初始密码是明文写在 data/INITIAL_ADMIN.txt 里的（并会打印到
+    # 安装日志）。如果只在前端提示、后端不拦，拿着初始密码的人可以直接跳过
+    # 改密去调所有业务接口 —— 实测确实如此（GET /api/status、POST /api/create
+    # 全部 200）。这里在服务端强制：未改密前只放行改密/登出/查自己这几条。
+    if request.state.must_change:
+        allowed_when_must_change = (
+            "/api/auth/change_password",
+            "/api/auth/logout",
+            "/api/auth/me",
+            "/api/auth/password_policy",
+        )
+        if path not in allowed_when_must_change:
+            return JSONResponse(
+                {"ok": False, "code": "must_change_password",
+                 "error": "首次登录（或密码被重置）必须先修改密码再使用其它功能"},
+                status_code=403)
+
     return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# 安全响应头
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """
+    统一加安全响应头。
+
+    这里的 CSP 是「纵深防御」而不是可有可无：前端 console.html 与 login.html
+    都会把服务端返回的文案渲染进 DOM，而本轮审计中发现多个分支会回显用户输入
+    （「非法角色：xxx」「文件不存在：xxx」「代理格式不正确：xxx」）。
+    当前登录页那个 innerHTML 汇聚点恰好只收到固定文案，所以不构成可利用的 XSS；
+    但只要将来有谁把某条错误信息改成带用户输入，就会直接变成 XSS。
+    CSP 收紧脚本来源，给这类回归兜底。
+    """
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    resp.headers.setdefault("Permissions-Policy",
+                            "geolocation=(), microphone=(), camera=(), payment=()")
+    # 控制台要连同源 WebSocket（/ws/logs），故 connect-src 放行 ws/wss
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +368,10 @@ class SpecModel(BaseModel):
 
 class CreateRequest(BaseModel):
     account_ids: list[int | str] | None = None
-    count: int = 1
+    # ★ 上限 200：count 会直接乘到「账号数 × 台数」上，且每台都会真实计费。
+    # 实测原实现 count=999999 能被受理（dry-run 返回 200），一旦误填或恶意调用
+    # 就是一笔不可控的云账单。前端输入框的 max 属性拦不住直接调 API。
+    count: int = Field(default=1, ge=1, le=200)
     spec: SpecModel | None = None
     login_mode: str | None = "root_password"
     ssh_public_key: str | None = ""
@@ -326,15 +472,22 @@ def api_login(req: LoginRequest, request: Request, response: Response):
 
     perms = [p for p, roles in PERMISSIONS.items() if user["role"] in roles]
     resp = JSONResponse({
-        "ok": True, "token": token,
+        "ok": True,
+        # 不再回传 token：会话只走 HttpOnly Cookie。
+        # 回传会让前端 JS、浏览器插件、反代访问日志都多一份可被窃取的凭据，
+        # 而前端本来也不用它（请求靠 Cookie 自动携带）。
         "user": {"id": user["id"], "username": user["username"], "role": user["role"],
                  "role_label": ROLE_LABELS.get(user["role"], user["role"]),
                  "display_name": user.get("display_name", ""),
                  "must_change_password": bool(user.get("must_change_password"))},
         "permissions": perms,
     })
+    # secure 标记：仅在 HTTPS 连接下由浏览器回传 cookie，避免会话在
+    # 明文 HTTP 链路上裸奔。用环境变量 GCPWEB_COOKIE_SECURE=0 可在纯内网
+    # HTTP 部署时关掉（默认开启，跟着请求协议自动判断）。
+    _secure = _cookie_secure(request)
     resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax",
-                    max_age=auth_mod.SESSION_TTL, path="/")
+                    secure=_secure, max_age=auth_mod.SESSION_TTL, path="/")
     return resp
 
 
@@ -371,9 +524,10 @@ def api_change_password(req: ChangePasswordRequest, request: Request):
         request.headers.get("user-agent", ""))
     users_store.audit(sess["username"], client_ip(request), "change_password",
                       detail=f"强度={label}")
-    resp = JSONResponse({"ok": True, "token": new_token,
+    resp = JSONResponse({"ok": True,
                          "message": "密码已修改，其它设备的登录已失效"})
     resp.set_cookie(COOKIE_NAME, new_token, httponly=True, samesite="lax",
+                    secure=_cookie_secure(request),
                     max_age=auth_mod.SESSION_TTL, path="/")
     return resp
 
@@ -499,8 +653,9 @@ def api_sessions(request: Request):
         if not s["current"]:
             s["token_ref"] = s["token"][:12]
         s.pop("token", None)
-    return {"ok": True, "sessions": items,
-            "current_token": cur}
+    # 不回传当前会话的完整 token：它等价于一份可直接复用的登录凭据。
+    # 前端只需要知道「哪条是自己」——由 current 布尔字段表达即可。
+    return {"ok": True, "sessions": items}
 
 
 @app.delete("/api/sessions/{token_ref}")
@@ -520,7 +675,7 @@ def api_kill_session(token_ref: str, request: Request):
 
 
 @app.get("/api/audit")
-def api_audit(request: Request, limit: int = 200):
+def api_audit(request: Request, limit: int = Query(200, ge=1, le=1000)):
     require(request, "user")
     return {"ok": True, "audit": users_store.get_audit(limit)}
 
@@ -637,6 +792,12 @@ def api_project_zones(request: Request, account_id: int = 0, region: str = ""):
 # ----------------------------------------------------------------------
 _INSPECT_CACHE = {}          # {(account_id, sections, region, zone): (ts, payload)}
 INSPECT_TTL = 45             # 秒；重复刷新页面不必反复打 GCP
+# ★ 缓存必须配锁：这在多 worker / 多线程下是共享可变字典。
+# 无锁时「判断存在 → 取出 → 写入 → 按大小淘汰」互相交错，
+# 轻则淘汰逻辑算错、重则并发 dict 变更。同时它还能防缓存击穿：
+# 同一个 key 被并发请求时，没有锁会同时发起 N 次 GCP 全量勘察（每次 ~30s、几十个 API 调用）。
+_INSPECT_LOCK = threading.Lock()
+_INSPECT_INFLIGHT = set()    # 正在勘察中的 key，避免重复打 GCP
 
 
 def _pick_account(account_id):
@@ -715,8 +876,10 @@ def api_inspect(request: Request, account_id: int = 0, sections: str = "",
 
     ck = (acc["id"], tuple(ordered), region, zone)
     now = time.time()
-    if not fresh and ck in _INSPECT_CACHE:
-        ts, cached = _INSPECT_CACHE[ck]
+    with _INSPECT_LOCK:
+        _hit = _INSPECT_CACHE.get(ck)
+    if not fresh and _hit:
+        ts, cached = _hit
         if now - ts < INSPECT_TTL:
             return {**cached, "cached": True, "age": int(now - ts)}
 
@@ -1187,7 +1350,7 @@ def api_instance_action(req: ActionRequest, request: Request):
 # 任务 / 日志
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/api/tasks")
-def api_tasks(request: Request, limit: int = 100):
+def api_tasks(request: Request, limit: int = Query(100, ge=1, le=1000)):
     require(request, "view")
     return {"ok": True, "tasks": tm.api_tasks_snapshot(limit), "db_tasks": store.get_tasks(limit)}
 
@@ -1209,7 +1372,8 @@ def api_task_cancel(task_id: str, request: Request):
 
 
 @app.get("/api/logs")
-def api_logs(request: Request, since_id: int = 0, limit: int = 500, task_id: str = ""):
+def api_logs(request: Request, since_id: int = 0,
+             limit: int = Query(500, ge=1, le=5000), task_id: str = ""):
     require(request, "view")
     return {"ok": True, "logs": store.get_logs(since_id, limit, task_id or None)}
 
@@ -1389,6 +1553,12 @@ async def ws_logs(ws: WebSocket):
     if not sess:
         await ws.close(code=4401)
         return
+    # ★ WebSocket 是独立的握手路径，不经过 HTTP 中间件 —— 这里必须单独再判一次
+    # 强制改密。实测过：HTTP 侧未改密会被 403 拦住，但 /ws/logs 照样能连上，
+    # 属「策略覆盖不全」，未改密的账号不该拿到日志流。
+    if bool(sess.get("must_change")):
+        await ws.close(code=4403)
+        return
     await ws.accept()
     since = 0
     first = True
@@ -1423,5 +1593,30 @@ async def ws_logs(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+    def _env_int(name, default):
+        """环境变量取整数，非法值直接报错退出（而不是抛 ValueError 栈）"""
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return int(str(raw).strip())
+        except ValueError:
+            raise SystemExit(f"环境变量 {name} 必须是整数，当前为 {raw!r}")
+
+    # ★ 默认绑回环而不是 0.0.0.0
+    # 这个控制台持有 GCP 服务账号、实例 root 密码，且内置鉴权只是「够用」级别。
+    # 默认监听全网卡等于一键把管理台送到公网上（很多人会直接跑 install.sh）。
+    # 需要对外提供访问时，显式 HOST=0.0.0.0 并配反向代理 + TLS + IP 白名单。
+    host = (os.environ.get("HOST") or "127.0.0.1").strip()
+    port = _env_int("PORT", 8000)
+
+    if host in ("0.0.0.0", "::", "[::]"):
+        print("=" * 74)
+        print(f"⚠ 正在监听 {host}（所有网卡）—— 控制台将对网络可见。")
+        print("  该服务能创建/删除云主机、执行远程命令，并保存 root 密码明文。")
+        print("  请务必确认：已在前置反向代理上启用 TLS、限定来源 IP，")
+        print("  并且 data/ 目录权限为 700、初始管理员密码已修改。")
+        print("=" * 74)
+
+    uvicorn.run(app, host=host, port=port, log_level="info")

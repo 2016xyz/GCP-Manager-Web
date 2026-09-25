@@ -44,6 +44,42 @@ class SSHStopper:
             return self.stopped
 
 
+_TOFU_SEEN = {}          # {hostname: fingerprint}
+_TOFU_CLS = None         # 惰性构建（paramiko 是可选依赖，模块导入时可能还没装）
+
+
+def _tofu_policy_cls():
+    """
+    构建 TOFU 主机密钥策略类。
+
+    为什么不用 AutoAddPolicy：它会**静默**接受任何主机密钥，意味着中间人
+    可以完整接管这次 SSH（拿到 root 密码、注入安装命令）。产品连接的虽然是
+    用户自己刚建的实例，但链路上仍可能被动过手脚（DNS 劫持、同网段欺骗、代理被控）。
+    这里首次连接记录指纹，之后不一致就中断连接。
+
+    惰性构建的原因：paramiko 在本模块是可选依赖（未安装时产品仍要能起），
+    所以不能在建模块时就去继承它的类。
+    """
+    global _TOFU_CLS
+    if _TOFU_CLS is not None:
+        return _TOFU_CLS
+
+    class TofuPolicy(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, client, hostname, key):
+            fp = key.get_fingerprint().hex()
+            known = _TOFU_SEEN.get(hostname)
+            if known is None:
+                _TOFU_SEEN[hostname] = fp
+                return
+            if known != fp:
+                raise Exception(
+                    f"主机密钥与首次连接不一致（{hostname}）：已知 {known[:16]}… "
+                    f"本次 {fp[:16]}…，可能存在中间人，已中断连接")
+
+    _TOFU_CLS = TofuPolicy
+    return _TOFU_CLS
+
+
 def run_ssh_command(ip, username, password, command,
                     key_path=None,
                     connect_timeout=15, idle_timeout=180, total_timeout=1800,
@@ -71,7 +107,8 @@ def run_ssh_command(ip, username, password, command,
         return False
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # TOFU：首次记录指纹，之后不一致就中断（替代原来的 AutoAddPolicy 静默信任）
+    client.set_missing_host_key_policy(_tofu_policy_cls()())
     chan = None
     buffer = []
     try:

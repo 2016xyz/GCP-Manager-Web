@@ -605,7 +605,8 @@ class TaskManager:
             self.update_task(task_id, "failed", f"执行异常：{exc}")
         finally:
             try:
-                self.store.conn.commit()
+                with self.store.lock:
+                    self.store.conn.commit()
             except Exception:
                 pass
             self.log.flush()
@@ -708,7 +709,8 @@ class TaskManager:
                     if cur == "running":
                         self.update_task(task_id, "failed", "任务未正常结束（详见日志）")
                 try:
-                    self.store.conn.commit()
+                    with self.store.lock:
+                        self.store.conn.commit()
                 except Exception:
                     pass
                 self.log.flush()
@@ -831,7 +833,8 @@ class TaskManager:
                 self.update_task(task_id, "failed", f"刷新异常：{exc}")
             finally:
                 try:
-                    self.store.conn.commit()
+                    with self.store.lock:
+                        self.store.conn.commit()
                 except Exception:
                     pass
                 self.log.flush()

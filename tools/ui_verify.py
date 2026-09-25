@@ -18,7 +18,9 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ui_shots"
 import os
 os.makedirs(OUT, exist_ok=True)
 
-ADMIN, PW = "admin", "***REDACTED-PASSWORD***"
+# ★ 同 responsive_check.py：密码不写死，统一从 _fixtures 读
+import _fixtures as FX  # noqa: E402
+ADMIN, PW = FX.ADMIN_USER, FX.admin_password()
 LOGIN = "http://127.0.0.1:8001/login"
 CONSOLE = "http://127.0.0.1:8001/"
 

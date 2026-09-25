@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.2.3-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.4-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -115,9 +115,12 @@ python3 app.py               # 默认 0.0.0.0:8000
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PORT` | `8000` | 监听端口 |
-| `HOST` | `0.0.0.0` | 监听地址（建议公网场景改 `127.0.0.1` 并走反代） |
+| `PORT` | `8000` | 监听端口（非整数会直接报错退出） |
+| `HOST` | `127.0.0.1` | 监听地址。**v1.2.4 起默认只绑回环**；需要对外时显式 `HOST=0.0.0.0`，启动时会打印警告 |
 | `GCPWEB_DATA_DIR` | `<项目>/data` | 数据目录（账号密钥、密码库、会话）。容器/多实例部署时用它隔离 |
+| `GCPWEB_TRUSTED_PROXIES` | 本机 + 私有网段 | 只有 TCP 直连来源落在这些网段内，才采信 `X-Forwarded-For` 作为限速用的客户端 IP。逗号分隔 CIDR / 单个 IP；设为 `-` 表示完全不信任任何代理头 |
+| `GCPWEB_COOKIE_SECURE` | 按请求协议自动 | 会话 Cookie 的 `Secure` 标记。`1/true/yes` 强制开启，`0/false/no` 强制关闭；默认 HTTP 下关、HTTPS 下开 |
+| `SERVICE_USER` | `gcpweb` | 安装脚本创建的服务账号（仅 `install.sh`）。设成 `root` 可回到旧的以 root 运行的行为，但**不推荐** |
 
 ### 安装后常用命令
 
@@ -1071,7 +1074,7 @@ gcp-manager-web/
 │   ├── probe_overlap.py    重叠问题的几何量测（表格/单元格/元素坐标）
 │   └── diag_overlap.py     重叠根因定点诊断（容器盒高 vs 内容高、溢出方向）
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（568 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（605 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -1083,7 +1086,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 568 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 605 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -1283,11 +1286,77 @@ inode 与时间戳完全不变。
       proxy_set_header Connection "upgrade";
   }
   ```
-- 登录限速按 `X-Forwarded-For` 取客户端 IP，反向代理务必**覆盖**该头而不是透传用户输入。
 - 「全开放防火墙」放开入站/出站 `0.0.0.0/0` 全协议，**默认关闭**，请按需谨慎开启。
 - Root 密码模式会开启 Root 的 SSH 密码登录，仅在可控环境使用。
 - 首次启动生成的 `data/INITIAL_ADMIN.txt` 请在改密后删除。
 - 会话有效期 12 小时（滑动续期）；改密会吊销该用户全部其它会话。
+- **登录限速取客户端 IP 的口径（v1.2.4 起有变化）**：只有当 TCP 直连来源落在
+  可信代理网段时才采信 `X-Forwarded-For`，否则一律用直连 IP。
+  默认可信网段为本机 + 私有网段（`127.0.0.0/8, ::1/128, 10/8, 172.16/12,
+  192.168/16, fc00::/7`），可用 `GCPWEB_TRUSTED_PROXIES` 覆盖（设为 `-`
+  表示完全不信任任何代理头）。放在同机 nginx 后面时，直连来源是 `127.0.0.1`，
+  属可信网段，上面的 nginx 写法依然有效。
+  之所以要改：原实现无条件采信该头，而该头是客户端可任意伪造的 ——
+  实测「伪造 XFF + 轮换用户名」可连续爆破 60 次不被限速（不伪造时第 21 次即锁定）。
+- **本服务默认只监听 `127.0.0.1`**（v1.2.4 起）。需要对外提供时必须显式
+  `HOST=0.0.0.0`，启动日志会打印醒目警告。本控制台持有 GCP 服务账号凭据与
+  实例 Root 密码，默认绑全网卡等于把管理台直接送上网。
+- **安装脚本创建的服务以专用账号 `gcpweb` 运行**（v1.2.4 起），不再是 root；
+  容器镜像同样是非 root 的 `appuser`。服务账号无登录 shell，并启用了
+  `ProtectHome` / `ProtectKernelTunables` / `ProtectControlGroups` /
+  `RestrictSUIDSGID`。若建号失败会回退到 root 并打印告警（此时请手动加固）。
+- **首次登录强制改密是服务端强制的**（v1.2.4 起）：新建账号与被重置密码的账号，
+  在改密前除改密/登出/查自己之外的接口一律 403（`code=must_change_password`）。
+  原实现只在页面提示，直接调 API 可绕过。
+
+### 安全审计（v1.2.4）：17 项修复，每项都先 PoC 实测
+
+这一版做了一次逐函数、逐分支的审计，工具基线：`bandit -ll`、`pip-audit`、`ruff`。
+所有问题都遵循同一个纪律：**先在真实运行的服务上验证可利用，再改代码，最后补回归断言**。
+605 项测试中的 **S 段 34 项**专门锁定这些修复。
+
+| 级别 | 问题 | 利用方式（实测） | 修复 |
+|---|---|---|---|
+| 高危 | 登录限速可被绕过 | 伪造 `X-Forwarded-For` + 轮换用户名 → 连续 60 次爆破零限速 | 仅直连来源可信时采信 XFF |
+| 高危 | 强制改密形同虚设 | 未改密即可 `200` 调 `/api/status`、`/api/accounts`、`/api/create` | 中间件强制，其余 403 |
+| 高危 | 服务以 root 运行 | 安装脚本无 `User=`，进程可读 `data/INITIAL_ADMIN.txt` 与私钥 | 降权到 `gcpweb` + 加固指令 |
+| 中危 | SSH 静默信任主机密钥 | `AutoAddPolicy` 接受任意主机密钥，可中间人 | TOFU：首记指纹，变了就断 |
+| 中危 | 用户名可含 HTML | `username=<img src=x onerror=...>` 建号成功并回显 | 服务端字符集校验 + 截断 |
+| 中危 | 实例数量无上限 | `count=999999` 被受理 → 费用灾难 | `Field(ge=1, le=200)` |
+| 中危 | 限速表无界增长 | 海量随机用户名可把内存打满 | 20000 条上限 + 只清已到期锁定 |
+| 中危 | 验证码清理数据竞争 | 并发下 `RuntimeError: dictionary changed size` | 全程持锁 |
+| 中危 | WebSocket 未受强制改密约束 | HTTP 侧被 403 拦住，`/ws/logs` 却仍能连上（PoC 实测） | 握手时单独再判，未改密关 4403 |
+| 中危 | 验证码用弱随机源 | `random`（Mersenne Twister）可预测 | `secrets.choice` |
+| 低危 | 默认监听 `0.0.0.0` | 管理台直接暴露公网 | 默认 `127.0.0.1` |
+| 低危 | 会话令牌回传响应体 | token 出现在登录/改密/会话列表 JSON | 不再回传 + Cookie `Secure` |
+| 低危 | 无安全响应头 | 可被 iframe 嵌套等 | CSP / XFO / nosniff / Referrer-Policy |
+| 低危 | `limit` 无上限 | 一次请求拉全表 | `Query(le=...)` 封顶 |
+| 低危 | 勘察缓存无锁 | 共享可变字典 + 并发击穿（N 倍 API 调用） | 加锁 + 防击穿 |
+| 低危 | 5 处 `commit()` 无锁 | 跨线程 sqlite 提交交错 | 统一持 `store.lock` |
+| 依赖 | `requirements.txt` 未锁上限 | 上游次版本破坏性变更即无法启动 | 全部改为 `>=x,<y` 区间 |
+
+**一个值得单独说的坑**：限速表加容量上限时，最初写的清理条件是
+「删掉未锁定的条目」——而刚建出来的计数记录是 `{"count": 1, "until": 0}`，
+`until=0` 是 falsy，于是**正在累计的活跃计数器被全部清掉**，
+等于送给攻击者一个「换个用户名就重置计数」的后门。
+实测灌 30000 个键后表里只剩 9999 条、且限速记忆被削弱。
+现改为只清「确实锁定过且已到期」的条目，并补了「小容量下限速仍生效」的断言。
+同一个函数还有一处 off-by-one（先判断再插入，插完恰好超出 1 条 → 实测 20001），
+也一并修掉。
+
+**依赖漏洞的可达性判断**：`pip-audit` 报 Pillow 12.2.0 有 4 个 CVE
+（均修于 12.3.0）。逐一核对代码后确认**当前不可达**：全仓唯一的 `Image.open()`
+在 `core/auth.py` 的 `ink_ratio()`，打开的是服务端自己刚生成的验证码 PNG，
+而该函数只被测试调用；其余 Pillow 用法都是 `Image.new()` + 绘图 + 硬编码字体路径。
+也就是说这些 CVE 需要「打开攻击者提供的图片」才能触发，本产品没有这条路径。
+仍建议升级（无成本），但不应把它报成可利用漏洞。
+
+#### 尚无校验、已知未修的两项（供应链）
+
+- `install.sh` / `update.sh` 从 GitHub 拉取源码后**没有做哈希校验**。
+  当前依赖 HTTPS + 仓库可信，若要更严可自行指定 `git clone` 并核对 commit。
+- 无 CSRF token，靠 `SameSite=lax` 缓解（跨站表单 POST 不会带上 Cookie）。
+  如需更强可加同步令牌。
 
 ### 已修的安全缺陷：`/api/sshkey/read` 任意文件读取
 
@@ -1307,7 +1376,7 @@ with open(req.pubkey_path, "r", encoding="utf-8") as f:   # 路径完全由请�
 ✗ /etc/passwd                                    200  1889 字节
 ✗ data/INITIAL_ADMIN.txt                         200   157 字节
      | 用户名: admin
-     | 密码:   ***REDACTED-PASSWORD***
+     | 密码:   <已打码 — 见下方说明>
 ✗ app.py                                         200 50261 字节
 ```
 
