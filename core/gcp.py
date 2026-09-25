@@ -735,11 +735,26 @@ class GCPService:
     # ------------------------------------------------------------------
     # 实例操作 / 查询
     # ------------------------------------------------------------------
+    # 关于「删除为什么要等两分半」：
+    # 实测 asia-south2 的 e2-micro，两个事件几乎同时发生 ——
+    #     实例从 get() 里消失   133.7 s
+    #     operation 标记 done   134.1 s
+    # 也就是说实例真的在这段时间内一直可见、可 get 到，
+    # `.result()` 并没有多余等待，这就是该区域 GCP 的实际速度。
+    # （曾经误判成「后台记账慢、可见性早就没了」，是一次错误的测量：
+    #   那次是在 result() 已经返回之后才测可见性，当然只剩 1 秒。）
+    # 因此这里保留 .result()——它等的是真实完成，报「成功」才诚实。
     def _operate(self, func, act):
         try:
             self._with_proxy(func)
             return True, f"{act}成功"
         except Exception as e:
+            msg = str(e)
+            # 「本来就已经是这个状态」不算失败
+            if "already" in msg.lower():
+                return True, f"{act}成功"
+            if act == "删除" and ("not found" in msg.lower() or "404" in msg):
+                return True, "实例不存在（视为已删除）"
             return False, f"{act}失败：{e}"
 
     def delete_instance(self, zone, name):

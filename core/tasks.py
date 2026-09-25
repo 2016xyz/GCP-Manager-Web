@@ -595,6 +595,23 @@ class TaskManager:
         return {"ok": True, "task_id": task_id}
 
     def _run_execute(self, task_id, command, targets, all_instances, concurrency, timeout, idle):
+        # ★ 兜底：与实例动作同理，裸 daemon 线程里的异常会让任务永远停在
+        # 「运行中」；命令可能已经执行，用户却看不到结果。
+        try:
+            return self._run_execute_inner(task_id, command, targets, all_instances,
+                                          concurrency, timeout, idle)
+        except Exception as exc:
+            self.log(f"[{task_id}] 执行任务异常：{exc}", task_id, "error")
+            self.update_task(task_id, "failed", f"执行异常：{exc}")
+        finally:
+            try:
+                self.store.conn.commit()
+            except Exception:
+                pass
+            self.log.flush()
+
+    def _run_execute_inner(self, task_id, command, targets, all_instances, concurrency,
+                           timeout, idle):
         stopper = ssh_mod.SSHStopper()
         self._ssh_stopper = stopper
         self.update_task(task_id, "running", "开始执行命令")
@@ -673,7 +690,39 @@ class TaskManager:
         self._track_api_task(task_id, f"instance_{action}", {"targets": targets})
 
         def run():
+            # ★ 整个任务体套一层兜底：这个函数跑在裸 daemon 线程里，
+            # 任何未预期的异常（瞬时网络错误、缺少某客户端、解析失败…）
+            # 都会**静默杀死线程**，任务状态永远停在「running」——
+            # 而实际操作可能已经生效（实测 delete 真的删掉了实例，
+            # 界面却一直显示"运行中"）。所以这里必须保证一定写到终态。
+            completed = False
+            try:
+                completed = _run_action()
+            except Exception as exc:
+                self.log(f"[{task_id}] 任务异常终止：{exc}", task_id, "error")
+                self.update_task(task_id, "failed", f"任务异常：{exc}")
+            finally:
+                if not completed:
+                    with self.api_lock:
+                        cur = (self.api_tasks.get(task_id) or {}).get("status")
+                    if cur == "running":
+                        self.update_task(task_id, "failed", "任务未正常结束（详见日志）")
+                try:
+                    self.store.conn.commit()
+                except Exception:
+                    pass
+                self.log.flush()
+
+        def _run_action():
             self.update_task(task_id, "running", f"{action} {len(targets)} 台实例")
+            try:
+                return _do_action()
+            except Exception as exc:
+                self.log(f"[{task_id}] {action} 执行出错：{exc}", task_id, "error")
+                self.update_task(task_id, "failed", f"{action} 执行出错：{exc}")
+                return True   # 已写终态
+
+        def _do_action():
             accounts = {str(a["id"]): a for a in self.store.get_accounts()}
             vms = {v["name"]: v for v in self.store.get_all_vms()}
             results = []
@@ -743,7 +792,7 @@ class TaskManager:
                       "reset": gcp.reset_instance, "delete": gcp.delete_instance}.get(action)
                 if not fn:
                     self.update_task(task_id, "failed", f"不支持的操作 {action}")
-                    return
+                    return True
                 for i in items:
                     zone = locate(gcp, i["name"], i["zone"])
                     if not zone:
@@ -761,6 +810,8 @@ class TaskManager:
             ok_count = sum(1 for r in results if r.get("ok"))
             self.update_task(task_id, "done", f"{action}：{ok_count}/{len(results)} 成功",
                              {"results": results})
+            return True
+
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True, "task_id": task_id}
 
@@ -772,6 +823,20 @@ class TaskManager:
         self._track_api_task(task_id, "refresh", {"account_ids": account_ids})
 
         def run():
+            # ★ 同样兜底：刷新失败不写终态会让任务永远「运行中」
+            try:
+                self._refresh_inner(task_id, account_ids)
+            except Exception as exc:
+                self.log(f"[{task_id}] 刷新异常：{exc}", task_id, "error")
+                self.update_task(task_id, "failed", f"刷新异常：{exc}")
+            finally:
+                try:
+                    self.store.conn.commit()
+                except Exception:
+                    pass
+                self.log.flush()
+
+        def _refresh_inner(task_id, account_ids):
             self.update_task(task_id, "running", "刷新中")
             accounts = self.store.get_accounts()
             wanted = [str(x) for x in (account_ids or [])]

@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.2.2-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.3-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -1071,7 +1071,7 @@ gcp-manager-web/
 │   ├── probe_overlap.py    重叠问题的几何量测（表格/单元格/元素坐标）
 │   └── diag_overlap.py     重叠根因定点诊断（容器盒高 vs 内容高、溢出方向）
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（560 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（568 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -1083,7 +1083,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 560 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 568 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -1126,6 +1126,11 @@ python3 tests_e2e.py
   创建页账号表只剩「备注/已有机器」两列、不再引用被接口抹掉的 `a.proxy`、
   保留密钥缺失警告、代理编辑框不回填打码值（否则把 `***` 当密码存进去）、
   提供「清空(改直连)」、改完提示去测连通性、机器数查询不挂在 loadAccounts 上
+
+- **R. 后台任务终态兜底**（8 项）：
+  实例动作/命令执行/刷新三类任务都有异常兜底、兜底里保证写终态、
+  创建任务本有兜底不退化、用 `store.conn.commit()`；并真跑一次
+  「底层抛异常」路径，断言任务变成 failed 而非停在 running、异常不逃逸
 
 - **Q. 防火墙绑定 VPC / 自定义配置穿透**（26 项）：
   防火墙不再硬编码 `DEFAULT_NETWORK`、函数接收 network、URL 由所选 VPC 拼出、
@@ -1378,6 +1383,50 @@ vm-1-8725-1-2777 重试 2/2 → us-central1-f：防火墙前置失败：（同�
                  出站 allow-all-egress ✓   没有跑到 default 上 ✓
 【6. 清理】实例已删除 ✓  无孤儿磁盘 ✓
 ```
+
+### 已修的健壮性缺陷：后台任务会静默卡在「运行中」
+
+所有耗时任务（创建/实例动作/命令执行/刷新）都跑在**裸 daemon 线程**里。
+这种线程里抛出的异常不会传播到任何地方 —— 只会打一行 traceback 然后线程消失，
+任务状态永远停在 `running`。危害在于**操作其实已经生效**：
+
+```
+实测：提交删除实例后，云端实例确实被删掉了，
+      但任务状态 120 秒后仍是「运行中」（message: delete 1 台实例）
+      用户会以为没执行，于是重复点删除 / 手工去控制台处理
+```
+
+修复：三类任务的执行体都套上兜底，保证**任何路径都写入终态**：
+
+```python
+def run():
+    completed = False
+    try:
+        completed = _run_action()          # 正常路径自己写 done
+    except Exception as exc:
+        self.log(f"[{task_id}] 任务异常终止：{exc}", task_id, "error")
+        self.update_task(task_id, "failed", f"任务异常：{exc}")
+    finally:
+        if not completed:
+            with self.api_lock:
+                cur = (self.api_tasks.get(task_id) or {}).get("status")
+            if cur == "running":            # 兜底：绝不留 running
+                self.update_task(task_id, "failed", "任务未正常结束（详见日志）")
+        self.store.conn.commit()
+        self.log.flush()
+```
+
+验证方式是**真跑异常路径**（不是读代码）：把底层 GCP 客户端换成必抛异常的假实现，
+断言任务变成 `failed`、且异常没有逃逸出线程 —— 见测试 R 段。
+
+顺带把「本来就已经是目标状态」视为成功：启动一个已在运行的实例、
+删除一个不存在的实例，不再报失败。
+
+> 关于耗时的一点澄清：asia-south2 上删除实例实测要 **约 134 秒**
+> （实例从 `get()` 消失于 133.7 s，`operation.done()` 于 134.1 s）——
+> 两者几乎同时，说明这是 GCP 的真实速度，`.result()` 没有多余等待。
+> 期间曾误判成「后台记账慢、可见性早就没了」并改过一版，
+> 后用实测数据确认推断错误并回退。
 
 ### 自查工具
 

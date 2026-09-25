@@ -2245,6 +2245,80 @@ check("★ 开启全开放防火墙必须二次确认（弹窗说明风险）",
       "openFirewallMode()" in _ct5 and "确认开启" in _ct5
       and "公网暴露面最大" in _ct5)
 
+# ══════════ R. 后台任务的终态兜底 ══════════
+print("\n── R. 后台任务必须写终态（不能卡在运行中）──")
+
+_tk2 = open(os.path.join(BASE_DIR, "core", "tasks.py"), encoding="utf-8").read()
+
+# 背景：任务跑在裸 daemon 线程里，run() 抛异常会静默杀死线程，
+# 任务状态永远停在 running —— 而实际操作可能已经生效
+# （实测 delete 真删掉了实例，界面却一直显示「运行中」）。
+check("★ ★ 实例动作任务有异常兜底", "completed = _run_action()" in _tk2
+      and "任务异常：" in _tk2)
+check("★ ★ 兜底里保证写终态（不只是打日志）",
+      "任务未正常结束（详见日志）" in _tk2)
+check("★ ★ 命令执行任务有异常兜底", "_run_execute_inner" in _tk2
+      and "执行异常：" in _tk2)
+check("★ ★ 刷新任务有异常兜底", "_refresh_inner" in _tk2 and "刷新异常：" in _tk2)
+check("★ 创建任务本就有兜底（不要退化）",
+      "任务异常：{exc}" in _tk2 and "_run_create_batch" in _tk2)
+check("★ 兜底里用 store.conn.commit()（Store 没有 commit() 方法）",
+      "self.store.commit()" not in _tk2)
+
+# 真跑一次：让底层抛异常，任务必须变成 failed 而不是停在 running
+import threading as _th  # noqa: E402
+_esc = []
+_old_hook = _th.excepthook
+_th.excepthook = lambda a: _esc.append(f"{a.exc_type.__name__}: {a.exc_value}")
+
+
+class _BoomGCP:
+    def __init__(self, *a, **kw):
+        pass
+
+    def list_instances(self):
+        return []
+
+    def start_instance(self, z, n):
+        raise RuntimeError("模拟瞬时故障")
+
+    def stop_instance(self, z, n):
+        raise RuntimeError("模拟瞬时故障")
+
+    def reset_instance(self, z, n):
+        raise RuntimeError("模拟瞬时故障")
+
+    def delete_instance(self, z, n):
+        raise RuntimeError("模拟瞬时故障")
+
+
+_orig_acct = tmm.account_service
+tmm.account_service = lambda acc: _BoomGCP()
+try:
+    tmm.store.save_vm("_rt_test_vm", "1.2.3.4", "Pw!x", ACC_ID, "us-central1-a",
+                     "e2-micro", "ubuntu-minimal-2204", "pd-standard", 30)
+    _r = client.post("/api/instance_action",
+                     json={"action": "delete", "targets": ["_rt_test_vm"]}).json()
+    _tid = _r.get("task_id")
+    _st = "running"
+    for _ in range(30):
+        time.sleep(0.5)
+        _tt = client.get(f"/api/tasks/{_tid}").json().get("task") or {}
+        _st = _tt.get("status")
+        if _st in ("done", "failed", "error", "cancelled"):
+            break
+    check("★ ★ 底层抛异常时任务写成终态（不再停留在 running）",
+          _st == "failed", f"status={_st}")
+    check("★ ★ 异常没有逃逸出后台线程（会被静默吞掉）", not _esc, str(_esc[:2]))
+finally:
+    tmm.account_service = _orig_acct
+    _th.excepthook = _old_hook
+    try:
+        tmm.store.conn.execute("DELETE FROM vms WHERE name=?", ("_rt_test_vm",))
+        tmm.store.conn.commit()
+    except Exception:
+        pass
+
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:
