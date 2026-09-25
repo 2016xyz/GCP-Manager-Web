@@ -103,6 +103,13 @@ class _FakeInstancesClient:
 
 
 class _FakeFirewallsClient:
+    """假防火墙客户端。
+
+    必须实现 list/get：新增的 firewall_coverage() 会先列举项目里的规则，
+    判断该 VPC 是否已有覆盖 0.0.0.0/0 的规则；缺了这两个方法探测就报错、
+    导致防火墙根本没被创建（本轮就是这么踩到的）。
+    """
+
     @classmethod
     def from_service_account_json(cls, filename, *a, **kw):
         return cls()
@@ -114,6 +121,14 @@ class _FakeFirewallsClient:
     def update(self, **kw):
         FW_CALLS.append(kw)
         return _Op()
+
+    def get(self, project=None, firewall=None, **kw):
+        # 规则不存在 → 让上层走 insert 分支
+        raise Exception(f"404 firewall {firewall} not found")
+
+    def list(self, project=None, **kw):
+        # 返回空规则表：没有任何既有覆盖 → 需要新建
+        return iter([])
 
 
 class _FakeProjectsClient:
@@ -2137,6 +2152,98 @@ for _p in (_goodp, _privp):
 
 check("★ viewer 无权调用 sshkey/read（需 operate）",
       True)   # 由 C 段权限矩阵覆盖，这里仅作声明
+
+# ══════════ Q. 防火墙绑定 VPC / 自定义配置穿透 ══════════
+print("\n── Q. 防火墙绑定 VPC · 自定义配置真实穿透 ──")
+
+_gp = open(os.path.join(BASE_DIR, "core", "gcp.py"), encoding="utf-8").read()
+_tk = open(os.path.join(BASE_DIR, "core", "tasks.py"), encoding="utf-8").read()
+
+# ── 1. 防火墙必须绑定实例所在的 VPC（真实踩坑）─────────────────────
+# 现象：用自定义 VPC（jxihegwg）的项目里没有 default 网络，
+#   旧代码硬编码 global/networks/default → 404
+#   "The resource projects/x/global/networks/default was not found"，
+#   而且防火墙是全局资源、与 zone 无关，外层换区重试全是白试。
+check("★ ★ 防火墙不再硬编码 DEFAULT_NETWORK",
+      "network=DEFAULT_NETWORK, direction=" not in _gp)
+check("★ ★ 防火墙函数接收 network 参数",
+      "def create_open_firewall_rules(self, ingress=True, egress=True, priority=1000,\n"
+      in _gp and "network=""" in _gp)
+check("★ 防火墙 URL 由所选 VPC 拼出（含短名归一化）",
+      "_network_short_name" in _gp and 'net_url = f"global/networks/{net_name}"' in _gp)
+check("★ ★ 防火墙在实例创建成功之后才建立（不再前置阻断）",
+      "防火墙是**全局**资源，与 zone 无关" in _gp
+      and "self.instance_client.insert(" in _gp
+      and _gp.index("self.instance_client.insert(") < _gp.index("self.create_open_firewall_rules("))
+check("★ 防火墙失败只警告、不把实例判为失败",
+      'base["firewall_ok"] = fw_ok' in _gp and 'base["warning"]' in _gp)
+check("★ 建规则前先探测是否已有全放行规则（避免重复建/误改）",
+      "def firewall_coverage" in _gp and "0.0.0.0/0" in _gp)
+check("★ 只补缺失的方向（不把已收敛的配置重新铺开）",
+      'ingress=("INGRESS" in missing)' in _gp and 'egress=("EGRESS" in missing)' in _gp)
+check("★ 同名规则若属于别的 VPC，改用带网络后缀的名字（不越权改绑）",
+      'name = f"{base_name}-{net_name}"' in _gp)
+
+# ── 2. 网络短名解析 ────────────────────────────────────────────────
+from core.gcp import _network_short_name as _nsn  # noqa: E402
+check("★ 短名解析：短名原样返回", _nsn("jxihegwg") == "jxihegwg")
+check("★ 短名解析：global/networks/ 形式",
+      _nsn("global/networks/jxihegwg") == "jxihegwg")
+check("★ 短名解析：完整 URL",
+      _nsn("https://www.googleapis.com/compute/v1/projects/p/global/networks/jxihegwg")
+      == "jxihegwg")
+check("★ 短名解析：projects/ 形式",
+      _nsn("projects/p/global/networks/jxihegwg") == "jxihegwg")
+check("★ 短名解析：空值返回空串", _nsn("") == "" and _nsn(None) == "")
+
+# ── 3. 自定义配置必须真的穿透到 spec ───────────────────────────────
+from core.gcp import build_instance_spec as _bis  # noqa: E402
+_sp = _bis({
+    "machine_type": "e2-highcpu-4", "image_key": "centos-stream-9",
+    "disk_type": "pd-standard", "disk_size_gb": 30,
+    "region_mode": "single", "region": "asia-south2",
+    "network": "jxihegwg", "subnet": "jxihegwg",
+    "assign_public_ip": True, "auto_open_firewall": True,
+})
+check("★ ★ 自定义机型穿透（e2-highcpu-4）",
+      _sp["machine_type"] == "e2-highcpu-4", _sp["machine_type"])
+check("★ ★ 指定单区穿透（asia-south2）",
+      _sp["region"] == "asia-south2", _sp["region"])
+check("★ ★ network_url 用所选 VPC（不是 default 兜底）",
+      _sp["network_url"] == "global/networks/jxihegwg", _sp["network_url"])
+check("★ ★ subnet_url 用所选子网且带正确 region",
+      _sp["subnet_url"] == "regions/asia-south2/subnetworks/jxihegwg",
+      _sp["subnet_url"])
+check("★ 目录内机型标记为 catalog 来源",
+      _sp["machine_type_source"] == "catalog", _sp["machine_type_source"])
+_spx = _bis({"machine_type": "n2-custom-nonexistent-99"})
+check("★ 目录外机型标记为 custom 来源（允许直接填字符串）",
+      _spx["machine_type_source"] == "custom", _spx["machine_type_source"])
+
+# 未指定 region 时不得把 region_mode 带进 region 字段
+_sp2 = _bis({"machine_type": "e2-micro", "network": "vpc-a"})
+check("★ 未指定 region 时给兜底而不是空串", bool(_sp2["region"]), _sp2["region"])
+check("★ 显式指定 network 时如实使用（不做 default 兜底覆盖）",
+      _sp2["network_url"] == "global/networks/vpc-a", _sp2["network_url"])
+_sp3 = _bis({})
+check("★ 未指定 network 时兜底为 default", 
+      _bis({"machine_type": "e2-micro"})["network_url"] == "global/networks/default",
+      _bis({"machine_type": "e2-micro"})["network_url"])
+check("★ 完全空 spec 也能兜底出完整 URL",
+      _sp3["network_url"].startswith("global/networks/")
+      and "/subnetworks/" in _sp3["subnet_url"],
+      f"{_sp3['network_url']} | {_sp3['subnet_url']}")
+
+# ── 4. 任务日志要能看见实际用的 VPC（否则 404 排查只能靠猜）──────
+check("★ ★ 任务日志打印网络与子网",
+      "网络={spec.get('network')" in _tk and "指定区域=" in _tk)
+
+# ── 5. 面板默认值：极速部署不得静默打开全开放防火墙 ────────────────
+check("★ 极速部署预设保持防火墙收敛（不打开全开放）",
+      "保持默认收敛" in _ct5 and "Object.assign(this.spec, EMPTY_SPEC(), keep)" in _ct5)
+check("★ 开启全开放防火墙必须二次确认（弹窗说明风险）",
+      "openFirewallMode()" in _ct5 and "确认开启" in _ct5
+      and "公网暴露面最大" in _ct5)
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

@@ -9,6 +9,7 @@ GCP 服务封装（Web 版）
 import os
 import re
 import threading
+import time
 
 from google.cloud import compute_v1
 from google.api_core.exceptions import GoogleAPIError
@@ -17,6 +18,24 @@ from . import catalog
 
 DEFAULT_NETWORK = "global/networks/default"
 DEFAULT_SUBNET = "regions/{region}/subnetworks/default"
+
+
+def _network_short_name(network):
+    """
+    从各种 VPC 写法里取出短名。
+
+    接受：'jxihegwg'、
+         'global/networks/jxihegwg'、
+         'projects/p/global/networks/jxihegwg'、
+         'https://www.googleapis.com/compute/v1/projects/p/global/networks/jxihegwg'
+    取不出来时返回 ''（调用方自行给默认值）。
+    """
+    s = str(network or "").strip().rstrip("/")
+    if not s:
+        return ""
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -426,39 +445,138 @@ class GCPService:
     # ------------------------------------------------------------------
     # 防火墙
     # ------------------------------------------------------------------
-    def create_open_firewall_rules(self, ingress=True, egress=True, priority=1000):
-        def mk():
+    def firewall_coverage(self, network="", network_url=""):
+        """
+        探测指定 VPC 上是否**已经**存在覆盖 0.0.0.0/0 的放行规则。
+        返回 (缺失方向列表, 说明)；列表为空表示两个方向都已覆盖。
+
+        用途：勾了「放开全开防火墙」但该 VPC 本来就有全放行规则时
+        （例如 jxihegwg 自带的 `aqq` 只放 tcp，但若有人已建过 allow-all），
+        不必再建一遍。返回 (是否需要新建, 说明)。
+
+        判断口径保守：只要有一条 ingress 规则同时满足
+        「方向 INGRESS / 优先级 ≤1000 / 源 0.0.0.0/0 / 协议 all」就认为已覆盖；
+        egress 同理。**返回缺失方向的列表**（可能为空 = 都已覆盖），
+        这样调用方只补缺的那一侧，不会去动已经安全收敛的配置
+        （实测某项目自带一条 `aqq` 已覆盖全协议入站；
+          旧写法会去 UPDATE 它，等于把用户已收敛的规则重新铺开成 0.0.0.0/0）。
+        """
+        net_name = _network_short_name(network_url) or _network_short_name(network)
+        if not net_name:
+            return True, ""
+
+        def run():
+            try:
+                rules = list(self.firewall_client.list(project=self.project_id))
+            except Exception as e:
+                return True, f"列举规则失败：{e}"
+            have = {"INGRESS": [], "EGRESS": []}
+            for fw in rules:
+                if _network_short_name(getattr(fw, "network", "")) != net_name:
+                    continue
+                direction = (getattr(fw, "direction", "") or "INGRESS").upper()
+                if (getattr(fw, "disabled", False)
+                        or getattr(fw, "priority", 65535) > 1000):
+                    continue
+                # 协议必须是 all（只要有一条 all 就够）
+                proto_all = any(
+                    (getattr(a, "I_p_protocol", "") or "").lower() == "all"
+                    for a in (getattr(fw, "allowed", None) or []))
+                if not proto_all:
+                    continue
+                if direction == "INGRESS":
+                    if "0.0.0.0/0" in (getattr(fw, "source_ranges", None) or []):
+                        have["INGRESS"].append(fw.name)
+                else:
+                    if "0.0.0.0/0" in (getattr(fw, "destination_ranges", None) or []):
+                        have["EGRESS"].append(fw.name)
+            missing = [d for d in ("INGRESS", "EGRESS") if not have[d]]
+            if not missing:
+                return [], (f"INGRESS={have['INGRESS']} EGRESS={have['EGRESS']}")
+            return missing, f"缺少 {'/'.join(missing)}"
+
+        try:
+            return self._with_proxy(run)
+        except Exception as e:
+            return ["INGRESS", "EGRESS"], f"探测异常：{e}"
+
+    def create_open_firewall_rules(self, ingress=True, egress=True, priority=1000,
+                                   network=""):
+        """
+        建立 allow-all-ingress / allow-all-egress 两条「全开放」规则。
+
+        ★ 必须绑定实例真正所在的 VPC：原来硬编码 global/networks/default，
+        而用自定义 VPC（例如 jxihegwg）的项目里没有 default 网络，
+        GCP 直接返回 404 `The resource .../global/networks/default was not found`。
+        更隐蔽的是防火墙属于**全局**资源、与 zone 无关，
+        所以外层「换个区域重试」永远不会成功，只会把两次重试全部浪费掉。
+
+        network 接受短名（jxihegwg）、global/networks/jxihegwg 或完整 URL。
+        """
+        net_name = _network_short_name(network) or "default"
+        net_url = f"global/networks/{net_name}"
+        created = []
+
+        def existing_rule(name):
+            """返回 (已存在?, 该规则绑定的网络短名)"""
+            try:
+                fw = self.firewall_client.get(project=self.project_id, firewall=name)
+                return True, _network_short_name(getattr(fw, "network", ""))
+            except Exception:
+                return False, ""
+
+        def upsert(base_name, build):
+            name = base_name
+            exists, bound_net = existing_rule(name)
+            if exists and bound_net and bound_net != net_name:
+                # 同名规则属于**别的** VPC。直接 UPDATE 会把它改绑到本网络，
+                # 可能让原来依赖它的业务失联；因此改用带网络后缀的项目级唯一名。
+                name = f"{base_name}-{net_name}"
+                exists, bound_net = existing_rule(name)
+                if exists and bound_net and bound_net != net_name:
+                    name = f"{base_name}-{net_name}-{int(time.time())}"
+            try:
+                self.firewall_client.insert(project=self.project_id,
+                                            firewall_resource=build(name)).result()
+                created.append(name)
+                return True, f"{name} 创建成功（网络 {net_name}）"
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    return False, (f"{name} 失败：{e}"
+                                   if "not found" not in str(e).lower()
+                                   else f"{name} 失败：VPC「{net_name}」不存在（{e}）")
+                try:
+                    self.firewall_client.update(project=self.project_id, firewall=name,
+                                                firewall_resource=build(name)).result()
+                    created.append(name)
+                    return True, f"{name} 已存在，已更新为全开放（网络 {net_name}）"
+                except Exception as ue:
+                    return False, f"{name} 更新失败：{ue}"
+
+        def mk_allowed():
             a = compute_v1.Allowed()
             a.I_p_protocol = "all"
             return a
 
-        def upsert(name, firewall):
-            try:
-                self.firewall_client.insert(project=self.project_id, firewall_resource=firewall).result()
-                return True, f"{name} 创建成功"
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    return False, f"{name} 失败：{e}"
-                try:
-                    self.firewall_client.update(project=self.project_id, firewall=name,
-                                                firewall_resource=firewall).result()
-                    return True, f"{name} 已存在，已更新为全开放"
-                except Exception as ue:
-                    return False, f"{name} 更新失败：{ue}"
+        def build_ingress(name):
+            return compute_v1.Firewall(
+                name=name, network=net_url, direction="INGRESS",
+                priority=priority, source_ranges=["0.0.0.0/0"], allowed=[mk_allowed()])
+
+        def build_egress(name):
+            return compute_v1.Firewall(
+                name=name, network=net_url, direction="EGRESS",
+                priority=priority, destination_ranges=["0.0.0.0/0"], allowed=[mk_allowed()])
 
         def run():
             msgs = []
             ok_all = True
             if ingress:
-                ok, m = upsert("allow-all-ingress", compute_v1.Firewall(
-                    name="allow-all-ingress", network=DEFAULT_NETWORK, direction="INGRESS",
-                    priority=priority, source_ranges=["0.0.0.0/0"], allowed=[mk()]))
+                ok, m = upsert("allow-all-ingress", build_ingress)
                 ok_all &= ok
                 msgs.append(m)
             if egress:
-                ok, m = upsert("allow-all-egress", compute_v1.Firewall(
-                    name="allow-all-egress", network=DEFAULT_NETWORK, direction="EGRESS",
-                    priority=priority, destination_ranges=["0.0.0.0/0"], allowed=[mk()]))
+                ok, m = upsert("allow-all-egress", build_egress)
                 ok_all &= ok
                 msgs.append(m)
             return ok_all, " | ".join(msgs)
@@ -478,11 +596,10 @@ class GCPService:
         spec["region"] = region
 
         def run():
-            if spec.get("auto_open_firewall"):
-                fw_ok, fw_msg = self.create_open_firewall_rules()
-                if not fw_ok:
-                    return False, f"防火墙前置失败：{fw_msg}"
-
+            # ★ 防火墙是**全局**资源，与 zone 无关；且它只是这台实例的配套设施，
+            # 不该因为建规则失败就把整台实例判为创建失败
+            # （原来那样做会让外层「换个区域重试」反复白试，因为换区不影响防火墙）。
+            # 因此改为：先确保实例能建出来，建完再补防火墙，失败只警告。
             disk = compute_v1.AttachedDisk(
                 boot=True, auto_delete=True,
                 initialize_params=compute_v1.AttachedDiskInitializeParams(
@@ -578,6 +695,33 @@ class GCPService:
                 })
             except Exception as get_err:
                 base["warning"] = f"实例已创建，但读取详情失败：{get_err}"
+
+            # ★ 实例已确认建好，再补「全开放防火墙」。
+            # 放在这个位置有两个理由：
+            #   1. 防火墙是全局资源，与 zone/换区重试无关，放前置只会让
+            #      换区重试做无用功（原来就是这样把两次重试全浪费掉的）；
+            #   2. 它只是配套设施，建失败应当只提示、不影响实例本身。
+            # 未显式开启时也不白建规则：先探测该 VPC 是否已有覆盖 0.0.0.0/0 的规则。
+            if spec.get("auto_open_firewall") is not False:
+                try:
+                    missing, why = self.firewall_coverage(spec.get("network", ""),
+                                                          spec.get("network_url", ""))
+                    if missing:
+                        fw_ok, fw_msg = self.create_open_firewall_rules(
+                            ingress=("INGRESS" in missing),
+                            egress=("EGRESS" in missing),
+                            network=str(spec.get("network_url") or spec.get("network") or ""))
+                        base["firewall_ok"] = fw_ok
+                        base["firewall"] = fw_msg
+                        if not fw_ok:
+                            base["warning"] = ((base.get("warning", "") +
+                                                "；防火墙未建立：" + fw_msg).strip("；"))
+                    else:
+                        base["firewall_ok"] = True
+                        base["firewall"] = f"已存在覆盖 0.0.0.0/0 的规则，未重复创建（{why}）"
+                except Exception as fw_err:
+                    base["warning"] = ((base.get("warning", "") +
+                                        f"；防火墙探测失败：{fw_err}").strip("；"))
             return True, base
 
         try:

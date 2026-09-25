@@ -251,8 +251,14 @@ class TaskManager:
         self.store.create_task(task_id, "create", payload)
         self._track_api_task(task_id, "create", payload)
         self.log(f"=== 任务 {task_id}：{len(accounts)} 个账号 × {count} 台 ===", task_id)
+        # ★ 把网络也打进日志：之前日志里看不到用的哪个 VPC，
+        # 「防火墙 404 networks/default not found」排查时只能靠猜。
         self.log(f"[规格] 机型={spec['machine_type']} 镜像={spec['image_label']} "
-                 f"磁盘={spec['disk_type']} {spec['disk_size_gb']}GB 区域模式={payload.get('spec', {}).get('region_mode', 'auto_free')}",
+                 f"磁盘={spec['disk_type']} {spec['disk_size_gb']}GB "
+                 f"网络={spec.get('network') or 'default'}/{spec.get('subnet') or 'default'} "
+                 f"区域模式={payload.get('spec', {}).get('region_mode', 'auto_free')}"
+                 + (f" 指定区域={spec.get('region')}"
+                    if payload.get('spec', {}).get('region_mode') == 'single' else ""),
                  task_id)
 
         if dry_run:

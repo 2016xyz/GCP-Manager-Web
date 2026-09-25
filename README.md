@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.2.1-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.2-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -1071,7 +1071,7 @@ gcp-manager-web/
 │   ├── probe_overlap.py    重叠问题的几何量测（表格/单元格/元素坐标）
 │   └── diag_overlap.py     重叠根因定点诊断（容器盒高 vs 内容高、溢出方向）
 │   └── socks5_probe.py     本地 SOCKS5 服务端（验证代理链路真的通）
-├── tests_e2e.py           端到端验证（534 项，无需真实 GCP 账号）
+├── tests_e2e.py           端到端验证（560 项，无需真实 GCP 账号）
 └── data/                  运行时数据（db / 上传的密钥 / 初始密码文件）
 ```
 
@@ -1083,7 +1083,7 @@ gcp-manager-web/
 python3 tests_e2e.py
 ```
 
-共 534 项断言。用假密钥 + mock 掉 Google 客户端，实测：
+共 560 项断言。用假密钥 + mock 掉 Google 客户端，实测：
 
 - **A. 认证**（22 项）：初始管理员生成、未登录 401/302、验证码正确/错误/一次性/过期、
   密码错误不泄露用户存在性、HttpOnly Cookie、强制改密、连续失败锁定
@@ -1126,6 +1126,13 @@ python3 tests_e2e.py
   创建页账号表只剩「备注/已有机器」两列、不再引用被接口抹掉的 `a.proxy`、
   保留密钥缺失警告、代理编辑框不回填打码值（否则把 `***` 当密码存进去）、
   提供「清空(改直连)」、改完提示去测连通性、机器数查询不挂在 loadAccounts 上
+
+- **Q. 防火墙绑定 VPC / 自定义配置穿透**（26 项）：
+  防火墙不再硬编码 `DEFAULT_NETWORK`、函数接收 network、URL 由所选 VPC 拼出、
+  在实例创建成功之后才建规则、失败只警告、建前先探测既有覆盖、
+  只补缺失方向、同名规则属他网则改名；网络短名解析 5 种写法；
+  自定义机型/指定单区/network_url/subnet_url 五项穿透；
+  任务日志含网络与指定区域；极速部署不静默打开全开放防火墙
 
 - **P. 窄屏重叠 / sshkey 任意文件读取修复**（19 项）：
   账号表限高改用 CSS 类（内联 style 会压制媒体查询）、`.tw-acc` 定义与窄屏放开、
@@ -1322,6 +1329,55 @@ service account token。另外传二进制路径会抛 `UnicodeDecodeError`，
 验证脚本 `tools/poc_sshk_read.py` 覆盖 20 项：正常读 `.pub` 仍可用、
 8 类敏感路径（含穿越写法）全被拒、伪装成公钥的私钥被拒、
 `data/` 根部文件被拒、viewer 被 403、拒绝行为留审计。
+
+### 已修的功能缺陷：全开放防火墙在自定义 VPC 项目里必定失败
+
+现象（真实日志）：
+
+```
+[规格] 机型=e2-micro 镜像=CentOS Stream 9 磁盘=pd-standard 30GB 区域模式=auto_free
+vm-1-8725-1-2777 重试 1/2 → us-central1-c：防火墙前置失败：
+  allow-all-ingress 失败：404 POST .../global/firewalls:
+  The resource 'projects/x/global/networks/default' was not found
+vm-1-8725-1-2777 重试 2/2 → us-central1-f：防火墙前置失败：（同上）
+小结：成功 0 台 / 失败 1 台
+```
+
+三个叠加的问题：
+
+1. **硬编码 `global/networks/default`**。防火墙函数收不到用户选的 `network`，
+   永远按 `default` 建规则；而用自定义 VPC（本例 `jxihegwg`）的项目里
+   压根没有 `default`，GCP 直接 404。
+2. **防火墙被当作实例创建的前置条件**。它不仅与实例无关，还是**全局资源、
+   与 zone 完全无关** —— 却被放在 `create_instance` 最前面，失败即返回，
+   于是外层「换个区域重试」两次全是无用功（换区不会改变全局资源的结果）。
+3. **日志不打印实际用的 VPC**，只有一个 `区域模式=auto_free`，
+   排查时看不出网络是哪个，只能靠猜。
+
+修复：
+
+- 防火墙绑定实例所在的 VPC（接受短名 / `global/networks/x` / 完整 URL）。
+- 移到**实例创建成功之后**再补规则；失败只写 `warning`，不影响实例本身。
+- 建规则前先探测该 VPC 是否已有覆盖 `0.0.0.0/0` 的 `all` 协议规则，
+  **只补缺失的方向**。实测某项目自带 `aqq` 已覆盖全协议入站，
+  旧写法会去 `UPDATE` 它，等于把用户已经收敛的规则重新铺开成 `0.0.0.0/0`。
+- 同名规则若属于**别的** VPC，改用 `allow-all-<vpc>` 这样的名字，
+  不把它改绑过来（改绑可能让原来依赖该规则的业务失联）。
+- 日志补打 `网络=jxihegwg/jxihegwg` 与 `指定区域=asia-south2`。
+
+真实端到端验证（`tools/live_test_create.py`，30 项断言全过）：
+
+```
+【0. 环境勘察】VPC 列表：['jxihegwg']   ← 确认没有 default
+【3. 真实创建】livetest-1790310000 @ asia-south2-a
+    实例创建成功 14.0s  | 公网 IP 34.0.13.157
+    防火墙 已存在覆盖 0.0.0.0/0 的规则，未重复创建
+【4. 云端核对】机型 e2-micro ✓  网络 jxihegwg ✓  子网 jxihegwg ✓
+    磁盘 30GB pd-standard ✓  标签 ✓  Ops Agent 关闭 ✓  无资源策略 ✓
+【5. 防火墙核对】入站 allow-all-ingress + aqq（绑定 jxihegwg）✓
+                 出站 allow-all-egress ✓   没有跑到 default 上 ✓
+【6. 清理】实例已删除 ✓  无孤儿磁盘 ✓
+```
 
 ### 自查工具
 
