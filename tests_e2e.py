@@ -14,6 +14,7 @@
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -2649,6 +2650,26 @@ _r2 = _sp.run(["bash", "-n", os.path.join(BASE_DIR, "update.sh")],
               capture_output=True, text=True)
 check("★ U5 install.sh 通过 bash -n", _r1.returncode == 0, _r1.stderr[:120])
 check("★ U5 update.sh 通过 bash -n", _r2.returncode == 0, _r2.stderr[:120])
+
+
+# ── V 段：Debian/Kali 安装可行性（venv 检查 + bash 赋值前缀）─────────────────
+print("\n" + "-" * 76)
+print("V 段：Debian/Kali 安装可行性")
+print("-" * 76)
+
+check("★ ★ V1 venv 判据包含 ensurepip（只判 venv 在 Debian 系会误判）",
+      'import ensurepip' in _inst)
+check("★ V1 建环境失败时有按版本号兜底重试（python3.X-venv）",
+      'python%d.%d-venv' in _inst and 'pkg_install "$_vmaj"' in _inst)
+check("★ V1 兜底失败时报错会回显 venv 的真实输出",
+      'gcpweb_venv_err' in _inst)
+_bad_sudo = re.findall(r"\$SUDO\s+[A-Za-z_][A-Za-z0-9_]*=", _inst_code)
+check("★ ★ V2 不存在 `$SUDO VAR=val cmd` 写法（root 下 $SUDO 为空 → bash 把 "
+      "VAR=val 当命令名 → command not found）（代码行，不含注释）",
+      not _bad_sudo, f"存在: {_bad_sudo}")
+check("★ V2 DEBIAN_FRONTEND 经 env 传递",
+      "$SUDO env DEBIAN_FRONTEND=noninteractive apt-get" in _inst)
+check("★ V2 抽出统一 pkg_install（apt/dnf/yum 共用）", "pkg_install()" in _inst)
 
 
 print("\n" + "=" * 76)

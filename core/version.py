@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,26 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.2.7",
+        "date": "2026-09-26",
+        "notes": [
+            "修复 Debian/Kali 上安装必失败：「venv 模块可用」是误判，导致跳过装包、"
+            "随后建虚拟环境报 ensurepip is not available —— 在 debian:12 容器实测复现",
+            "★ 检查条件改为同时验证 `import venv` 与 `import ensurepip`："
+            "Debian 系 `import venv` 会成功，但真建环境依赖 ensurepip（由 python3-venv 提供）。"
+            "只判 venv 就会把「缺 python3-venv」误判成「可用」，于是跳过安装",
+            "★ 建环境失败时新增兜底重试：按版本号装 python3.X-venv（如 python3.11-venv）"
+            "或通用 python3-venv，再重建一次；仍失败才报错并回显 venv 的真实报错",
+            "★ 修复潜伏的 bash 语义 bug：`$SUDO DEBIAN_FRONTEND=noninteractive apt-get …` "
+            "在 root（SUDO 为空）下会把 DEBIAN_FRONTEND=noninteractive 当成命令名，"
+            "报 command not found，安装静默失败。bash 只把「字面量出现在命令词位置」的 "
+            "VAR=value 视作赋值前缀，而这里命令词位置是展开出来的 $SUDO。改用 env 传变量",
+            "★ 抽出统一的 pkg_install()，apt/dnf/yum 三分支共用，避免同类写法再次出现",
+            "验证：debian:12（无 python3-venv）容器内真跑 —— 自动装包、venv 建成、"
+            "依赖全部可导入、安装路径标记正确",
+        ],
+    },
     {
         "version": "1.2.6",
         "date": "2026-09-26",

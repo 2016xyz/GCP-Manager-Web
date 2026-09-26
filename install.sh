@@ -155,23 +155,47 @@ ok "Python $PYVER"
 # ── 1. 系统包（venv 常常要单独装）────────────────────────────────────────────
 step "检查系统依赖"
 
+# 统一的包安装入口（apt / dnf / yum）。返回非 0 表示装不上或没有包管理器。
+#
+# ★ 必须用 `env` 传 DEBIAN_FRONTEND，不能写成
+#       $SUDO DEBIAN_FRONTEND=noninteractive apt-get install …
+#   原因：bash 只在「字面量出现在命令词位置」时才把 VAR=value 当赋值前缀。
+#   这里命令词位置是 `$SUDO`（展开出来的），所以 $SUDO 为空（root 时就是这样）
+#   会让 bash 把 DEBIAN_FRONTEND=noninteractive 当成**命令名**，报
+#       DEBIAN_FRONTEND=noninteractive: command not found
+#   于是安装静默失败。实测 root 下的 debian:12 必现。
+#   包一层 env 后，两种情形都正确。
+pkg_install() {
+  [ "$#" -gt 0 ] || return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null 2>&1
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y -q "$@" >/dev/null 2>&1
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y -q "$@" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+# ★ 关键：判断「能不能建 venv」不能只看 `import venv`。
+#   Debian/Ubuntu/Kali 上 `import venv` **会成功**，但真正建环境时依赖
+#   ensurepip（它由 python3-venv 包提供）。只判 venv 会误判为「可用」，
+#   于是跳过装包，随后 `python -m venv` 直接失败，报的却是
+#     "ensurepip is not available … apt install python3.11-venv"
+#   —— 明明脚本自己有能力装，却没装。实测：debian:12 必现。
 need_pkgs=()
-$PY -c "import venv" >/dev/null 2>&1 || need_pkgs+=("python3-venv")
+$PY -c "import venv"      >/dev/null 2>&1 || need_pkgs+=("python3-venv")
+$PY -c "import ensurepip" >/dev/null 2>&1 || need_pkgs+=("python3-venv")
+# 去重
+if [ "${#need_pkgs[@]}" -gt 1 ]; then
+  need_pkgs=("$(printf '%s\n' "${need_pkgs[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')")
+fi
 
 if [ "${#need_pkgs[@]}" -gt 0 ]; then
-  if command -v apt-get >/dev/null 2>&1; then
-    warn "安装系统包: ${need_pkgs[*]}"
-    $SUDO apt-get update -qq
-    $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${need_pkgs[@]}"
-  elif command -v dnf >/dev/null 2>&1; then
-    warn "安装系统包: ${need_pkgs[*]}"
-    $SUDO dnf install -y -q "${need_pkgs[@]}"
-  elif command -v yum >/dev/null 2>&1; then
-    warn "安装系统包: ${need_pkgs[*]}"
-    $SUDO yum install -y -q "${need_pkgs[@]}"
-  else
-    die "缺少 ${need_pkgs[*]}，且不认识包管理器，请手动安装"
-  fi
+  warn "安装系统包: ${need_pkgs[*]}"
+  pkg_install "${need_pkgs[@]}" || die "缺少 ${need_pkgs[*]}，且安装失败，请手动安装"
   ok "系统包已安装"
 else
   ok "venv 模块可用"
@@ -181,7 +205,23 @@ fi
 step "准备 Python 虚拟环境"
 
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-  "$PY" -m venv "$VENV_DIR" || die "创建虚拟环境失败"
+  if ! "$PY" -m venv "$VENV_DIR" 2>/tmp/.gcpweb_venv_err; then
+    # 兜底：某些发行版把 venv/ensurepip 拆成带版本号的包
+    # （如 python3.11-venv），上面那个通用名装不上时再按版本号试一次。
+    _vmaj="$($PY -c 'import sys;print("python%d.%d-venv" % sys.version_info[:2])' 2>/dev/null || true)"
+    warn "创建虚拟环境失败，尝试安装 ${_vmaj:-python3-venv} 后重试…"
+    if [ -n "$_vmaj" ]; then
+      pkg_install "$_vmaj" || pkg_install python3-venv || true
+    else
+      pkg_install python3-venv || true
+    fi
+    rm -rf "$VENV_DIR"
+    if ! "$PY" -m venv "$VENV_DIR"; then
+      printf "\n" >&2
+      sed 's/^/    /' /tmp/.gcpweb_venv_err >&2 2>/dev/null || true
+      die "创建虚拟环境失败（已尝试自动安装 python3-venv；请手动执行 apt install python3-venv 后重跑）"
+    fi
+  fi
   ok "已创建 $VENV_DIR"
 else
   ok "复用已有 $VENV_DIR"
