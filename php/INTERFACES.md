@@ -58,7 +58,9 @@ php/
 ## 2. 运行时要求
 
 - PHP **≥ 8.0**（宝塔面板可选 8.0 / 8.1 / 8.2 / 8.3）
-- 扩展：`pdo_sqlite`、`openssl`、`curl`、`mbstring`、`json`、`zlib`
+- 扩展：`pdo_sqlite`、`openssl`、`curl`、`mbstring`、`json`、`zlib`、**`gd`**
+  （`gd` 用于画图形验证码。★ 它是**必需**的：没有 gd 就只能输出 SVG，
+   而 SVG 会把验证码明文写在响应里 —— 所以 CaptchaImage 选择直接报错，不降级）
 - 可选：`posix`（宝塔里用于降权判断）、`sockets`（`bin/ws-server.php` 实时日志，
   不可用时前端会自动退化为轮询 —— 前端本来就有轮询分支）
 - **零 composer 依赖**：JWT 用 `openssl_sign`，HTTP 用 `curl`，SSH 走系统 `ssh`/`ssh-keygen`

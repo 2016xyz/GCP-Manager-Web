@@ -18,6 +18,8 @@
  *   kind=execute          对已有实例批量执行命令（经系统 ssh 二进制）
  *   kind=create           批量创建实例（委托 Gcp 模块；dry_run 时只做预览）
  *   kind=instance_*       实例 start/stop/reset/delete（委托 Gcp 模块）
+ *   kind=instance_action  同上，动作在 payload.action 里（ApiGcp 的统一入口）
+ *   kind=refresh          刷新各账号实例计数缓存（委托 Gcp 模块）
  *
  * ★ 终态保证：每个任务都用 try/catch/finally 包裹，finally 里调用
  *   Tasks::ensureTerminal()，任何异常/提前 return 都不会把任务留在 running。
@@ -166,6 +168,9 @@ function runTask(array $task, callable $log): void
             case 'create':
                 executeCreateTask($id, $payload, $log);
                 break;
+            case 'refresh':
+                executeRefreshTask($id, $payload, $log);
+                break;
             default:
                 if (str_starts_with($kind, 'instance_')) {
                     executeInstanceAction($id, $kind, $payload, $log);
@@ -197,7 +202,19 @@ function executeCommandTask(string $taskId, array $payload, callable $log): bool
     $timeout = max(1, (int) ($payload['command_timeout'] ?? 600));
     $idle = max(1, (int) ($payload['idle_timeout'] ?? 120));
     $targets = is_array($payload['targets'] ?? null) ? $payload['targets'] : [];
-    $all = array_key_exists('all', $payload) ? (bool) $payload['all'] : true;
+    // ★ all 的三态语义（与 Python core/tasks.py 的 submit_execute 保持一致）：
+    //   缺省 / null = 调用方没指定 → 给了 targets 就只打 targets；
+    //   true  = 显式要求扩散到（该作用域下）全部实例；
+    //   false = 只打 targets。
+    //   早前写的是 `array_key_exists('all') ? (bool)$payload['all'] : true`，
+    //   把「没指定」当成 true —— 于是 `{"command":"x","targets":["a"]}`
+    //   会把该账号下**所有**实例一并执行。前端显式传了 all 所以 UI 不会踩到，
+    //   但 curl / 脚本 / 第三方调用会，等于误伤生产机。
+    if (!array_key_exists('all', $payload) || $payload['all'] === null) {
+        $all = null;
+    } else {
+        $all = (bool) $payload['all'];
+    }
     $keyPath = isset($payload['key_path']) && is_string($payload['key_path']) ? $payload['key_path'] : null;
     $userOverride = isset($payload['user']) && is_string($payload['user']) ? $payload['user'] : null;
 
@@ -215,7 +232,15 @@ function executeCommandTask(string $taskId, array $payload, callable $log): bool
                 'password' => (string) ($vm['password'] ?? ''), 'zone' => (string) ($vm['zone'] ?? '')];
         }
     }
-    if ($all || $targetList === []) {
+    // 扩散到全部实例的条件（见上面 all 的三态说明）：
+    //   没有 targets → 缺省即全部（保持原来的便利语义）；
+    //   有 targets   → 只有显式 all=true 才扩散，否则只打 targets
+    $expandAll = ($targets === []) ? ($all !== false) : ($all === true);
+    if ($expandAll) {
+        if ($targets !== []) {
+            $log('[警告] 已显式指定 all=true：除指定的 ' . count($targets)
+                . ' 台外，其它实例也会执行同一条命令', 'warn', $taskId);
+        }
         foreach ($vms as $name => $vm) {
             $exists = false;
             foreach ($targetList as $t) {
@@ -298,10 +323,12 @@ function executeCommandTask(string $taskId, array $payload, callable $log): bool
 // kind=create：批量创建实例（委托 Gcp 模块）
 // ==================================================================
 /**
- * 集成约定：Gcp.php 若提供静态钩子 runCreateTask(array $payload, string $taskId, callable $log): array
- * 则 task-runner 直接委托执行；钩子返回 ['ok'=>bool,'message'=>string,'result'=>array]。
- * 若 Gcp 模块尚未就绪（并行开发阶段），则：dry_run 任务给出预览并置 done，
- * 实建任务置 failed 并给出可操作的说明 —— 任何情况下都落到终态。
+ * 集成约定：Gcp.php 提供静态钩子 runCreateTask(array $payload, string $taskId, callable $log): array
+ * 钩子返回 ['ok'=>bool,'message'=>string,'result'=>array]。
+ *
+ * dry_run 的处理：**不碰云**。预览只需要把规整后的配置回给前端看，
+ * 因此这里就地合成 plan，不调 Gcp（也就不会因为账号密钥不可用而失败）。
+ * 实建任务才委托 Gcp；若钩子不存在（并行开发阶段），明确置 failed，绝不留在 running。
  */
 function executeCreateTask(string $taskId, array $payload, callable $log): bool
 {
@@ -313,8 +340,19 @@ function executeCreateTask(string $taskId, array $payload, callable $log): bool
             'account_ids' => $payload['account_ids'] ?? [],
             'spec' => $payload['spec'] ?? [],
         ];
+        // Gcp 就绪时顺带把配置规整一遍（build_instance_spec 是纯函数，不碰网络），
+        // 让预览里展示的机型/镜像/磁盘/区域与实建时真正用的一致。
+        if (class_exists('Gcp') && method_exists('Gcp', 'build_instance_spec')) {
+            try {
+                $plan['resolved_spec'] = Gcp::build_instance_spec(
+                    is_array($payload['spec'] ?? null) ? $payload['spec'] : []
+                );
+            } catch (Throwable $e) {
+                $plan['resolved_spec_error'] = $e->getMessage();
+            }
+        }
         Tasks::update($taskId, 'done', 'dry-run 预览完成', ['plan' => $plan]);
-        $log('dry-run 预览完成', 'success', $taskId);
+        $log('dry-run 预览完成（未创建任何资源）', 'success', $taskId);
         return true;
     }
 
@@ -323,9 +361,12 @@ function executeCreateTask(string $taskId, array $payload, callable $log): bool
         /** @var array $ret */
         $ret = Gcp::runCreateTask($payload, $taskId, $log);
         $ok = (bool) ($ret['ok'] ?? false);
+        // 取消请求优先于 ok/failed —— 与 Python 一致（_run_create_batch 里
+        // status 就是按 is_cancelled 决定的），否则「取消」会被覆盖成 failed。
+        $final = Tasks::cancelRequested($taskId) ? 'cancelled' : ($ok ? 'done' : 'failed');
         Tasks::update(
             $taskId,
-            $ok ? 'done' : 'failed',
+            $final,
             (string) ($ret['message'] ?? ($ok ? '创建完成' : '创建失败')),
             $ret['result'] ?? null
         );
@@ -340,20 +381,63 @@ function executeCreateTask(string $taskId, array $payload, callable $log): bool
 }
 
 // ==================================================================
+// kind=refresh：刷新各账号实例计数缓存（委托 Gcp 模块）
+// ==================================================================
+function executeRefreshTask(string $taskId, array $payload, callable $log): bool
+{
+    if (class_exists('Gcp') && method_exists('Gcp', 'runRefreshTask')) {
+        Tasks::update($taskId, 'running', '刷新中');
+        /** @var array $ret */
+        $ret = Gcp::runRefreshTask($payload, $taskId, $log);
+        $ok = (bool) ($ret['ok'] ?? false);
+        $final = Tasks::cancelRequested($taskId) ? 'cancelled' : ($ok ? 'done' : 'failed');
+        Tasks::update($taskId, $final,
+            (string) ($ret['message'] ?? ($ok ? '刷新完成' : '刷新失败')), $ret['result'] ?? null);
+        return true;
+    }
+    Tasks::update($taskId, 'failed',
+        'Gcp 模块未就绪（缺少 Gcp::runRefreshTask），无法执行刷新任务');
+    $log('Gcp 模块未就绪，无法执行刷新任务', 'error', $taskId);
+    return true;
+}
+
+// ==================================================================
 // kind=instance_*：实例启停/重置/删除（委托 Gcp 模块）
 // ==================================================================
+/**
+ * 从 kind / payload 解析实例动作。
+ *
+ * 为什么要两个来源：历史（Python 语义）的动作是**编码在 kind 里**的
+ * （instance_delete / instance_start…），而 ApiGcp::instanceAction 统一落
+ * kind=instance_action、把动作放在 payload.action。只认前者会让
+ * POST /api/instance_action 生成的任务全部报「不支持的实例操作：action」——
+ * 两个来源都支持，前端两条路径才都可用。
+ */
+function resolveInstanceAction(string $kind, array $payload): string
+{
+    $valid = ['start', 'stop', 'reset', 'delete'];
+    $fromKind = substr($kind, strlen('instance_'));
+    if (in_array($fromKind, $valid, true)) {
+        return $fromKind;
+    }
+    $fromPayload = (string) ($payload['action'] ?? '');
+    return in_array($fromPayload, $valid, true) ? $fromPayload : $fromKind;
+}
+
 function executeInstanceAction(string $taskId, string $kind, array $payload, callable $log): bool
 {
-    $action = substr($kind, strlen('instance_'));
+    $action = resolveInstanceAction($kind, $payload);
     if (!in_array($action, ['start', 'stop', 'reset', 'delete'], true)) {
         Tasks::update($taskId, 'failed', '不支持的实例操作：' . $action);
         return true;
     }
     if (class_exists('Gcp') && method_exists('Gcp', 'runInstanceAction')) {
         Tasks::update($taskId, 'running', sprintf('%s 实例', $action));
+        /** @var array $ret */
         $ret = Gcp::runInstanceAction($action, $payload['targets'] ?? [], $taskId, $log);
         $ok = (bool) ($ret['ok'] ?? false);
-        Tasks::update($taskId, $ok ? 'done' : 'failed',
+        $final = Tasks::cancelRequested($taskId) ? 'cancelled' : ($ok ? 'done' : 'failed');
+        Tasks::update($taskId, $final,
             (string) ($ret['message'] ?? ($ok ? '完成' : '失败')), $ret['result'] ?? null);
         return true;
     }

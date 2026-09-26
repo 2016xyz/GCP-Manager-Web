@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.3.0';
+    public const VERSION = '1.3.1';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,25 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.3.1',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '★ 安全修复轮（第二轮逐函数逐分支审计）：修掉一条完整可达的「只读账号 → 拿走全部实例 root 密码」链路，以及一个会让登录验证码形同虚设的问题。共 12 项修复 + 8 个可重跑安全回归',
+                    '【致命】任务 payload 里保存着 root_password 明文（worker 执行需要），而 /api/tasks、/api/tasks/{id} 的权限点是 view —— viewer 是只读角色。实测：只读账号一次请求就拿到全部实例 root 密码，把 POST /api/instances/password 的二次验证绕过。修复：在所有下发边界做字段投影（两版都修），并覆盖历史数据；日志出口同样擦拭（老库里已写入的明文也会被擦）',
+                    '【高危】验证码降级成明文 SVG：缺 gd（PHP）/ Pillow（Python）时，验证码字符被写成 <text> 再 base64 放进响应的 image 字段 —— 解 base64 即可读出，不需要 OCR。实测在本机 PHP 8.0（无 gd）上读出的字符与库里验证码逐字符相同，也就是说宝塔默认环境下登录验证码等于不存在。修复：删除降级路径，缺依赖时明确报错（503 + 可操作提示），并把 gd 列入 install-php.sh / bt-install.sh 的必需扩展',
+                    '【高危】PHP 版 POST /api/instances/password 漏了「登录密码复核 + 限速」：Python 版有，前端也因为 Python 版要求密码而照样弹框让用户输入，用户以为有防护，PHP 后端却直接忽略该字段。实测：不带密码 → 200 直出 root_password 明文；密码错误也 200。已逐条对齐 Python 的三道控制（含共用 LoginGuard 限速）',
+                    '【高危】代理用进程级环境变量实现，并发时互相污染：一个线程退出会让仍在 with 里的线程代理消失（变直连），退出顺序颠倒又会把 A 的代理写回进程 —— 实测无代理线程在自己 with 内看到别的账号的代理，等于把该账号的 OAuth 凭据送到别的账号的第三方代理上。修复：进程级 RLock 串行化 + 无代理调用也进锁；完全没配代理的部署不加锁（保持原并发性能）',
+                    '【中危】POST /api/execute 的 all 缺省为真，且判定写成 `if all_instances or not target_list` —— 给了 targets 但没写 all 的请求会把该账号下所有实例一并执行。前端显式传了 all 所以 UI 看不出，但 curl / 脚本 / 第三方调用的命令会打到远超预期的机器上。实测：修复前 targets=["t1"] 实际执行 3 台，修复后只执行 1 台。改为三态语义（None/True/False），两版都改',
+                    '【中危】PATCH /api/accounts/{id} 把请求体任意键透传给 store，而 store 白名单含 key_path —— 可绕开 POST /api/accounts 的「内容必须是服务账号 JSON」校验，并借 key_exists/key_file 构成任意路径存在性 oracle；响应还把 key_path 从 updated 里滤掉，调用方看不出自己改了它。已加字段白名单',
+                    '【中危】裸 int() 造成 500 + /api/config 配置投毒：/api/config 接受任意键值并持久化，用户把 disk_size_gb 存成 "abc" 后每次「创建实例」都 500。已加 safe_int()（非法即回落 + 范围夹取）与配置键白名单',
+                    '【中危】勘察缓存的写与淘汰在锁外（Python），且两版的「防缓存击穿」其实都没实现 —— _INSPECT_INFLIGHT 是定义了从不使用的死代码，PHP 侧注释还谎称 flock 做了串行化。已实现真正的单飞（抢到计算锁的人去算，其余等结果），并修正假注释',
+                    '【中危】WebSocket 只在握手时校验会话：管理员踢掉被窃会话后，长连接仍在持续收任务日志。两版都已加周期性复检（默认 30 秒，GCPWEB_WS_AUTH_EVERY 可调）—— 修复前 25 秒仍不断开，修复后 0.8s（PHP）/ 1.0s（Python）以 4401 断开',
+                    '【低危】mask_proxy 漏「密码里含 : 或 @」的形态（原样返回明文），已按「宁可多打码也不能漏」重写；两版一致',
+                    '【低危】其他：worker 子进程继承 Web 监听套接字（已关 fd）；ws-server.php 忽略 --host/--port（文档教用户这么用，已支持，命令行优先）；ssh.py 的 `if False else` 死代码；install-php.sh 补端口继承告警；bt-install.sh 用 ini_get 取代解析 php -i 文本',
+                    '★ 新增 8 个可重跑安全回归：bash tools/security/run_all.sh（任务脱敏/密码二次验证/WS 吊销/execute 三态/代理并发隔离/日志擦除/勘察单飞/fd 继承），并把「验证码必须是 PNG 且响应不含明文」写进冒烟断言',
+                ],
+            ],
             [
                 'version' => '1.3.0',
                 'date'    => '2026-09-27',

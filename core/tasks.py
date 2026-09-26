@@ -23,6 +23,49 @@ from . import catalog
 from . import ssh as ssh_mod
 from .gcp import GCPService, build_instance_spec
 
+# ---------------------------------------------------------------------------
+# 下发给客户端前的脱敏
+# ---------------------------------------------------------------------------
+# 任务 payload 里保存了创建实例所需的原始参数 —— 其中 root_password 是**明文
+# 凭据**。payload 会被这些口子下发（权限点都是 view，而 viewer 是只读角色）：
+#   · GET  /api/tasks          （列表）
+#   · GET  /api/tasks/{id}     （详情）
+#   · WS   /ws/logs            （tasks 快照，每秒推一次）
+# 不脱敏的话，任何能登录的人（哪怕只读账号，或一个被窃的会话）一次请求就能
+# 拿到全部实例的 root 密码，把 POST /api/instances/password 那道「重新输入
+# 自己的登录密码」的二次验证彻底绕过 —— 实测已复现。
+#
+# 注意：**不能在写入时删**，因为 worker 执行任务时就靠 payload 里的
+# root_password（PHP 版的 worker 是独立进程，从库里读 payload）。
+# 所以脱敏放在「所有对外响应」这一层，并且覆盖历史数据（老库里已经存了明文）。
+_TASK_SECRET_KEYS = ("root_password",)
+
+
+def sanitize_task_for_client(task):
+    """
+    返回可安全下发给客户端的任务副本：剥掉凭据类字段，只留存在性标记。
+    对非 dict 输入原样返回（调用方可能传 None）。
+    """
+    if not isinstance(task, dict):
+        return task
+    out = dict(task)
+    payload = out.get("payload")
+    if isinstance(payload, dict):
+        had = bool(payload.get("root_password"))
+        safe = {k: v for k, v in payload.items() if k not in _TASK_SECRET_KEYS}
+        if had:
+            safe["has_root_password"] = True
+        out["payload"] = safe
+    # payload 是 JSON 字符串时（某些路径直接透传库里的原始值）同样处理
+    elif isinstance(payload, str) and payload:
+        try:
+            import json as _json
+            decoded = _json.loads(payload)
+        except Exception:
+            return out
+        out["payload"] = sanitize_task_for_client({"payload": decoded})["payload"]
+    return out
+
 
 class LogSink:
     def __init__(self, store):
@@ -114,7 +157,11 @@ class TaskManager:
     def api_tasks_snapshot(self, limit=200):
         with self.api_lock:
             items = sorted(self.api_tasks.values(), key=lambda x: x["created_at"], reverse=True)
-        return items[:limit]
+        # ★ 下发前必须脱敏：payload 里带着创建任务用的 root_password，
+        #   而 /api/tasks 与 /ws/logs 的 tasks 快照只要 view 权限（viewer 是只读角色）。
+        #   不脱敏的话，只读账号一次请求就能拿到全部机器的 root 密码，
+        #   把「看明文要重新输入自己的登录密码」那道二次验证彻底绕过（实测过）。
+        return [sanitize_task_for_client(t) for t in items[:limit]]
 
     def cancel(self, task_id):
         self.cancel_flags[task_id] = True
@@ -493,9 +540,17 @@ class TaskManager:
 
             with created_lock:
                 result["created"] += 1
+            # ★★ 绝不把 root 密码拼进日志。
+            #    日志经 GET /api/logs 与 WS /ws/logs 对所有 view 权限用户开放，
+            #    而 viewer 就是只读角色 —— 一旦写进日志，任何能登录的人
+            #    （哪怕只读账号，或一个被窃的会话）一次请求就能拿走全部机器
+            #    的 root 密码，把 POST /api/instances/password 那道
+            #    「重新输入自己的登录密码」的二次验证彻底绕过。
+            #    实测过：viewer 调 /api/logs 能直接读到密码明文。
             self.log(f"[{label}] ✅ {name} 创建成功 | {actual_region}({zone}) | IP {ip} | "
                      f"{spec['machine_type']} | {spec['image_label']}"
-                     + (f" | Root密码 {root_password}" if root_password else ""),
+                     + (" | Root密码已记录（在实例列表点「显示密码」查看，需二次验证）"
+                        if root_password else ""),
                      task_id, "success")
 
             # ---------- 创建后 SSH 阶段 ----------
@@ -580,7 +635,12 @@ class TaskManager:
         if not command:
             return {"ok": False, "error": "命令为空"}
         targets = payload.get("targets") or []
-        all_instances = bool(payload.get("all", True))
+        # ★ 必须保留「三态」：None=调用方没指定 / True=强制打全部 / False=只打 targets。
+        #   早前写的是 bool(payload.get("all", True))，把「没指定」直接压成 True，
+        #   于是「传了 targets 但没写 all」会扩散到该账号下**全部**实例 ——
+        #   前端显式传了 all 所以 UI 不会踩到，但 curl / 脚本 / PHP 版会。
+        _raw_all = payload.get("all", None)
+        all_instances = None if _raw_all is None else bool(_raw_all)
         concurrency = max(1, min(int(payload.get("concurrency") or 10), 50))
         timeout = int(payload.get("command_timeout") or 600)
         idle = int(payload.get("idle_timeout") or 120)
@@ -629,7 +689,18 @@ class TaskManager:
                                     "password": vm.get("password") or "",
                                     "zone": vm.get("zone", ""),
                                     "account_id": vm.get("account_id")})
-        if all_instances or not target_list:
+        # ★ 「要不要扩散到全部实例」只看 all 的显式取值，不再让「没传 all」等同于 True。
+        #   给了 targets 时默认只打 targets；要打全部必须显式 all=true。
+        #   早前是 `if all_instances or not target_list`，于是 targets + 省略 all
+        #   （模型默认 True）会把命令打到该账号下所有实例 —— 这是会误伤生产机的行为。
+        if wanted:
+            expand_all = bool(all_instances)          # None 或 False → 不扩散
+        else:
+            expand_all = True if all_instances is None else bool(all_instances)
+        if expand_all:
+            if wanted:
+                self.log(f"[警告] 已显式指定 all=true：除指定的 {len(wanted)} 台外，"
+                         f"目标账号下的**其它实例也会执行**同一条命令", task_id, "warn")
             scoped = [a for a in accounts.values()
                       if not wanted or str(a["id"]) in {str(t.get("account_id")) for t in target_list}]
             for acc in (scoped or list(accounts.values())):

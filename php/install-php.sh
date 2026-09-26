@@ -160,7 +160,7 @@ ok "PHP $PHP_VER（$PHP_BIN）"
 
 # 扩展体检。缺关键扩展时尝试自动装一次，仍缺则报错并给出包名。
 missing_req=""
-for e in pdo_sqlite sqlite3 openssl curl mbstring json zlib; do
+for e in pdo_sqlite sqlite3 openssl curl mbstring json zlib gd; do
   php -m 2>/dev/null | grep -qix "$e" || missing_req="$missing_req $e"
 done
 if [ -n "$missing_req" ]; then
@@ -169,6 +169,7 @@ if [ -n "$missing_req" ]; then
     for e in $missing_req; do
       case "$e" in
         pdo_sqlite|sqlite3) pkg_install php-sqlite3 || true ;;
+        gd)             pkg_install php-gd || true ;;
         openssl)  pkg_install php-openssl || true ;;
         curl)     pkg_install php-curl || true ;;
         mbstring) pkg_install php-mbstring || true ;;
@@ -183,7 +184,7 @@ if [ -n "$missing_req" ]; then
     php -m 2>/dev/null | grep -qix "$e" || die "仍缺少必需扩展 $e，请手动安装后重跑"
   done
 fi
-ok "必需扩展齐全（pdo_sqlite/sqlite3/openssl/curl/mbstring/json/zlib）"
+ok "必需扩展齐全（pdo_sqlite/sqlite3/openssl/curl/mbstring/json/zlib/gd）"
 php -m 2>/dev/null | grep -qix sockets \
   && ok "sockets 可用 → WebSocket 实时日志可用" \
   || warn "缺 sockets → 实时日志自动退化为轮询（不影响功能）"

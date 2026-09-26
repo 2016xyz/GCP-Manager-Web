@@ -852,9 +852,15 @@ final class Inspect
     }
 
     // ==================================================================
-    // 批量入口（含并发缓存加锁）
+    // 批量入口（含并发缓存加锁 + 单飞）
     // ==================================================================
     public const INSPECT_TTL = 45;
+
+    /**
+     * 单飞（single-flight）等待上限（秒）。
+     * 抢不到计算锁时，最多等这么久去读别人算好的缓存；超时就自己算。
+     */
+    public const INSPECT_WAIT_SEC = 60;
 
     private static function cache_path(): string
     {
@@ -865,6 +871,25 @@ final class Inspect
         return $dir . '/inspect_cache.json';
     }
 
+    /**
+     * 「计算锁」文件路径 —— 与 cache_path() 同目录，名字固定。
+     *
+     * ★ 为什么需要第二把锁：cache_read 的 LOCK_SH 与 cache_write 的 LOCK_EX
+     *   各只覆盖「读」和「写」那一个瞬间，**几十次 GCP API 调用的计算过程
+     *   完全落在锁外**。PHP-FPM 是多进程，两个请求几乎同时判「缓存未命中」
+     *   就会各跑一遍完整勘察：GCP 侧的配额被白白吃掉一倍，慢一点还会被限流；
+     *   并发越多放大越狠。Python 版靠进程内的 threading.Lock 天然串行，
+     *   移植到多进程后这个保护丢了 —— 这里用一把独立的文件锁补回来。
+     */
+    private static function lock_path(): string
+    {
+        $dir = Config::dataDir();
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+        }
+        return $dir . '/inspect_cache.lock';
+    }
+
     private static function cache_key(string $keyPath, string $projectId, array $sections, string $region, string $zone): string
     {
         return md5($keyPath . '|' . $projectId . '|' . implode(',', $sections) . '|' . $region . '|' . $zone);
@@ -873,7 +898,13 @@ final class Inspect
     /**
      * 按名称逐节勘察。返回 {section: {ok, ms, data|error}}，顺序与输入一致。
      *
-     * 缓存：写入 data/inspect_cache.json，用 flock(LOCK_EX) 串行化。
+     * 缓存：写入 data/inspect_cache.json。
+     *   · cache_read / cache_write 各自用 flock 保护**读写那一个瞬间**
+     *     （避免读到写了一半的 JSON）。
+     *   · ★ 但这两把锁**不保护计算过程** —— 所以另外用一把「计算锁」实现
+     *     单飞：同一时刻只允许一个进程真正去打 GCP，其余进程等它把缓存写好
+     *     再读。详见 lock_path() 的注释。
+     *
      * 时间戳取「完成时刻」而非开始时刻（整套可能跑很久，若记开始时刻条目
      * 一存进去就过期，缓存永远不命中）。
      */
@@ -903,24 +934,60 @@ final class Inspect
             }
         }
 
-        $ins = new self($keyPath, $projectId, $email, $proxy, $proxyType);
-        $out = [];
-        foreach ($sections as $n) {
-            // 串行执行（PHP 无轻量线程）；结果字段与 Python 并发版一致
-            $out[$n] = $ins->section((string) $n, ['region' => $region, 'zone' => $zone]);
-        }
-        // 保持调用方传入的顺序
-        $ordered = [];
-        foreach ($sections as $n) {
-            $ordered[(string) $n] = $out[$n] ?? ['ok' => false, 'ms' => 0, 'error' => '未执行'];
-        }
-        $ordered['_ts'] = time();
-
+        // ── 单飞：抢「计算锁」。抢到的人去算，没抢到的人等结果 ──────────────
+        $lockFh = null;
         if ($useCache) {
-            self::cache_write($cacheFile, $ck, $ordered);
+            $lockFh = @fopen(self::lock_path(), 'c');
+            if ($lockFh !== false) {
+                @chmod(self::lock_path(), 0600);
+                if (!flock($lockFh, LOCK_EX | LOCK_NB)) {
+                    // 已有别的进程在算同一份勘察 → 轮询等它写好缓存
+                    $deadline = microtime(true) + self::INSPECT_WAIT_SEC;
+                    while (microtime(true) < $deadline) {
+                        usleep(250000);   // 250ms
+                        $hit = self::cache_read($cacheFile, $ck);
+                        if ($hit !== null) {
+                            flock($lockFh, LOCK_UN);
+                            fclose($lockFh);
+                            $hit['cached'] = true;
+                            $hit['age'] = (int) (time() - (float) ($hit['_ts'] ?? time()));
+                            return $hit;
+                        }
+                        if (flock($lockFh, LOCK_EX | LOCK_NB)) {
+                            break;        // 对方算完放了锁 → 这次由我来算
+                        }
+                    }
+                    // 等到超时也没拿到：不阻塞用户，自己算一遍（退化为旧行为）
+                }
+            }
         }
-        unset($ordered['_ts']);
-        return $ordered;
+
+        try {
+            $ins = new self($keyPath, $projectId, $email, $proxy, $proxyType);
+            $out = [];
+            foreach ($sections as $n) {
+                // 串行执行（PHP 无轻量线程）；结果字段与 Python 并发版一致
+                $out[$n] = $ins->section((string) $n, ['region' => $region, 'zone' => $zone]);
+            }
+            // 保持调用方传入的顺序
+            $ordered = [];
+            foreach ($sections as $n) {
+                $ordered[(string) $n] = $out[$n] ?? ['ok' => false, 'ms' => 0, 'error' => '未执行'];
+            }
+            $ordered['_ts'] = time();
+
+            if ($useCache) {
+                self::cache_write($cacheFile, $ck, $ordered);
+            }
+            unset($ordered['_ts']);
+            return $ordered;
+        } finally {
+            // ★ 无论成功/抛异常都要放锁，否则这把锁会把后续所有勘察卡到超时
+            if (is_resource($lockFh)) {
+                flock($lockFh, LOCK_UN);
+                fclose($lockFh);
+            }
+        }
     }
 
     private static function cache_read(string $file, string $ck): ?array

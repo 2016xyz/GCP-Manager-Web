@@ -938,30 +938,71 @@ final class ApiGcp
     }
 
     /**
-     * POST /api/instances/password  body: {name}
+     * POST /api/instances/password  body: {name, password}
      * → {ok, name, root_password}
-     * 这是**有意**的敏感接口（用户要按需查看自己建的实例密码），
-     * 但必须：权限点 view、只在本地有记录时返回、每次出示都写审计。
+     *
+     * ★★ 本接口必须做**登录密码二次复核 + 限速** —— 这是 Python 版的设计，
+     *    早前 PHP 版只搬了「出示 + 审计」，把复核和限速漏掉了。后果很严重：
+     *    前端（static/console.html 的 askReveal）因为 Python 版要求密码，
+     *    所以**照样会弹框让用户输入登录密码**，用户以为有二次验证 ——
+     *    而 PHP 后端直接忽略这个字段，只凭会话 Cookie 就回明文，
+     *    等于「界面看起来有防护、实际没有」，比明摆着没防护更危险。
+     *    另外实例列表只要 view 权限，viewer 是只读角色；没有复核的话，
+     *    任何能登录的人（哪怕只读账号、或一个被窃的会话）一次请求
+     *    就能拿到全部机器的 root 密码。
+     *
+     *    与 Python app.py:api_reveal_instance_password 逐条对齐：
+     *      ① password 必填 → 400
+     *      ② LoginGuard 按「用户名 + IP」双维度限速 → 429
+     *      ③ verifyLogin 复核登录密码，失败计入限速 → 403
+     *      ④ 只在本地有记录时返回，且每次出示都写审计
+     *
+     *    复用 LoginGuard 而不是自己写计数器：否则这个接口本身就成了
+     *    一个「用别人的会话暴力猜密码」的现成 oracle。
      */
     public static function revealInstancePassword(array $p): void
     {
         $b = Http::jsonBody();
-        $name = trim((string) ($b['name'] ?? ''));
+        $name     = trim((string) ($b['name'] ?? ''));
+        $password = (string) ($b['password'] ?? '');
+        $ip       = Http::clientIp();
+        $uname    = self::uname();
+
         if ($name === '') {
             Json::err('缺少实例名', 400);
         }
+        if ($password === '') {
+            Json::err('请输入当前账号的登录密码', 400);
+        }
+
+        // ② 限速（与登录共用同一套双维度计数）
+        [$ok, $why] = Auth::loginGuard()->check($uname, $ip);
+        if (!$ok) {
+            Users::addAudit($uname, $ip, 'reveal_root_password', $name, $why, false);
+            Json::err($why, 429);
+        }
+
+        // ③ 复核登录密码（verifyLogin 内部含哈希比对 + 失败计数 + 恒定耗时路径）
+        [$who, $_reason] = Users::verifyLogin($uname, $password);
+        if ($who === null) {
+            Auth::loginGuard()->fail($uname, $ip);
+            Users::addAudit($uname, $ip, 'reveal_root_password', $name, '密码校验失败', false);
+            // ★ 不回显 verifyLogin 的原始原因（可能暴露「账号已禁用」这类状态）
+            Json::err('登录密码不正确', 403);
+        }
+
         $vm = Store::getVm($name);
         if ($vm === null) {
-            Users::addAudit(self::uname(), Http::clientIp(), 'reveal_root_password',
-                $name, '未找到记录', false);
+            Users::addAudit($uname, $ip, 'reveal_root_password', $name, '未找到记录', false);
             Json::err('没有该实例的密码记录', 404);
         }
         $pw = (string) ($vm['password'] ?? '');
         if ($pw === '') {
-            Json::err('该实例没有记录密码', 404);
+            Users::addAudit($uname, $ip, 'reveal_root_password', $name, '无密码记录', false);
+            Json::err('该实例没有 root 密码记录（可能创建时用的是 SSH 密钥模式）', 404);
         }
-        Users::addAudit(self::uname(), Http::clientIp(), 'reveal_root_password',
-            $name, '已出示', true);
+
+        Users::addAudit($uname, $ip, 'reveal_root_password', $name, '已出示', true);
         Json::ok(['name' => $name, 'root_password' => $pw]);
     }
 

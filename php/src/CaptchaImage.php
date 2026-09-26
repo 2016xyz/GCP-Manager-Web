@@ -5,10 +5,11 @@
  * 为什么单独成文件：Auth.php 负责的是**安全逻辑**（哈希 / 限速 / 会话 / 权限），
  * 图形渲染是纯展示层、与安全无关，拆出来让 Auth.php 保持聚焦。
  *
- * 取舍
- *   · Python 版用 Pillow(PIL) 画 PNG。PHP 侧 **不引入 composer**，若环境装了 GD
- *     就画 PNG，否则回退到 SVG（前端 <img> 对 data:image/svg+xml 一样能显示）。
- *     当前部署环境（PHP 8.0 CLI，无 GD）走 SVG 分支。
+ * 依赖
+ *   · Python 版用 Pillow(PIL) 画 PNG；PHP 侧 **不引入 composer**，用 gd 扩展画 PNG。
+ *   · ★ gd 是**必需扩展**（不是可选）：没有 gd 就没有 PNG，而 SVG 降级会把验证码
+ *     明文写在响应里（等于没有验证码），所以这里选择直接报错而不是降级。
+ *     install-php.sh / bt-install.sh 的必需扩展清单已含 gd。
  *   · 干扰线/噪点用 random_int（契约红线 S8 禁止 rand/mt_rand）；验证码字符本身
  *     的随机性由 Auth::CaptchaStore 用 random_bytes 保证，渲染层只加视觉噪声。
  *   · 所有输出字符经 htmlspecialchars 转义（虽字符集固定为无特殊字符，仍做防护）。
@@ -22,16 +23,40 @@ final class CaptchaImage
     public const WIDTH  = 132;
     public const HEIGHT = 46;
 
-    /** 渲染为可直接塞进 <img src> 的 data URI（优先 PNG，回退 SVG） */
+    /**
+     * 渲染为可直接塞进 <img src> 的 data URI。
+     *
+     * ★ 已移除 SVG 降级路径。原实现是「装了 GD 画 PNG，没装就回退到把字符写成
+     *   `<text>` 的 SVG」，而 SVG 会 base64 后直接放进响应 JSON 的 `image` 字段 ——
+     *   调用方解开 base64 就能读到验证码，**完全不需要 OCR**。
+     *   实测（本机 PHP 8.0 无 GD）：GET /api/auth/captcha 解出的字符与库里的
+     *   验证码逐字符相同。也就是说在无 GD 的部署上（宝塔默认 PHP 常常没装 gd），
+     *   登录验证码这道防爆破环节等于不存在。
+     *
+     *   这类「界面看起来有、实际形同虚设」的防护比明摆着没有更危险：它会让
+     *   「登录有验证码」这个判断长期为真，从而掩盖真实的爆破风险。
+     *
+     *   所以现在**明确失败**：要求部署方装上 gd 扩展（install-php.sh / bt-install.sh
+     *   已把 gd 列入必需扩展清单），而不是给一个能被脚本直接读出的验证码。
+     *
+     * @throws RuntimeException 缺少 gd 扩展或绘图失败
+     */
     public static function dataUri(string $code): string
     {
-        if (extension_loaded('gd') && function_exists('imagecreatetruecolor')) {
-            $png = self::png($code);
-            if ($png !== null) {
-                return 'data:image/png;base64,' . base64_encode($png);
-            }
+        if (!extension_loaded('gd') || !function_exists('imagecreatetruecolor')) {
+            throw new RuntimeException(
+                '验证码服务不可用：缺少 PHP gd 扩展。请安装（宝塔：软件商店 → PHP 设置 → '
+                . '安装扩展 → gd；裸机：apt install php-gd / yum install php-gd），'
+                . '然后重启 PHP-FPM。不能用 SVG 降级 —— 那会把验证码明文写在响应里。'
+            );
         }
-        return self::svg($code);
+        $png = self::png($code);
+        if ($png === null) {
+            throw new RuntimeException(
+                '验证码服务不可用：gd 扩展存在但绘图失败，请检查 gd 安装是否完整'
+            );
+        }
+        return 'data:image/png;base64,' . base64_encode($png);
     }
 
     /** GD 可用时画 PNG；失败返回 null（交给 SVG 兜底） */
@@ -80,30 +105,20 @@ final class CaptchaImage
     }
 
     /** 无 GD 时的降级方案：带干扰的 SVG 文本验证码（与 Python render_svg 同风格） */
+    /**
+     * ★ 已移除：SVG 降级会把验证码明文写在响应里，等于没有验证码。
+     *
+     * 原实现把字符渲染成 `<text>` 元素，整个 SVG base64 后放进响应 JSON 的
+     * `image` 字段 —— 调用方解 base64 就能读出验证码，不需要 OCR。
+     * 实测（无 gd 的 PHP 8.0）：读出的字符与库里验证码逐字符相同。
+     *
+     * 这类「看起来有、实际形同虚设」的防护比明摆着没有更危险：它让
+     * 「登录有验证码」这个判断长期为真，掩盖了真实的爆破风险。
+     * 因此整条路径删除，只留这个会报错的桩，防止以后被接回鉴权流程。
+     */
     private static function svg(string $code): string
     {
-        $parts = '';
-        foreach (mb_str_split($code, 1, 'UTF-8') as $i => $ch) {
-            $x   = 18 + $i * 28;
-            $y   = 32 + random_int(-4, 4);
-            $rot = random_int(-18, 18);
-            $color = sprintf('rgb(%d,%d,%d)', random_int(20, 75), random_int(55, 110), random_int(120, 190));
-            $parts .= '<text x="' . $x . '" y="' . $y . '" font-size="26" font-weight="700" fill="' . $color . '" '
-                . 'transform="rotate(' . $rot . ' ' . $x . ' ' . $y . ')" font-family="monospace">'
-                . htmlspecialchars($ch, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</text>';
-        }
-        $lines = '';
-        for ($i = 0; $i < 5; $i++) {
-            $lines .= sprintf(
-                '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="rgba(148,163,184,.5)" stroke-width="1"/>',
-                random_int(0, self::WIDTH), random_int(0, self::HEIGHT),
-                random_int(0, self::WIDTH), random_int(0, self::HEIGHT)
-            );
-        }
-        $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' . self::WIDTH . '" height="' . self::HEIGHT
-            . '" viewBox="0 0 ' . self::WIDTH . ' ' . self::HEIGHT . '">'
-            . '<rect width="' . self::WIDTH . '" height="' . self::HEIGHT . '" fill="#f8fafc"/>'
-            . $lines . $parts . '</svg>';
-        return 'data:image/svg+xml;base64,' . base64_encode($svg);
-    }
-}
+        throw new RuntimeException(
+            'SVG 验证码降级已移除（会把验证码明文写在响应里）。请安装 PHP gd 扩展。'
+        );
+    }}

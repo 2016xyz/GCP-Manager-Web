@@ -32,12 +32,61 @@ const WS_COOKIE_NAME = 'gcp_sid';
 const WS_GUID        = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const WS_PUSH_EVERY  = 1.0;    // 日志/任务推送间隔（秒），与 Python ws_logs 一致
 const WS_HELLO_GRACE = 0.5;    // 握手后等首条 init 消息的最长时间
+/**
+ * 会话复检间隔（秒）。
+ *
+ * ★ 为什么必须复检：WebSocket 是长连接，握手只发生一次。如果只在握手时
+ *   校验会话，那么「管理员把某个被窃的会话踢掉」或「会话自然过期」之后，
+ *   那条连接**仍然在持续收到任务日志**（日志里含 SSH 命令回显，可能有
+ *   敏感输出）。实测确认：撤销会话后连接照常推送。
+ *   Python 版同样只在握手时校验一次（app.py:1680），属于两版共有的缺陷 ——
+ *   这里给两端都补上周期性复检。
+ */
 
 // ------------------------------------------------------------------
 // 启动参数
 // ------------------------------------------------------------------
 $host = Config::env('GCPWEB_HOST', '127.0.0.1');
 $port = Config::envInt('GCPWEB_PORT', 9001);
+
+/**
+ * ★ 命令行参数要真的生效。
+ *
+ * 文档（bt/GUIDE.md、bt/nginx-rewrite.conf）里写的是
+ *     php bin/ws-server.php --host 127.0.0.1 --port 9001
+ * 但早前这里只读环境变量、**完全忽略 $argv** —— 默认值恰好是
+ * 127.0.0.1:9001 所以一直没人发现。一旦用户因为端口冲突改成 9002，
+ * 服务仍监听 9001、而 Nginx 按文档反代到 9002，表现是「实时日志一直
+ * 连不上但没有报错」，排障非常痛苦。所以这里支持 --host/--port，
+ * 并且命令行优先于环境变量（更具体的设置胜出）。
+ */
+for ($i = 0; $i < count($argv); $i++) {
+    $a = (string) $argv[$i];
+    if (($a === '--host' || $a === '-H') && isset($argv[$i + 1])) {
+        $host = trim((string) $argv[++$i]);
+    } elseif (strncmp($a, '--host=', 7) === 0) {
+        $host = trim(substr($a, 7));
+    } elseif (($a === '--port' || $a === '-p') && isset($argv[$i + 1])) {
+        $port = (int) $argv[++$i];
+    } elseif (strncmp($a, '--port=', 7) === 0) {
+        $port = (int) substr($a, 7);
+    } elseif ($a === '--help' || $a === '-h') {
+        fwrite(STDOUT, "用法: php bin/ws-server.php [--host 127.0.0.1] [--port 9001]\n"
+            . "  也可用环境变量 GCPWEB_HOST / GCPWEB_PORT（命令行优先）\n"
+            . "  会话复检间隔: GCPWEB_WS_AUTH_EVERY（秒，默认 30）\n");
+        exit(0);
+    }
+}
+if ($host === '' || $port < 1 || $port > 65535) {
+    fwrite(STDERR, "监听地址或端口不合法：{$host}:{$port}\n");
+    exit(2);
+}
+
+// 会话复检间隔：默认 30 秒，可用 GCPWEB_WS_AUTH_EVERY 覆盖（便于测试与调参）
+$wsAuthEvery = (float) Config::env('GCPWEB_WS_AUTH_EVERY', '30');
+if ($wsAuthEvery <= 0) {
+    $wsAuthEvery = 30.0;
+}
 
 Config::ensureDataDirs();
 
@@ -65,6 +114,7 @@ fwrite(STDOUT, sprintf("[%s] ws-server 监听 ws://%s:%d/ws/logs\n", date('H:i:s
 $clients = [];
 $nextId = 1;
 $lastPush = 0.0;
+$lastAuth = 0.0;
 
 while (true) {
     // ---- 1) 构造 select 集合 ----
@@ -95,6 +145,7 @@ while (true) {
                     'sock' => $conn, 'hs' => false, 'buf' => '', 'since' => 0,
                     'helloAt' => microtime(true) + WS_HELLO_GRACE, 'helloSent' => false,
                     'user' => '', 'fragOp' => 0, 'fragBuf' => '', 'alive' => true,
+                    'token' => '', 'authAt' => 0.0,
                 ];
                 $nextId++;
             }
@@ -152,6 +203,36 @@ while (true) {
     if ($now - $lastPush >= WS_PUSH_EVERY) {
         $lastPush = $now;
         pushToAll($clients);
+    }
+
+    // ---- 5) 周期性复检会话 ----
+    // 握手只发生一次，长连接必须自己定期回头确认「这张票还作数吗」：
+    //   · 管理员在「会话管理」里踢掉某个会话（DELETE /api/sessions/{ref}）
+    //   · 会话自然过期（SESSION_TTL）
+    //   · 账号被禁用、或密码被改（改密会吊销该用户全部会话）
+    // 以上任一发生，都必须立刻断开，否则这条连接会继续收到任务日志。
+    if ($now - $lastAuth >= $wsAuthEvery) {
+        $lastAuth = $now;
+        foreach ($clients as $cid => $c) {
+            // 未完成握手的不查（还没有 token）
+            if (empty($c['hs'])) {
+                continue;
+            }
+            $still = ($c['token'] !== '') ? validateSession((string) $c['token']) : null;
+            // must_change 也算失效：与握手时的判定保持一致
+            $invalid = ($still === null) || !empty($still['must_change']);
+            if (!$invalid) {
+                continue;
+            }
+            fwrite(STDOUT, sprintf(
+                "[%s] 客户端 %d（%s）会话已失效，断开：%s\n",
+                date('H:i:s'), $cid, (string) $c['user'],
+                $still === null ? '已吊销/已过期/账号被禁用' : '需要修改密码'
+            ));
+            closeWith($c['sock'], $still === null ? 4401 : 4403,
+                $still === null ? 'session_revoked' : 'must_change_password');
+            dropClient($clients, $cid);
+        }
     }
 }
 
@@ -244,6 +325,9 @@ function tryHandshake(array &$clients, int $cid): bool
         return false;
     }
     $clients[$cid]['user'] = (string) ($sess['username'] ?? '');
+    // 记住 token 与本次校验时刻，供主循环做周期性复检（会话可能被吊销/过期）
+    $clients[$cid]['token']  = $token;
+    $clients[$cid]['authAt'] = microtime(true);
     return true;
 }
 

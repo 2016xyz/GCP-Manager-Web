@@ -125,10 +125,17 @@ def run_ssh_command(ip, username, password, command,
             connect_kwargs["allow_agent"] = False
         client.connect(**connect_kwargs)
         transport = client.get_transport()
-        if transport:
-            transport.set_keepalive(keepalive)
+        if transport is None:
+            # 连接建立失败时 get_transport() 会返回 None；早前直接往下走
+            # 会在 transport.set_keepalive 处抛 AttributeError（报错信息毫无线索）
+            raise RuntimeError("SSH 传输通道建立失败（connect 返回后未拿到 transport）")
+        transport.set_keepalive(keepalive)
 
-        chan = client.get_channel(0) if False else transport.open_session()
+        # 打开一个 session 通道执行命令。
+        # 早前这里写的是 `client.get_channel(0) if False else transport.open_session()`，
+        # 那条件恒为假，等于给后来的人留了个「这行到底走哪条分支」的谜题 ——
+        # 直接写成它实际执行的语义。
+        chan = transport.open_session()
         chan.get_pty()
         chan.set_combine_stderr(True)
         chan.settimeout(0.0)

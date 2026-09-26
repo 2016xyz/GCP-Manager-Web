@@ -47,7 +47,9 @@ final class ApiTask
         $db = Tasks::list($limit);
         Json::ok([
             'tasks'    => self::snapshot($db),
-            'db_tasks' => $db,
+            // ★ 原始行也含 payload（里面有 root_password 明文），必须脱敏后再下发。
+            //   两条都要处理：只脱敏其中一条等于没脱。
+            'db_tasks' => array_map([Tasks::class, 'sanitizeForClient'], $db),
         ]);
     }
 
@@ -64,13 +66,15 @@ final class ApiTask
         $out = [];
         foreach ($dbTasks as $t) {
             $status = (string) ($t['status'] ?? '');
+            // ★ payload 必须脱敏后再回给前端（详见 Tasks::sanitizeForClient 注释）
+            $safe = Tasks::sanitizeForClient($t);
             $out[] = [
                 'id'         => $t['id'],
                 'kind'       => $t['kind'],
                 'status'     => $status,
                 'status_cn'  => $labels[$status] ?? $status,
                 'message'    => (string) ($t['message'] ?? ''),
-                'payload'    => $t['payload'] ?? null,
+                'payload'    => $safe['payload'] ?? null,
                 'result'     => $t['result'] ?? null,
                 'created_at' => $t['created_at'] ?? null,
                 'updated_at' => $t['updated_at'] ?? null,
@@ -98,7 +102,10 @@ final class ApiTask
                 error_log('[gcpweb] failStale: ' . $e->getMessage());
             }
         }
-        Json::ok(['task' => $t, 'status_cn' => self::snapshot([$t])[0]['status_cn'] ?? '']);
+        // ★ 详情也要脱敏：Tasks::get() 返回的是**原始** payload（worker 执行需要它），
+        //   直接下发就成了绕过列表脱敏的后门。
+        $safe = Tasks::sanitizeForClient($t);
+        Json::ok(['task' => $safe, 'status_cn' => self::snapshot([$t])[0]['status_cn'] ?? '']);
     }
 
     /** POST /api/tasks/{id}/cancel → {ok, task_id, cancel} */

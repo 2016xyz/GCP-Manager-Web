@@ -168,13 +168,27 @@ class CaptchaStore:
         return True, "ok"
 
     def render_png(self, code):
-        """用 PIL 画一张带干扰的验证码图，返回 data URI。PIL 缺失时回退到 SVG。"""
+        """用 PIL 画一张带干扰的验证码图，返回 data URI。
+
+        ★ 这里**不再**降级到 SVG。原因：SVG 方案是把每个字符写成 `<text>`
+          再 base64 塞进 JSON 的 `image` 字段 —— 任何脚本解开 base64 就能直接
+          读到验证码，根本不需要 OCR。也就是说「Pillow 没装」的部署上，
+          验证码这道防爆破环节等于不存在（实测：解出的字符与原码完全一致）。
+        Pillow 是 requirements.txt 里声明的硬依赖，所以这里选择**明确失败**：
+        宁可让登录页报「验证码服务不可用、请安装 Pillow」，也不能提供一个
+        看起来有、实际形同虚设的验证码 —— 后者不会被任何人发现。
+        """
         try:
             png = self.capture_png(code)
-        except ImportError:
-            return self.render_svg(code)
+        except ImportError as exc:
+            raise RuntimeError(
+                "验证码服务不可用：缺少 Pillow。请执行 pip install Pillow 后重启服务"
+                "（不能用 SVG 降级 —— 那会把验证码明文写在响应里，等于没有验证码）"
+            ) from exc
         if png is None:
-            return self.render_svg(code)
+            raise RuntimeError(
+                "验证码服务不可用：Pillow 存在但生成图片失败。请检查 Pillow 安装是否完整"
+            )
         b64 = base64.b64encode(png).decode("ascii")
         return f"data:image/png;base64,{b64}"
 
@@ -318,7 +332,22 @@ class CaptchaStore:
 
     @staticmethod
     def render_svg(code):
-        """无 PIL 时的降级方案：SVG 文本验证码（仍带干扰）"""
+        """★ 已停用：SVG 会把验证码字符**明文**写在响应里，等于没有验证码。
+
+        原实现把每个字符渲染成 `<text>` 元素，整个 SVG base64 后放进响应 JSON 的
+        `image` 字段 —— 调用方解 base64 就能直接读出验证码，根本不需要 OCR
+        （实测：解出的字符与库里的验证码逐字符相同）。
+
+        这类「界面看起来有防护、实际形同虚设」的东西比明摆着没有更危险：
+        它会让「登录有验证码」这个判断长期为真，从而掩盖真实的爆破风险。
+        所以这里直接报错，不允许任何调用方再走这条路。
+        下面保留原实现仅供对照，永远不会被执行到。
+        """
+        raise RuntimeError(
+            "SVG 验证码降级已停用（会把验证码明文写在响应里）。"
+            "请安装 Pillow：pip install Pillow"
+        )
+        # ---- 以下为原实现，保留作对照，不可达 ----
         import html
         parts = []
         for i, ch in enumerate(code):

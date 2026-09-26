@@ -239,6 +239,36 @@ SAVINGS_ITEMS = [
 ]
 
 
+def safe_int(value, default=0, lo=None, hi=None):
+    """把用户输入安全地转成整数：非法值回落到 default，并按需夹取范围。
+
+    ★ 为什么需要这个函数：
+      这些数值字段直接来自请求体，或来自**已持久化的配置**。早前是裸 int()：
+        · 传 "abc" → ValueError → 接口 500（/api/cost/estimate、/api/savings、
+          /api/create 都能被打出 500）
+        · 传 -1 / 1e9 → 原样透到 GCP，等 GCP 报错，报错点离现场很远
+        · 最坑的是 /api/config 会把任意键值持久化：用户一旦把 disk_size_gb
+          存成非数字，**之后每次「创建实例」都 500**
+      所以这里统一「非法即回落 + 范围夹取」，绝不抛异常。
+    """
+    if isinstance(value, bool):          # True/False 不当成数字用
+        return default
+    try:
+        if isinstance(value, int):
+            n = value
+        elif isinstance(value, float):
+            n = int(value)
+        else:
+            n = int(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
 def savings_status(spec):
     """按 spec 计算每个省钱项的开关状态，供前端展示"""
     spec = spec or {}
@@ -254,7 +284,7 @@ def savings_status(spec):
         "pd_standard_or_free": (
             spec.get("machine_type") == "e2-micro"
             and spec.get("disk_type") == "pd-standard"
-            and int(spec.get("disk_size_gb") or 0) <= 30
+            and safe_int(spec.get("disk_size_gb"), 0, 0, 65536) <= 30
         ),
         "preemptible_or_spot": on("preemptible") or on("spot"),
     }

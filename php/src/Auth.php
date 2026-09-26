@@ -290,7 +290,13 @@ final class Auth
 
     /**
      * 直接产出 GET /api/auth/captcha 的响应体（含 ok），供 index.php 一句话返回。
+     *
+     * ★ 验证码图渲染失败时**抛 RuntimeException**，由 index.php 的兜底转成 503 +
+     *   可读原因。这里刻意不「降级成 SVG」——那会把验证码明文写进响应，
+     *   等于把登录防爆破保护变成摆设（详见 CaptchaImage::dataUri 的注释）。
+     *
      * @return array{captcha_id:string,image:string,expires_in:int,ok:bool}
+     * @throws RuntimeException 缺少 gd 扩展或绘图失败
      */
     public static function captchaNew(): array
     {

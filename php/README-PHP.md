@@ -112,7 +112,8 @@ GCPWEB_DATA_DIR=/opt/gcp-manager-web/data php -S 127.0.0.1:8080 -t public public
 | 并发模型 | Python 单进程多线程 → PHP-FPM 多进程。写操作靠 SQLite WAL + `busy_timeout=5000` + `BEGIN IMMEDIATE`，**不用**文件锁模拟线程锁 |
 | 后台任务 | Python 用线程；PHP-FPM 没有常驻线程，改为落库 + CLI worker 领取（宝塔可用计划任务兜底） |
 | 实时日志 | Python 在应用内挂 WebSocket；PHP 用独立 CLI 进程（`bin/ws-server.php`） |
-| 图形验证码 | Python 用 Pillow 画图；PHP 用 GD 画图（**要求 `gd` 扩展**；若没有则退化为 SVG 输出，见 `Auth.php` 说明） |
+| 图形验证码 | Python 用 Pillow 画图；PHP 用 **gd 扩展**画 PNG。★ `gd` 是**必需**的：早前设计成「没有 gd 就降级成 SVG」，但 SVG 会把验证码字符明文写进响应（解 base64 即可读出，无需 OCR）—— 实测在无 gd 的 PHP 上，读出的字符与库里验证码逐字符相同，验证码等于不存在。现在改为**直接报错**（`GET /api/auth/captcha` 回 503 并说明装 gd），不提供形同虚设的降级 |
+| 验证码降级 | **没有降级**。缺 gd / 缺 Pillow 都会明确失败（PHP 回 503，Python 回 503），要求部署方装上依赖。这是有意取舍：一个「看起来有防护、实际可被脚本直接读出」的验证码，比明摆着没有更危险 |
 
 ---
 

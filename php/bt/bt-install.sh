@@ -117,11 +117,11 @@ fi
 c_info "检查扩展…"
 ext_out="$("$PHP_BIN" -m 2>/dev/null || true)"
 missing=()
-for e in pdo_sqlite sqlite3 openssl curl mbstring json zlib; do
+for e in pdo_sqlite sqlite3 openssl curl mbstring json zlib gd; do
   if printf '%s\n' "$ext_out" | grep -qix "$e"; then :; else missing+=("$e"); fi
 done
 if [ "${#missing[@]}" -eq 0 ]; then
-  c_ok "必需扩展齐全（pdo_sqlite/sqlite3/openssl/curl/mbstring/json/zlib）"
+  c_ok "必需扩展齐全（pdo_sqlite/sqlite3/openssl/curl/mbstring/json/zlib/gd）"
 else
   c_bad "缺少扩展：${missing[*]}"
   c_info "宝塔安装路径：软件商店 → PHP $PHP_VER → 设置 → 安装扩展 → 勾选上面这些"

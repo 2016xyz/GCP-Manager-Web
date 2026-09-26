@@ -2,9 +2,42 @@
 """本地 SQLite 存储层：账号 / 实例密码 / 任务 / 日志 / 设置"""
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
+
+# ---------------------------------------------------------------------------
+# 日志出口擦除
+# ---------------------------------------------------------------------------
+# 日志表历史上被写入过明文凭据（例如创建实例成功时拼的 `| Root密码 <明文>`），
+# 而 /api/logs 与 /ws/logs 对所有 view 权限用户开放 —— viewer 是只读角色。
+# 光在写入侧不再写是不够的：**已经落库的那些行**照样会被读走，所以出口兜一道。
+#
+# 只匹配「键 + 值」的确定形态，不做泛化替换，避免把正常日志文本改花：
+#   Root密码 <值>   /   root_password=<值>   /   password: <值>   /   密码=<值>
+_LOG_SECRET_RE = re.compile(
+    r"(Root密码|root_password|ROOT_PASSWORD|password|passwd|密码)"
+    r"(\s*[:：=]\s*|\s+)"
+    r"(\S+)",
+    re.IGNORECASE,
+)
+
+# 另一类常见泄漏形态：sshpass 的 `-p <密码>`（本项目当前不用 sshpass，
+# 但 SSH 相关日志里一旦出现就是明文凭据，顺手兜住）
+_LOG_SSHPASS_RE = re.compile(r"(sshpass\s+-p\s*)(\S+)")
+
+
+def sanitize_log_row(row):
+    """擦掉日志文本里的明文凭据值，保留键名便于排查。"""
+    if not isinstance(row, dict):
+        return row
+    msg = row.get("message")
+    if isinstance(msg, str) and msg:
+        msg = _LOG_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", msg)
+        msg = _LOG_SSHPASS_RE.sub(lambda m: f"{m.group(1)}***", msg)
+        row["message"] = msg
+    return row
 
 
 class Store:
@@ -264,7 +297,11 @@ class Store:
             else:
                 rows = self.conn.execute(
                     "SELECT * FROM logs WHERE id>? ORDER BY id LIMIT ?", (since_id, limit)).fetchall()
-            return [dict(r) for r in rows]
+            # ★ 出口擦除：日志经 /api/logs 与 /ws/logs 对所有 view 权限用户开放
+            #   （viewer 是只读角色）。历史上创建实例时会写
+            #   `... | Root密码 <明文>`，这些行**已经在库里**，光靠「不写新日志」
+            #   清不掉 —— 不在这里擦，老部署升级后照样能被只读账号读走密码。
+            return [sanitize_log_row(dict(r)) for r in rows]
 
     def clear_logs(self):
         with self.lock:

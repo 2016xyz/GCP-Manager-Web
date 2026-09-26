@@ -1514,6 +1514,984 @@ final class Gcp
         return $out;
     }
 
+    // ==================================================================
+    // 任务编排层（供 bin/task-runner.php 调用）—— 逐条对照 core/tasks.py
+    //
+    // 为什么放在 Gcp.php 而不是 task-runner.php：
+    //   task-runner 是「领取 / 调度 / 终态兜底」的壳；真正会变的业务语义
+    //   （区域配额规划、命名规则、换区重试、创建后 SSH 阶段…）属于 GCP
+    //   领域逻辑。放在这里可以与 core/tasks.py 逐条对照移植，也让任何入口
+    //   （CLI / 未来的 HTTP 同步调用）复用同一套行为，而不是把规则散进脚本。
+    //
+    // 与 Python 的执行模型差异（明确写出来，避免被误判为漏写）：
+    //   Python 是单进程 + ThreadPoolExecutor，create 的并发由
+    //   concurrency / account_workers 控制；PHP 这里是「一个任务 = 一个
+    //   task-runner 进程」，进程内顺序执行（宝塔环境不引入 pcntl/fork，
+    //   保持零依赖）。因此 concurrency / account_workers 在 PHP 侧**不生效**：
+    //   结果集（每账号台数、每区配额上限、单台失败不影响其余、换区重试）
+    //   与 Python 完全一致，只是不并行。
+    //
+    // 跨进程状态：一律走 SQLite（Store / Tasks），不用文件锁、不用内存缓存。
+    // ==================================================================
+
+    /** 从 accounts 表行构造 GCP 客户端（与 ApiGcp::client 同构） */
+    private static function account_client(array $acc): Gcp
+    {
+        return new Gcp(
+            (string) ($acc['key_path'] ?? ''),
+            (string) ($acc['project_id'] ?? ''),
+            (string) ($acc['email'] ?? ''),
+            (string) ($acc['proxy'] ?? ''),
+            (string) ($acc['proxy_type'] ?? 'HTTPS')
+        );
+    }
+
+    /**
+     * 区域池解析 —— 对应 Python resolve_region_pool。
+     * 返回 [区域列表, 每区上限, 是否限定单区]。
+     *
+     * region_mode：auto_free（默认，GCP 永久免费三区）/ auto_paid /
+     *              custom（用 spec.regions 指定列表）/ single（spec.region 单区）
+     */
+    public static function resolve_region_pool(?array $spec): array
+    {
+        $spec = $spec ?? [];
+        $mode = trim((string) ($spec['region_mode'] ?? ''));
+        if ($mode === '') {
+            $mode = 'auto_free';
+        }
+        // Python 是 int(spec.get("max_per_region") or 4)：null / 空 / 0 都回落到 4
+        $rawMax = $spec['max_per_region'] ?? null;
+        $maxPerRegion = ($rawMax === null || $rawMax === '' || (int) $rawMax === 0) ? 4 : (int) $rawMax;
+
+        switch ($mode) {
+            case 'auto_paid':
+                return [array_keys(Catalog::PAID_REGIONS), $maxPerRegion, false];
+
+            case 'custom':
+                $pool = [];
+                foreach ((array) ($spec['regions'] ?? []) as $r) {
+                    $r = trim((string) $r);
+                    if ($r !== '') {
+                        $pool[] = $r;
+                    }
+                }
+                // Python：只保留目录里认识的区域；一个都不认识时保留原样，
+                // 交给 GCP 去报「区域不存在」，而不是静默换成免费区。
+                $all = Catalog::all_regions();
+                $known = array_values(array_filter($pool, static fn(string $r): bool => isset($all[$r])));
+                if ($known !== []) {
+                    $pool = $known;
+                }
+                if ($pool === []) {
+                    $pool = array_keys(Catalog::FREE_REGIONS);
+                }
+                return [$pool, $maxPerRegion, false];
+
+            case 'single':
+                // region 可能被写成 zone（us-west1-b）：不归一化就会拼出
+                // us-west1-b-b 这种不存在的 zone，被 GCP 报成「权限不足」。
+                $region = trim((string) ($spec['region'] ?? ''));
+                if ($region === '') {
+                    $region = 'us-central1';
+                }
+                if (substr_count($region, '-') >= 2) {
+                    $region = substr($region, 0, (int) strrpos($region, '-'));
+                }
+                return [[$region], 1000000, true];
+
+            case 'auto_free':
+            default:
+                return [array_keys(Catalog::FREE_REGIONS), $maxPerRegion, false];
+        }
+    }
+
+    /**
+     * 解析某 region 下真实存在的 zone —— 对应 Python zones_for_region。
+     *
+     * 两个坑必须保留同样的处理（都是 Python 侧实测踩出来的）：
+     *   · 入参可能是 zone；不归一化会拼出不存在的 zone。
+     *   · a/b/c/d/f 后缀只是**离线兜底**（无网络/无权限时）：各 region 实际
+     *     后缀不同（us-west1 只有 a/b/c），所以优先向 GCP 拉真实列表。
+     * 只在拿到真实列表时进 static 缓存（一次任务内同区只查一次）；兜底结果
+     * 不缓存，以便下一次能重试真实查询。
+     */
+    private static function zones_for_region(Gcp $gcp, string $region): array
+    {
+        $region = trim($region);
+        if (substr_count($region, '-') >= 2) {
+            $region = substr($region, 0, (int) strrpos($region, '-'));
+        }
+        static $cache = [];
+        if (isset($cache[$region])) {
+            return $cache[$region];
+        }
+        $real = [];
+        try {
+            $real = $gcp->list_zones($region);
+        } catch (Throwable $e) {
+            $real = [];   // 无权限/瞬时错误 → 走兜底
+        }
+        if ($real !== []) {
+            return $cache[$region] = $real;
+        }
+        $fallback = [];
+        foreach (['a', 'b', 'c', 'd', 'f'] as $s) {
+            $fallback[] = $region . '-' . $s;
+        }
+        return $fallback;
+    }
+
+    /** 随机取一项（等价 Python random.choice；S8：只用 random_int） */
+    private static function pick(array $items)
+    {
+        $n = count($items);
+        return $n === 0 ? null : $items[random_int(0, $n - 1)];
+    }
+
+    /** 预留一个区域配额 —— 对应 Python 的 reserve()。返回 [选中区|null, 当时可用区列表] */
+    private static function reserve_region(array $pool, int $maxPerRegion, bool $single,
+                                           array $spec, array &$regionCount): array
+    {
+        $avail = [];
+        foreach ($pool as $r) {
+            if (($regionCount[$r] ?? 0) < $maxPerRegion) {
+                $avail[] = $r;
+            }
+        }
+        if ($avail === []) {
+            return [null, []];      // 所有可用区域配额已满
+        }
+        if ($single) {
+            $chosen = $pool[0];
+        } elseif (!empty($spec['region']) && in_array((string) $spec['region'], $avail, true)) {
+            // 指定区域仍在可用列表里就优先用它（与 Python 同：单区优先填满再换区）
+            $chosen = (string) $spec['region'];
+        } else {
+            $chosen = self::pick($avail);
+        }
+        if (!array_key_exists($chosen, $regionCount)) {
+            $regionCount[$chosen] = 0;
+        }
+        $regionCount[$chosen]++;
+        return [$chosen, $avail];
+    }
+
+    /** 归还配额 —— 对应 Python 的 release() */
+    private static function release_region(array &$regionCount, string $region): void
+    {
+        if ($region !== '' && array_key_exists($region, $regionCount)) {
+            $regionCount[$region] = max(0, $regionCount[$region] - 1);
+        }
+    }
+
+    /** 判断创建失败是否属于「可用区资源耗尽」（值得换区重试）。PHP 的
+     *  create_instance 返回的是带前缀的长文案，所以用包含判断而不是等值 ——
+     *  Python 那边是精确比对 "资源耗尽" 这个哨兵值，语义等价。 */
+    private static function is_resource_exhausted(string $msg): bool
+    {
+        return stripos($msg, 'ZONE_RESOURCE_POOL_EXHAUSTED') !== false
+            || stripos($msg, 'resource_pool_exhausted') !== false
+            || strpos($msg, '资源耗尽') !== false;
+    }
+
+    /**
+     * dry-run 预览 —— 对应 Python _plan_preview。
+     * 只做**只读**清点（list_instances），不创建任何资源、不产生费用。
+     */
+    private static function plan_preview(array $accounts, int $count, array $spec, array $rawSpec): array
+    {
+        $out = [];
+        foreach ($accounts as $acc) {
+            try {
+                $gcp = self::account_client($acc);
+                $instances = $gcp->list_instances();
+            } catch (Throwable $e) {
+                $out[] = ['account' => (string) ($acc['email'] ?? ''), 'error' => $e->getMessage()];
+                continue;
+            }
+            [$pool, $maxPerRegion] = self::resolve_region_pool($rawSpec);
+            $used = [];
+            foreach ($instances as $inst) {
+                $region = Catalog::region_of_zone((string) ($inst['zone'] ?? ''));
+                $used[$region] = ($used[$region] ?? 0) + 1;
+            }
+            $avail = [];
+            foreach ($pool as $r) {
+                if (($used[$r] ?? 0) < $maxPerRegion) {
+                    $avail[] = $r;
+                }
+            }
+            $out[] = [
+                'account'            => (string) ($acc['email'] ?? ''),
+                'project_id'         => (string) ($acc['project_id'] ?? ''),
+                'existing_instances' => count($instances),
+                // 空 map 必须序列化成 {} 而不是 []，否则前端 typeof 判断会走偏
+                'region_usage'       => $used === [] ? new stdClass() : $used,
+                'available_regions'  => $avail,
+                'planned_instances'  => $count,
+                'can_create'         => $avail !== [],
+                'machine_type'       => (string) $spec['machine_type'],
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * 【任务编排】批量创建实例
+     *   = Python submit_create + _run_create_batch + _create_for_account + run_one。
+     *
+     * @param array    $payload /api/create 请求体（dry_run 已由 task-runner 拦截时可不传）
+     * @param string   $taskId  任务 id（写日志 + 取消轮询）
+     * @param callable $log     $log(string $msg, string $level='info', ?string $taskId=null)
+     * @return array{ok:bool,message:string,result:array}
+     */
+    public static function runCreateTask(array $payload, string $taskId, callable $log): array
+    {
+        $spec    = self::build_instance_spec($payload['spec'] ?? null);
+        $rawSpec = is_array($payload['spec'] ?? null) ? $payload['spec'] : [];
+
+        // Python 是 int(... or N)：null / '' 都取默认值
+        $intOr = static function ($v, int $d): int {
+            $i = (int) ($v === null ? 0 : $v);
+            return $i > 0 ? $i : $d;
+        };
+        $count    = max(1, $intOr($payload['count'] ?? null, 1));
+        $retries  = max(0, min($intOr($payload['retry_count'] ?? null, 2), 5));
+
+        // 账号筛选：account_ids 为空 = 全部账号
+        $accounts = Store::getAccounts();
+        $wanted = [];
+        foreach ((array) ($payload['account_ids'] ?? []) as $w) {
+            $wanted[] = (string) $w;
+        }
+        if ($wanted !== []) {
+            $accounts = array_values(array_filter(
+                $accounts,
+                static fn(array $a): bool => in_array((string) $a['id'], $wanted, true)
+            ));
+        }
+        if ($accounts === []) {
+            // 与 Python 一致：这是业务性拒绝，返回 ok=false → task-runner 落 failed
+            return ['ok' => false, 'message' => '没有匹配的账号，请先导入 GCP 服务账号 JSON', 'result' => []];
+        }
+
+        $log(sprintf('=== 任务 %s：%d 个账号 × %d 台 ===', $taskId, count($accounts), $count), 'info', $taskId);
+        // 把网络也打进日志：排查「防火墙 404 networks/default not found」时，
+        // 看不到用的哪个 VPC 就只能靠猜（Python 侧就是为此加的）。
+        $log(sprintf(
+            '[规格] 机型=%s 镜像=%s 磁盘=%s %sGB 网络=%s/%s 区域模式=%s%s',
+            $spec['machine_type'], $spec['image_label'], $spec['disk_type'], $spec['disk_size_gb'],
+            (string) (($spec['network'] ?? '') !== '' ? $spec['network'] : 'default'),
+            (string) (($spec['subnet'] ?? '') !== '' ? $spec['subnet'] : 'default'),
+            (string) ($rawSpec['region_mode'] ?? 'auto_free'),
+            ((string) ($rawSpec['region_mode'] ?? '')) === 'single' ? (' 指定区域=' . (string) ($spec['region'] ?? '')) : ''
+        ), 'info', $taskId);
+
+        if (!empty($payload['dry_run'])) {
+            $plan = self::plan_preview($accounts, $count, $spec, $rawSpec);
+            $log('dry-run 预览完成（只读清点，未创建任何资源）', 'success', $taskId);
+            return ['ok' => true, 'message' => 'dry-run 预览完成',
+                    'result' => ['dry_run' => true, 'plan' => $plan]];
+        }
+
+        $loginMode     = trim((string) ($payload['login_mode'] ?? '')) ?: 'root_password';
+        $sshPublicKey  = trim((string) ($payload['ssh_public_key'] ?? ''));
+        $rootPasswordIn = trim((string) ($payload['root_password'] ?? ''));
+        $postCommand   = trim((string) ($payload['post_command'] ?? ''));
+        $verifyCommand = trim((string) ($payload['verify_command'] ?? ''));
+
+        // 安装预设展开：Python 是在 app.py（API 层）做的，而 PHP 的 ApiGcp::create
+        // 只做参数转发，所以这一步必须落在编排层，否则勾选的 installs 会静默失效。
+        $installs = InstallPresets::normalize($payload['installs'] ?? []);
+        if ($installs !== []) {
+            $presetScript = InstallPresets::build_script($installs);
+            if ($presetScript !== '') {
+                // 用户自己写的 post_command 优先级更高 —— 预设只是省去手写
+                $postCommand = $postCommand === '' ? $presetScript : ($postCommand . "\n\n" . $presetScript);
+            }
+            if ($verifyCommand === '') {
+                $verifyCommand = InstallPresets::verify_command($installs);
+            }
+            if (!isset($payload['ssh_timeout'])) {
+                $payload['ssh_timeout'] = 300;
+            }
+        }
+
+        if (($spec['image_os'] ?? 'linux') === 'windows' && $loginMode === 'root_password') {
+            // 文案沿用 Python 原文；但行为同样是「照旧生成 root 密码 + startup-script」
+            // （Python 这里也只有告警，并未真的改走密钥模式）—— 保持两版一致。
+            $log('[警告] 镜像为 Windows，startup-script 不会执行 bash，Root 密码模式无效，已按 SSH 密钥模式处理', 'warn', $taskId);
+        }
+
+        $started = microtime(true);
+        $results = [];
+        foreach ($accounts as $acc) {
+            if (Tasks::cancelRequested($taskId)) {
+                break;
+            }
+            $results[] = self::create_for_account(
+                $taskId, $acc, $count, $spec, $rawSpec, $retries,
+                $loginMode, $sshPublicKey, $rootPasswordIn, $postCommand, $verifyCommand,
+                $installs, $payload, $log
+            );
+        }
+
+        $totalOk = 0;
+        $totalFail = 0;
+        $firstErr = '';
+        foreach ($results as $r) {
+            $totalOk  += (int) ($r['created'] ?? 0);
+            $totalFail += (int) ($r['failed'] ?? 0);
+            if ($firstErr === '' && !empty($r['error'])) {
+                $firstErr = (string) $r['error'];
+            }
+            // 账号级没有 error、但单台全失败（例如配额不足）时，把第一台的原因带出来
+            if ($firstErr === '') {
+                foreach ((array) ($r['instances'] ?? []) as $it) {
+                    if (empty($it['ok']) && !empty($it['error'])) {
+                        $firstErr = (string) $it['error'];
+                        break;
+                    }
+                }
+            }
+        }
+        $elapsed = round(microtime(true) - $started, 1);
+
+        $summary = [
+            'accounts'          => count($accounts),
+            'per_account_count' => $count,
+            'created'           => $totalOk,
+            'failed'            => $totalFail,
+            'elapsed_sec'       => $elapsed,
+            'results'           => $results,
+        ];
+
+        // ★ 与 Python 的**有意差异**：Python 只在抛异常时判 failed，
+        //   「所有账号都失败 / 一台都没建成」（例如密钥文件不存在）会得到
+        //   status=done + 成功 0 台 —— 界面上像是「跑完了、没问题」。
+        //   这里把「一台都没建成且确实有失败原因」收敛为 failed，让失败不会被
+        //   当成成功（条目级结果仍然逐条保留，便于定位是哪个账号/哪台）。
+        $allFailed = ($totalOk === 0 && ($totalFail > 0 || $firstErr !== ''));
+        $message = sprintf('完成：成功 %d 台，失败 %d 台，耗时 %ss', $totalOk, $totalFail, $elapsed);
+        if ($allFailed) {
+            // totalFail 为 0 说明失败发生在「账号级」（客户端构造/实例清点），
+            // 逐台循环根本没跑起来 —— 这时说「失败 0 台」看着自相矛盾，单独交代。
+            $message = $totalFail > 0
+                ? sprintf('全部失败：成功 0 台，失败 %d 台，耗时 %ss', $totalFail, $elapsed)
+                : sprintf('全部失败：成功 0 台（%d 个账号在准备阶段就失败），耗时 %ss', count($results), $elapsed);
+            if ($firstErr !== '') {
+                $message .= '；原因：' . mb_substr($firstErr, 0, 300);
+            }
+        }
+        $log(sprintf('=== 任务 %s 结束：成功 %d / 失败 %d ===', $taskId, $totalOk, $totalFail),
+            $allFailed ? 'warn' : 'success', $taskId);
+
+        return ['ok' => !$allFailed, 'message' => $message, 'result' => $summary];
+    }
+
+    /**
+     * 单账号创建 —— 对应 Python _create_for_account。
+     * 返回 ['account','account_id','project_id','created','failed','instances',(error)]。
+     */
+    private static function create_for_account(string $taskId, array $acc, int $count, array $spec,
+        array $rawSpec, int $retries, string $loginMode, string $sshPublicKey, string $rootPasswordIn,
+        string $postCommand, string $verifyCommand, array $installs, array $payload, callable $log): array
+    {
+        $email = trim((string) ($acc['email'] ?? ''));
+        $label = $email !== '' ? $email : (string) ($acc['project_id'] ?? '');
+        $result = [
+            'account'    => $label,
+            'account_id' => $acc['id'],
+            'project_id' => (string) ($acc['project_id'] ?? ''),
+            'created'    => 0,
+            'failed'     => 0,
+            'instances'  => [],
+        ];
+
+        try {
+            $gcp = self::account_client($acc);
+        } catch (Throwable $e) {
+            $log(sprintf('[%s] 初始化 GCP 客户端失败：%s', $label, $e->getMessage()), 'error', $taskId);
+            $result['error'] = $e->getMessage();
+            return $result;
+        }
+
+        // SSH 密钥模式：公钥写进**项目级**元数据（与 Python 一致，不是实例级）
+        if ($loginMode === 'ssh_key' && $sshPublicKey !== '') {
+            [$ok, $msg] = $gcp->add_ssh_key($sshPublicKey, 'root');
+            $log(sprintf('[%s] SSH 公钥注入%s', $label, $ok ? '成功' : ('失败：' . $msg)),
+                $ok ? 'success' : 'warn', $taskId);
+        }
+
+        [$pool, $maxPerRegion, $single] = self::resolve_region_pool($rawSpec);
+        $regionCount = array_fill_keys($pool, 0);
+        try {
+            $existing = $gcp->list_instances();
+            foreach ($existing as $inst) {
+                $region = Catalog::region_of_zone((string) ($inst['zone'] ?? ''));
+                if (array_key_exists($region, $regionCount)) {
+                    $regionCount[$region]++;
+                }
+            }
+        } catch (Throwable $e) {
+            // 清点失败就不能做配额规划 → 该账号整批放弃（与 Python 一致），
+            // 但不影响其它账号，也不把任务留在 running。
+            $log(sprintf('[%s] 实例清点失败：%s', $label, $e->getMessage()), 'error', $taskId);
+            $result['error'] = $e->getMessage();
+            return $result;
+        }
+        $log(sprintf('[%s] 现有实例区域分布：%s', $label, (string) json_encode($regionCount, JSON_UNESCAPED_UNICODE)),
+            'info', $taskId);
+
+        $createdCount = 0;
+        for ($idx = 1; $idx <= $count; $idx++) {
+            if (Tasks::cancelRequested($taskId)) {
+                $log(sprintf('[%s] 检测到取消请求，停止后续创建', $label), 'warn', $taskId);
+                break;
+            }
+            $item = self::create_one($taskId, $gcp, $acc, $idx, $spec, $payload, $pool, $maxPerRegion,
+                $single, $regionCount, $retries, $loginMode, $rootPasswordIn, $postCommand,
+                $verifyCommand, $installs, $label, $createdCount, $log);
+            $result['instances'][] = $item;
+            if (empty($item['ok'])) {
+                $result['failed']++;
+            }
+        }
+        $result['created'] = $createdCount;
+        $log(sprintf('[%s] 小结：成功 %d 台 / 失败 %d 台', $label, $result['created'], $result['failed']),
+            'info', $taskId);
+        return $result;
+    }
+
+    /**
+     * 创建单台（含换区重试与创建后 SSH 阶段）—— 对应 Python run_one。
+     */
+    private static function create_one(string $taskId, Gcp $gcp, array $acc, int $idx, array $spec,
+        array $payload, array $pool, int $maxPerRegion, bool $single, array &$regionCount, int $retries,
+        string $loginMode, string $rootPasswordIn, string $postCommand, string $verifyCommand,
+        array $installs, string $label, int &$createdCount, callable $log): array
+    {
+        // 1) 预留区域配额
+        [$reserved, $candidates] = self::reserve_region($pool, $maxPerRegion, $single, $spec, $regionCount);
+        if ($reserved === null) {
+            return ['ok' => false, 'error' => sprintf('所有可用区域配额已满（每区上限 %d）', $maxPerRegion)];
+        }
+
+        $name = sprintf('vm-%s-%d-%d-%d', (string) $acc['id'], time() % 100000, $idx, random_int(1000, 9999));
+
+        $rootPassword = '';
+        $startupScript = '';
+        if ($loginMode === 'root_password') {
+            // 用户填了就用用户的，否则随机生成（Python：root_password_in or _rand_password()）
+            $rootPassword = $rootPasswordIn !== '' ? $rootPasswordIn : Ssh::randPassword(16);
+            $startupScript = Ssh::buildRootStartupScript($rootPassword);
+        }
+
+        // 2) 首轮：预留区优先，其余可用区按池顺序兜底
+        //    ★ Python 里写的是 random.shuffle(ordered_regions[1:])，但切片是副本，
+        //      洗牌结果被丢弃 —— 真实顺序就是「预留区 + 池顺序」。这里保持一致。
+        $tried = [];
+        $ordered = array_merge([$reserved], array_values(array_filter(
+            $candidates,
+            static fn($r): bool => $r !== $reserved
+        )));
+        $lastErr = '';
+        $res = null;
+        foreach ($ordered as $region) {
+            $zoneList = [];
+            foreach (self::zones_for_region($gcp, (string) $region) as $z) {
+                if (!isset($tried[$z])) {
+                    $zoneList[] = $z;
+                }
+            }
+            shuffle($zoneList);   // 同 Python：同一区内打乱，避免总撞同一个可用区
+            foreach ($zoneList as $zone) {
+                if (Tasks::cancelRequested($taskId)) {
+                    self::release_region($regionCount, (string) $reserved);
+                    return ['ok' => false, 'error' => '已取消'];
+                }
+                $attemptSpec = $spec;
+                $attemptSpec['region'] = (string) $region;
+                [$ok, $out] = $gcp->create_instance((string) $zone, $name, $startupScript, $attemptSpec);
+                if ($ok) {
+                    $res = $out;
+                    break;
+                }
+                $lastErr = is_string($out) ? $out : (string) json_encode($out, JSON_UNESCAPED_UNICODE);
+                $tried[$zone] = true;
+                if (!self::is_resource_exhausted($lastErr)) {
+                    break;   // 非「资源耗尽」类错误换区也没用（配额/权限/参数错）
+                }
+            }
+            if ($res) {
+                break;
+            }
+            if (!self::is_resource_exhausted($lastErr)) {
+                break;
+            }
+        }
+
+        // 3) 换区重试（Python retries 段）
+        if ($res === null) {
+            self::release_region($regionCount, (string) $reserved);
+            for ($attempt = 0; $attempt < $retries; $attempt++) {
+                if (Tasks::cancelRequested($taskId)) {
+                    break;
+                }
+                [$r2] = self::reserve_region($pool, $maxPerRegion, $single, $spec, $regionCount);
+                if ($r2 === null) {
+                    break;
+                }
+                $z2 = self::pick(self::zones_for_region($gcp, (string) $r2));
+                $aSpec = $spec;
+                $aSpec['region'] = (string) $r2;
+                $log(sprintf('[%s] %s 重试 %d/%d → %s：%s', $label, $name, $attempt + 1, $retries,
+                    (string) $z2, $lastErr), 'warn', $taskId);
+                if ($z2 === null) {
+                    self::release_region($regionCount, (string) $r2);
+                    break;
+                }
+                [$ok, $out] = $gcp->create_instance((string) $z2, $name, $startupScript, $aSpec);
+                if ($ok) {
+                    $res = $out;
+                    break;
+                }
+                $lastErr = is_string($out) ? $out : (string) json_encode($out, JSON_UNESCAPED_UNICODE);
+                self::release_region($regionCount, (string) $r2);
+                sleep(3);
+            }
+        }
+
+        if ($res === null) {
+            return ['ok' => false, 'name' => $name, 'error' => $lastErr !== '' ? $lastErr : '创建失败'];
+        }
+
+        // 4) 落库 + 日志（创建成功即计数；后续 SSH 阶段失败不改这个计数，与 Python 一致）
+        $ip    = (string) ($res['ip'] ?? '');
+        $zone  = (string) ($res['zone'] ?? '');
+        $actualRegion = Catalog::region_of_zone($zone);
+        $item = [
+            'ok'           => true,
+            'name'         => $name,
+            'ip'           => $ip,
+            'private_ip'   => (string) ($res['private_ip'] ?? ''),
+            'zone'         => $zone,
+            'region'       => $actualRegion,
+            'machine_type' => (string) $spec['machine_type'],
+            'image'        => (string) $spec['image_label'],
+            'disk'         => $spec['disk_type'] . ' ' . $spec['disk_size_gb'] . 'GB',
+            'stage'        => 'created',
+        ];
+
+        $createdCount++;
+        $note         = trim((string) ($payload['note'] ?? ''));
+        $installsStr  = implode(',', $installs);
+        $createdTs    = (float) ($res['created_ts'] ?? 0);
+        Store::saveVm(
+            $name, $ip,
+            $loginMode === 'root_password' ? $rootPassword : '',
+            $acc['id'], $zone, (string) $spec['machine_type'], (string) $spec['image_key'],
+            (string) $spec['disk_type'], (int) $spec['disk_size_gb'],
+            $note, $createdTs > 0 ? $createdTs : null, $installsStr
+        );
+
+        // ★★ 绝不能把 root 密码拼进日志。
+        //    日志经 GET /api/logs 与 WS /ws/logs 对所有 view 权限用户开放，而 viewer
+        //    就是只读角色 —— 一旦写进日志，任何能登录的人（哪怕只读账号、或一个被窃
+        //    的会话）一次请求就能拿走全部机器的 root 密码，把
+        //    POST /api/instances/password 那道「重新输入登录密码」的二次验证彻底绕过。
+        //    密码本身已由上面的 Store::saveVm 落库，前端点「显示密码」走二次验证查看。
+        //    （Python 侧 core/tasks.py 已同步改为不打印明文，两版一致。）
+        $log(sprintf('[%s] ✅ %s 创建成功 | %s(%s) | IP %s | %s | %s%s',
+            $label, $name, $actualRegion, $zone, $ip, $spec['machine_type'], $spec['image_label'],
+            $rootPassword !== '' ? ' | Root密码已记录（在实例列表点「显示密码」查看，需二次验证）' : ''),
+            'success', $taskId);
+
+        // 5) 创建后 SSH 阶段 —— 对应 Python 的 post_command / verify_command 段
+        if ($postCommand === '' && $verifyCommand === '') {
+            return $item;
+        }
+        $user = $loginMode === 'root_password' ? 'root' : (string) ($spec['image_user'] ?? 'ubuntu');
+        $pwd  = $rootPassword;
+        $intOr = static function ($v, int $d): int {
+            $i = (int) ($v === null ? 0 : $v);
+            return $i > 0 ? $i : $d;
+        };
+        if ($ip === '') {
+            $item['ok'] = false;
+            $item['stage'] = 'ssh';
+            $item['error'] = '实例无公网 IP，无法 SSH';
+            return $item;
+        }
+        $avail = Ssh::available();
+        if (!$avail['ok']) {
+            // 本机缺 ssh/sshpass 时不要说成「SSH 不可用」—— 那是环境问题，不是实例问题
+            $item['ok'] = false;
+            $item['stage'] = 'ssh';
+            $item['ssh_ok'] = false;
+            $item['error'] = '本机 SSH 执行能力不可用：' . $avail['reason'];
+            $log(sprintf('[%s] ❌ %s %s', $label, $name, $item['error']), 'error', $taskId);
+            return $item;
+        }
+
+        $log(sprintf('[%s] %s 等待 SSH 就绪（%s@%s）…', $label, $name, $user, $ip), 'info', $taskId);
+        $sshOpts = [
+            'timeout'      => $intOr($payload['ssh_timeout'] ?? null, 300),
+            'stop'         => static fn(): bool => Tasks::cancelRequested($taskId),
+            'log_callback' => static function (string $chunk) use ($log, $taskId, $label, $name): void {
+                $log(sprintf('[%s][%s] %s', $label, $name, rtrim($chunk)), 'info', $taskId);
+            },
+        ];
+        $wr = Ssh::waitReady($ip, $user, $pwd, $sshOpts);
+        $item['ssh_ok'] = $wr['ok'];
+        if (!$wr['ok']) {
+            $item['ok'] = false;
+            $item['stage'] = 'ssh';
+            $item['error'] = 'SSH 不可用：' . $wr['output'];
+            $log(sprintf('[%s] ❌ %s SSH 不可用：%s', $label, $name, $wr['output']), 'error', $taskId);
+            return $item;
+        }
+        $log(sprintf('[%s] %s SSH 就绪', $label, $name), 'success', $taskId);
+
+        if ($postCommand !== '') {
+            $r = Ssh::run($ip, $user, $pwd, $postCommand, [
+                'connect_timeout' => 15,
+                'idle_timeout'    => $intOr($payload['idle_timeout'] ?? null, 180),
+                'total_timeout'   => $intOr($payload['command_timeout'] ?? null, 1800),
+                'stop'            => static fn(): bool => Tasks::cancelRequested($taskId),
+                'log_callback'    => static function (string $chunk) use ($log, $taskId, $label, $name): void {
+                    $log(sprintf('[%s][%s] %s', $label, $name, rtrim($chunk)), 'info', $taskId);
+                },
+            ]);
+            $item['post_command_ok']   = $r['ok'];
+            $item['post_command_tail'] = mb_substr($r['output'], -4000);
+            // 不传 note/created_at/installs —— Store::saveVm 会保留原值，
+            // 否则第二次保存会把用户填的备注/安装项冲空（Python 注释里同款说明）。
+            Store::saveVm($name, $ip, $loginMode === 'root_password' ? $rootPassword : '',
+                $acc['id'], $zone, (string) $spec['machine_type'], (string) $spec['image_key'],
+                (string) $spec['disk_type'], (int) $spec['disk_size_gb']);
+            if (!$r['ok']) {
+                $item['ok'] = false;
+                $item['stage'] = 'command';
+                $log(sprintf('[%s] ⚠️ %s 安装命令执行失败', $label, $name), 'error', $taskId);
+            } else {
+                $item['stage'] = 'installed';
+                $log(sprintf('[%s] ✅ %s 安装命令执行完成', $label, $name), 'success', $taskId);
+            }
+        }
+
+        if ($verifyCommand !== '') {
+            $r = Ssh::run($ip, $user, $pwd, $verifyCommand, [
+                'connect_timeout' => 15,
+                'idle_timeout'    => 60,
+                'total_timeout'   => $intOr($payload['verify_timeout'] ?? null, 180),
+                'stop'            => static fn(): bool => Tasks::cancelRequested($taskId),
+            ]);
+            $item['verify_ok']     = $r['ok'];
+            $item['verify_output'] = mb_substr($r['output'], -2000);
+            $log(sprintf('[%s] 验证命令 %s：%s', $label, $r['ok'] ? '通过' : '未通过',
+                mb_substr($r['output'], -300)), $r['ok'] ? 'success' : 'warn', $taskId);
+            if (!$r['ok']) {
+                $item['ok'] = false;
+                $item['stage'] = 'verify';
+            } else {
+                $item['stage'] = 'done';
+            }
+        }
+        return $item;
+    }
+
+    /**
+     * 在项目里定位实例的真实 zone —— 对应 Python locate()。
+     * 返回 [zone, 最近一次错误]；zone 为空串表示没找到。
+     *
+     * 这里与 Python 一样**吞掉**查询异常（凭证失效、瞬时网络错误不该被误报成
+     * 「实例不存在」）；区别是 PHP 把原因回传给调用方写进日志，Python 直接丢弃，
+     * 结果就是用户只看到一句「未找到」而不知道是密钥失效 —— 这里补上可读原因。
+     */
+    private static function locate_instance(Gcp $gcp, string $name, string $zoneHint): array
+    {
+        $zoneHint = trim($zoneHint);
+        if ($zoneHint !== '') {
+            return [$zoneHint, ''];
+        }
+        try {
+            foreach ($gcp->list_instances() as $inst) {
+                if ((string) ($inst['name'] ?? '') === $name) {
+                    return [(string) ($inst['zone'] ?? ''), ''];
+                }
+            }
+        } catch (Throwable $e) {
+            return ['', $e->getMessage()];
+        }
+        return ['', ''];
+    }
+
+    /**
+     * 【任务编排】实例批量操作（start / stop / reset / delete）
+     *   = Python submit_instance_action + _run_action + _do_action + locate。
+     *
+     * ★ delete 的语义对齐 Python：只做「把本地 vm_passwords 记录也删掉」，
+     *   **不加额外确认**（确认由前端弹框完成）；也**不漏** Python 的保护 ——
+     *   逐个账号按名字定位、找不到就明确报错而不是静默跳过。
+     *
+     * @param string[] $targets 实例名列表（也兼容 [{name:...}] 形态）
+     * @return array{ok:bool,message:string,result:array}
+     */
+    public static function runInstanceAction(string $action, array $targets, string $taskId, callable $log): array
+    {
+        if (!in_array($action, ['start', 'stop', 'reset', 'delete'], true)) {
+            return ['ok' => false, 'message' => '不支持的操作：' . $action, 'result' => []];
+        }
+        $names = [];
+        foreach ($targets as $t) {
+            if (is_array($t)) {
+                $t = $t['name'] ?? '';
+            }
+            $t = trim((string) $t);
+            if ($t !== '') {
+                $names[] = $t;
+            }
+        }
+        if ($names === []) {
+            return ['ok' => false, 'message' => '没有可操作的实例', 'result' => []];
+        }
+
+        $log(sprintf('%s %d 台实例', $action, count($names)), 'info', $taskId);
+
+        $accountById = [];
+        foreach (Store::getAccounts() as $a) {
+            $accountById[(string) $a['id']] = $a;
+        }
+        $vmByName = [];
+        foreach (Store::getAllVms() as $v) {
+            $vmByName[(string) $v['name']] = $v;
+        }
+
+        $results = [];
+        $byAccount = [];
+        $unresolved = [];
+        // 先按本地记录归组（有 account_id 且账号还在）
+        foreach ($names as $nm) {
+            $vm = $vmByName[$nm] ?? [];
+            $accId = (string) ($vm['account_id'] ?? '');
+            if ($accId !== '' && isset($accountById[$accId])) {
+                $byAccount[$accId][] = ['name' => $nm, 'zone' => (string) ($vm['zone'] ?? '')];
+            } else {
+                $unresolved[] = ['name' => $nm, 'zone' => (string) ($vm['zone'] ?? '')];
+            }
+        }
+
+        // 本地没有记录的实例（预存在的、或用原版桌面工具建的）不能直接判
+        // 「未找到所属账号」—— 界面能列出它，就该能操作它（Python 侧修过的真实缺陷）。
+        if ($unresolved !== [] && $accountById !== []) {
+            foreach ($unresolved as $item) {
+                $placed = false;
+                $locErr = '';
+                foreach ($accountById as $acc) {
+                    try {
+                        $gcp = self::account_client($acc);
+                    } catch (Throwable $e) {
+                        $locErr = $locErr !== '' ? $locErr : $e->getMessage();
+                        continue;
+                    }
+                    [$zone, $err] = self::locate_instance($gcp, (string) $item['name'], (string) $item['zone']);
+                    if ($err !== '' && $locErr === '') {
+                        $locErr = $err;
+                    }
+                    if ($zone !== '') {
+                        $byAccount[(string) $acc['id']][] = ['name' => $item['name'], 'zone' => $zone];
+                        $placed = true;
+                        break;
+                    }
+                }
+                if (!$placed) {
+                    $results[] = ['name' => $item['name'], 'ok' => false,
+                        'error' => '未在任何已配置账号的项目中找到该实例（可能所属账号已删除或密钥已失效）'];
+                    if ($locErr !== '') {
+                        $log(sprintf('[%s] 定位失败（遍历各账号时的错误）：%s', $item['name'], $locErr), 'error', $taskId);
+                    }
+                }
+            }
+        } elseif ($unresolved !== []) {
+            foreach ($unresolved as $item) {
+                $results[] = ['name' => $item['name'], 'ok' => false, 'error' => '未配置任何账号'];
+            }
+        }
+
+        foreach ($byAccount as $accId => $items) {
+            $acc = $accountById[$accId] ?? null;
+            if ($acc === null) {
+                foreach ($items as $i) {
+                    $results[] = ['name' => $i['name'], 'ok' => false, 'error' => '未找到所属账号'];
+                }
+                continue;
+            }
+            try {
+                $gcp = self::account_client($acc);
+            } catch (Throwable $e) {
+                foreach ($items as $i) {
+                    $results[] = ['name' => $i['name'], 'ok' => false, 'error' => $e->getMessage()];
+                }
+                continue;
+            }
+            $email = (string) ($acc['email'] ?? '');
+            foreach ($items as $i) {
+                // 取消轮询：Python 的 _do_action 没有取消检查（这里是**有意增强**），
+                // 因为 delete 一旦发出请求就可能已经生效，中途取消至少能少删几台。
+                if (Tasks::cancelRequested($taskId)) {
+                    $log('检测到取消请求，停止后续实例操作', 'warn', $taskId);
+                    break 2;
+                }
+                [$zone, $err] = self::locate_instance($gcp, (string) $i['name'], (string) $i['zone']);
+                if ($zone === '') {
+                    if ($err !== '') {
+                        $log(sprintf('[%s] %s 定位失败：%s', $email, $i['name'], $err), 'error', $taskId);
+                    }
+                    $results[] = ['name' => $i['name'], 'ok' => false, 'error' => '未知 zone'];
+                    continue;
+                }
+                try {
+                    [$ok, $msg] = match ($action) {
+                        'start'  => $gcp->start_instance($zone, (string) $i['name']),
+                        'stop'   => $gcp->stop_instance($zone, (string) $i['name']),
+                        'reset'  => $gcp->reset_instance($zone, (string) $i['name']),
+                        default  => $gcp->delete_instance($zone, (string) $i['name']),
+                    };
+                } catch (Throwable $e) {
+                    // 单台异常不影响其余（与 Python 的「逐台独立」原则一致）
+                    $ok = false;
+                    $msg = $e->getMessage();
+                }
+                $log(sprintf('[%s] %s %s：%s', $email, $action, $i['name'], $msg),
+                    $ok ? 'success' : 'error', $taskId);
+                $results[] = ['name' => $i['name'], 'ok' => $ok, 'message' => $msg];
+                if ($ok && $action === 'delete') {
+                    // 删除成功才清本地密码记录（Python 同：只删 vm_passwords 行）
+                    Store::forgetVm((string) $i['name']);
+                }
+            }
+        }
+
+        $okCount = 0;
+        $firstErr = '';
+        foreach ($results as $r) {
+            if (!empty($r['ok'])) {
+                $okCount++;
+            } elseif ($firstErr === '') {
+                $firstErr = (string) ($r['error'] ?? $r['message'] ?? '');
+            }
+        }
+        $summary = ['action' => $action, 'results' => $results];
+
+        // ★ 有意差异：Python 哪怕 0 成功也判 done（界面看不出失败）。
+        //   这里「一台都没成功」收敛为 failed，并带上首个可读原因。
+        $allFailed = ($okCount === 0);
+        $message = sprintf('%s：%d/%d 成功', $action, $okCount, count($results));
+        if ($allFailed) {
+            $message = '全部失败：' . $message;
+            if ($firstErr !== '') {
+                $message .= '；原因：' . mb_substr($firstErr, 0, 300);
+            }
+        }
+        return ['ok' => !$allFailed, 'message' => $message, 'result' => $summary];
+    }
+
+    /**
+     * 【任务编排】刷新各账号实例（并回写实例计数缓存）
+     *   = Python submit_refresh + _refresh_inner。
+     *
+     * 与 Python 的差异：Python 的计数缓存在进程内存里，PHP 是多进程，所以
+     * 计数缓存落 SQLite settings（键 inst_counts_cache，正是 ApiGcp::listAccounts
+     * 读取的那个）—— 这样 POST /api/refresh 之后 GET /api/accounts 里的
+     * inst_count_live 才会真的变新，而不是两个接口各说各话。
+     *
+     * @return array{ok:bool,message:string,result:array}
+     */
+    public static function runRefreshTask(array $payload, string $taskId, callable $log): array
+    {
+        $log('刷新中', 'info', $taskId);
+        $accounts = Store::getAccounts();
+        $wanted = [];
+        foreach ((array) ($payload['account_ids'] ?? []) as $w) {
+            $wanted[] = (string) $w;
+        }
+        if ($wanted !== []) {
+            $accounts = array_values(array_filter(
+                $accounts,
+                static fn(array $a): bool => in_array((string) $a['id'], $wanted, true)
+            ));
+        }
+
+        // 本地记录计数（无需网络），与 ApiGcp::accountInstanceCounts 口径一致
+        $localCnt = [];
+        foreach (Store::getAllVms() as $vm) {
+            $k = (string) ($vm['account_id'] ?? '');
+            if ($k !== '') {
+                $localCnt[$k] = ($localCnt[$k] ?? 0) + 1;
+            }
+        }
+
+        $all = [];
+        $counts = [];
+        $errors = [];
+        foreach ($accounts as $acc) {
+            if (Tasks::cancelRequested($taskId)) {
+                $log('检测到取消请求，停止后续账号刷新', 'warn', $taskId);
+                break;
+            }
+            $aid = (string) $acc['id'];
+            $email = (string) ($acc['email'] ?? '');
+            $row = [
+                'account_id'       => (int) $acc['id'],
+                'email'            => $email,
+                'label'            => (string) ($acc['label'] ?? ''),
+                'inst_count_live'  => null,
+                'inst_count_local' => $localCnt[$aid] ?? 0,
+            ];
+            try {
+                $gcp = self::account_client($acc);
+                $insts = $gcp->list_instances();
+                foreach ($insts as $inst) {
+                    $inst['account_email'] = $email;
+                    $inst['account_id']    = $acc['id'];
+                    $all[] = $inst;
+                }
+                $row['inst_count_live'] = count($insts);
+                $log(sprintf('刷新 %s：%d 台实例', $email, count($insts)), 'info', $taskId);
+            } catch (Throwable $e) {
+                // 单账号失败只记错误，不影响其它账号（凭证失效/网络不通很常见）
+                $errors[] = ['account_id' => (int) $acc['id'], 'email' => $email, 'error' => $e->getMessage()];
+                $log(sprintf('刷新失败 %s：%s', $email, $e->getMessage()), 'error', $taskId);
+            }
+            $counts[] = $row;
+        }
+
+        // 回写计数缓存（供 /api/accounts 复用同一份数字）
+        try {
+            Store::setSetting('inst_counts_cache', ['counts' => $counts, 'at' => microtime(true)]);
+        } catch (Throwable $e) {
+            $log('写入实例计数缓存失败：' . $e->getMessage(), 'warn', $taskId);
+        }
+
+        $message = sprintf('共 %d 台实例', count($all));
+        if ($errors !== []) {
+            $message .= sprintf('，%d 个账号刷新失败', count($errors));
+        }
+        // ★ 有意差异：全部账号都刷新失败时判 failed（Python 恒定 done），
+        //   否则「密钥全失效」会显示成一次正常刷新。
+        $allFailed = ($errors !== [] && $all === []);
+        if ($allFailed) {
+            $message = '刷新失败：' . $message . '；原因：' . mb_substr((string) $errors[0]['error'], 0, 300);
+        }
+        return [
+            'ok'     => !$allFailed,
+            'message' => $message,
+            'result'  => ['instances' => $all, 'errors' => $errors, 'counts' => $counts],
+        ];
+    }
+
     // ---- 静态快捷方法（供 index.php 直接使用）----
     public static function maskProxy(?string $p): string { return self::mask_proxy($p); }
     public static function parseProxyInput(?string $p, string $t = 'HTTPS'): array { return self::parse_proxy_input($p, $t); }

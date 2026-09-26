@@ -207,31 +207,55 @@ def parse_proxy_input(proxy_text, fallback_proxy_type="HTTPS"):
 def mask_proxy(proxy_text):
     """展示用：把代理里的密码打码，避免账号页面上直接看到明文密码。
 
-    ★ 修复：原来只处理 `scheme://user:pass@host:port` 这一种写法 ——
-    只要字符串里没有 `@` 就直接原样返回。但本产品**文档里明确支持**
-    `host:port:user:pass` 这种写法（见账号页的输入提示），录入后被原样存库、
-    也被原样回显到账号列表，等于把代理密码明文摆在页面上。
+    ★ 修复历史（两轮）：
+      1) 原来只处理 `scheme://user:pass@host:port` 这一种写法 —— 只要字符串里
+         没有 `@` 就直接原样返回。但本产品**文档里明确支持** `host:port:user:pass`
+         这种写法（见账号页的输入提示），录入后被原样存库、也被原样回显到账号
+         列表，等于把代理密码明文摆在页面上。
+      2) 补了 4 段判定后又漏了「密码里含 `:` 或 `@`」的情况：
+            1.2.3.4:8080:user:pa:ss  → 5 段，判定为「不是这个形态」→ 原样返回（泄漏）
+            1.2.3.4:8080:user:p@ss   → 先走 `@` 分支 → 也认不出来 → 原样返回（泄漏）
+         现在的规则是「宁可多打码，也不能漏」：认不出形态时按位置硬打。
 
     实测：
-        mask_proxy("1.2.3.4:8080:user:secretPw") → "1.2.3.4:8080:user:secretPw"  ← 泄漏
-    修复后：
         mask_proxy("1.2.3.4:8080:user:secretPw") → "1.2.3.4:8080:user:***"
+        mask_proxy("1.2.3.4:8080:user:pa:ss")    → "1.2.3.4:8080:user:***"
+        mask_proxy("1.2.3.4:8080:user:p@ss")     → "1.2.3.4:8080:user:***"
+        mask_proxy("socks5://u:p@ss@h:1080")     → "socks5://u:***@h:1080"
+        mask_proxy("proxy.example.com:8080")     → 原样（没有凭据，不该乱打）
     """
     raw = (proxy_text or "").strip()
     if not raw:
         return raw
-    if "@" in raw:
-        head, _, tail = raw.rpartition("@")
-        if "://" in head:
-            scheme, _, cred = head.partition("://")
+
+    # ① 带 scheme 的：`scheme://[user[:pass]@]host[:port]`
+    #    密码里含 `@` 也没关系 —— rpartition 取的是**最后一个** `@`，
+    #    它一定是「凭据」与「主机」的分界。
+    if "://" in raw:
+        scheme, _, rest = raw.partition("://")
+        if "@" in rest:
+            cred, _, host = rest.rpartition("@")
             if ":" in cred:
-                u, _, _ = cred.partition(":")
-                return f"{scheme}://{u}:***@{tail}"
+                return f"{scheme}://{cred.split(':', 1)[0]}:***@{host}"
+            return f"{scheme}://***@{host}"
         return raw
-    # `host:port:user:pass` 形态：4 段、第 2 段是端口 → 打码第 4 段
+
+    # ② `host:port:user:pass` 形态：第 2 段是端口 → 从第 4 段起全部打掉
+    #    （这样密码里含 `:` 变成 5 段也照样打）
     parts = raw.split(":")
-    if len(parts) == 4 and parts[1].isdigit() and "://" not in raw:
-        return f"{parts[0]}:{parts[1]}:{parts[2]}:***"
+    if len(parts) >= 4 and parts[1].isdigit():
+        return ":".join(parts[:3] + ["***"])
+
+    # ③ 无 scheme 的 `user:pass@host:port`
+    if "@" in raw:
+        cred, _, host = raw.rpartition("@")
+        if ":" in cred:
+            return f"{cred.split(':', 1)[0]}:***@{host}"
+        return f"***@{host}"
+
+    # ④ 认不出形态：没有 `@` 也不是 host:port:user:pass。
+    #    这里**不动** —— 例如 `proxy.example.com:8080`（主机:端口，无凭据）
+    #    或 `proxy.example.com`，乱打码反而会误导用户。
     return raw
 
 
@@ -308,21 +332,67 @@ def test_proxy(proxy_text, proxy_type="HTTPS", timeout=12, url=PROXY_TEST_URL):
                 "display": display}
 
 
+# ★ 代理环境变量的串行化锁。
+#
+# 为什么需要：google 客户端靠读**进程级**环境变量（HTTPS_PROXY 等）来走代理，
+# 而创建（并发可达 30）、刷新、按账号统计、勘察（5 线程）都是在多线程里跑
+# 各自的 GCPService。两个线程交错时会出两类事故：
+#   · A 先退出，把变量恢复成「A 进入之前的值」（通常是"删除"）→ 仍在 with 里的
+#     B 代理凭空消失，B 的账号调用变成**直连**（用户的代理隔离被打破，
+#     服务端真实 IP 暴露给 Google）；
+#   · B 最后退出，又把 A 的代理**写回进程**→ 之后所有「无代理」账号的调用
+#     都会走 A 的代理，等于把 B 的 OAuth 凭据送到**别的账号**的第三方代理上。
+# 实测可稳定复现（线程 B 在自己的 with 内看到 HTTPS_PROXY=None；
+# 两个线程都退出后 HTTPS_PROXY 残留为 http://proxyA:1）。
+#
+# 取舍：用一把进程级 RLock 把「设环境变量 → 发请求 → 还原」整段串行化。
+#   代价是**带代理的部署**里，并发的 GCP 调用不再真并行 —— 例如 30 台并发建机
+#   会排队执行（每次十几秒）。对一个管理控制台这是可接受的代价，
+#   换来的是「代理绝不串台、凭据绝不送到别的账号的代理上」。
+#
+# ★ 但如果整个进程里**没有任何账号配了代理**（很常见），环境变量本来就是空的，
+#   没有任何东西需要保护 —— 这时**完全不加锁**，保持原有的全并发性能。
+#   所以下面用 _PROXY_ACCOUNTS 计数来决定是否需要串行化。
+_PROXY_ENV_LOCK = threading.RLock()
+
+# 进程内「带代理的 GCPService」实例数。>0 就说明环境变量可能被改动，
+# 必须串行化；==0 时所有调用都走直连，加锁只会白白拖慢。
+_PROXY_ACCOUNTS = 0
+
+
+def _note_proxy_account(delta):
+    """GCPService 构造/析构时登记「本进程存在带代理的客户端」。"""
+    global _PROXY_ACCOUNTS
+    _PROXY_ACCOUNTS = max(0, _PROXY_ACCOUNTS + delta)
+
+
 class ProxyEnvContext:
-    """在 with 块内临时设置 HTTPS_PROXY 等环境变量（google 客户端会读取）"""
+    """在 with 块内临时设置 HTTPS_PROXY 等环境变量（google 客户端会读取）。
+
+    ★ 关键：**没有代理的调用也必须加锁**（当进程里存在代理账号时）。
+      否则一个「无代理」账号的请求会落在别的线程留下的代理上 ——
+      那正是「B 的 OAuth 凭据被送到 A 的第三方代理」这条事故。
+    """
 
     KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
     def __init__(self, proxy_url):
         self.proxy_url = (proxy_url or "").strip()
         self.saved = {}
+        self._locked = False
 
     def __enter__(self):
-        if not self.proxy_url:
-            return self
+        # 只有「本次要用代理」或「进程里存在带代理的账号」时才需要串行化
+        if self.proxy_url or _PROXY_ACCOUNTS > 0:
+            _PROXY_ENV_LOCK.acquire()
+            self._locked = True
         for key in self.KEYS:
             self.saved[key] = os.environ.get(key)
-            os.environ[key] = self.proxy_url
+            if self.proxy_url:
+                os.environ[key] = self.proxy_url
+            else:
+                # 明确清掉：本账号不走代理，就绝不能被别的线程留下的代理带走
+                os.environ.pop(key, None)
         return self
 
     def __exit__(self, *args):
@@ -331,6 +401,10 @@ class ProxyEnvContext:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = old
+        self.saved = {}
+        if self._locked:
+            self._locked = False
+            _PROXY_ENV_LOCK.release()
         return False
 
 
@@ -358,7 +432,11 @@ def build_instance_spec(user_spec):
     spec["machine_type"] = _norm(spec.get("machine_type"), catalog.DEFAULT_CONFIG["machine_type"])
     spec["image_key"] = _norm(spec.get("image_key"), catalog.DEFAULT_CONFIG["image_key"])
     spec["disk_type"] = _norm(spec.get("disk_type"), catalog.DEFAULT_CONFIG["disk_type"])
-    spec["disk_size_gb"] = int(_norm(spec.get("disk_size_gb"), catalog.DEFAULT_CONFIG["disk_size_gb"]))
+    # 非法值回落默认、并夹到 GCP 合法范围（早前是裸 int()：传 "abc" 直接 500，
+    # 传 -1 / 1e9 会原样透到 GCP）
+    spec["disk_size_gb"] = catalog.safe_int(
+        _norm(spec.get("disk_size_gb"), catalog.DEFAULT_CONFIG["disk_size_gb"]),
+        catalog.safe_int(catalog.DEFAULT_CONFIG["disk_size_gb"], 20), 1, 65536)
 
     img = catalog.IMAGES.get(spec["image_key"], {})
     spec["image_source"] = _norm(spec.get("image_source"), catalog.image_source(spec["image_key"]))
@@ -500,6 +578,10 @@ class GCPService:
         self.email = email
         parsed = parse_proxy_input(proxy, fallback_proxy_type=proxy_type)
         self.proxy_url = parsed.get("proxy_url", "") if parsed.get("ok") else ""
+        if self.proxy_url:
+            # 登记「本进程存在带代理的客户端」→ 之后所有 GCP 调用都要串行化，
+            # 免得环境变量互相踩（详见 ProxyEnvContext 的注释）
+            _note_proxy_account(1)
         if not key_path or not os.path.exists(key_path):
             raise FileNotFoundError(f"服务账号 JSON 不存在：{key_path}")
         self.instance_client = compute_v1.InstancesClient.from_service_account_json(key_path)

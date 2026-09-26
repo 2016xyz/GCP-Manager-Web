@@ -16,10 +16,22 @@ final class ApiAuth
 {
     // ── 认证（公开）────────────────────────────────────────────────────────
 
-    /** GET /api/auth/captcha → {ok, captcha_id, image, expires_in} */
+    /**
+     * GET /api/auth/captcha → {ok, captcha_id, image, expires_in}
+     *
+     * ★ 验证码图渲染失败（例如缺 gd 扩展）时回 **503 + 可读原因**，而不是走
+     *   通用的 500「服务器内部错误」：这条信息是给**部署方**看的，告诉他去装 gd；
+     *   回笼统的 500 会让人以为是程序 bug，白白排查很久。
+     *   泄漏面很小 —— 调用方本来就能从「拿不到验证码」推断出这个服务坏了。
+     */
     public static function captcha(array $p): void
     {
-        Json::out(Auth::captchaNew());
+        try {
+            Json::out(Auth::captchaNew());
+        } catch (RuntimeException $e) {
+            error_log('[gcpweb] captcha 不可用：' . $e->getMessage());
+            Json::err($e->getMessage(), 503, 'captcha_unavailable');
+        }
     }
 
     /**

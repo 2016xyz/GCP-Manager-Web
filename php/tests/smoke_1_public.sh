@@ -96,6 +96,26 @@ c=$(code "$B/api/auth/captcha"); [ "$c" = 200 ] && ok "GET /api/auth/captcha →
 CID=$(python3 -c "import json;print(json.load(open('/tmp/s1.json')).get('captcha_id',''))" 2>/dev/null)
 IMGLEN=$(python3 -c "import json;print(len(json.load(open('/tmp/s1.json')).get('image','')))" 2>/dev/null)
 [ -n "$CID" ] && ok "captcha_id = ${CID:0:16}…" || bad "无 captcha_id"
+
+# ★ 验证码必须是 PNG（光栅图），绝不能是「把字符写成 <text> 的 SVG」——
+#   SVG 解 base64 就能直接读出验证码，不需要 OCR，等于没有验证码。
+#   实测：无 gd 扩展时旧实现返回 SVG，读出的字符与库里验证码逐字符相同。
+IMG=$(python3 -c "import json;print(json.load(open('/tmp/s1.json')).get('image',''))" 2>/dev/null)
+case "$IMG" in
+  data:image/png\;base64,*) ok "验证码是 PNG（不是可被直接读出的明文 SVG）" ;;
+  data:image/svg*) bad "验证码降级成了 SVG —— 验证码可被脚本直接读出，等同没有验证码" ;;
+  *) bad "验证码 image 字段形态异常：${IMG:0:40}" ;;
+esac
+
+# 且响应里不应出现验证码字符的明文（防止有人把字符塞进别的字段或降级成 SVG）
+CCODE=$(cap_code "$CID")
+if [ -n "$CCODE" ]; then
+  if printf '%s' "$IMG" | grep -qF "$CCODE"; then
+    bad "响应里出现了验证码明文（$CCODE）—— 验证码可被脚本直接读出"
+  else
+    ok "响应里不含验证码明文"
+  fi
+fi
 [ "${IMGLEN:-0}" -gt 200 ] && ok "图形验证码 base64 长度 $IMGLEN（已真实渲染）" || bad "验证码图异常"
 
 echo

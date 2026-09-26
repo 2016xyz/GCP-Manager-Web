@@ -30,10 +30,15 @@ declare(strict_types=1);
 
 final class Ssh
 {
-    /** 公钥可接受的前缀（与 Python _PUBKEY_PREFIXES 对齐） */
+    /**
+     * 公钥可接受的前缀（与 Python _PUBKEY_PREFIXES 对齐）。
+     *
+     * ⚠ 后两类以 sk- 开头，会被某些「密钥打码」环节在终端里显示成 ***，
+     *   cat/grep 看到的可能不是文件真实内容 —— 怀疑源码被改坏时先看 git diff。
+     */
     private const PUBKEY_PREFIXES = [
         'ssh-rsa', 'ssh-ed25519', 'ssh-dss', 'ecdsa-sha2-',
-        'sk-ecdsa-sha2-', 'sk-ssh-ed25519',
+        'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com',
         'ssh-rsa-cert', 'ssh-ed25519-cert', 'ecdsa-sha2-nistp256-cert',
     ];
 

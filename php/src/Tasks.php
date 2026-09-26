@@ -127,6 +127,46 @@ final class Tasks
         }
     }
 
+    /**
+     * 下发给客户端前的脱敏：剥掉 payload 里的凭据类字段，只留存在性标记。
+     *
+     * ★ 为什么必须有：创建任务的 payload 里带着 root_password 明文（worker 执行
+     *   时需要它，所以**不能在写入时删**）。而 /api/tasks、/api/tasks/{id} 的权限点
+     *   是 view —— viewer 是只读角色。不脱敏的话，任何能登录的人（哪怕只读账号、
+     *   或一个被窃的会话）一次请求就能拿到全部实例的 root 密码，把
+     *   POST /api/instances/password 那道「重新输入自己的登录密码」的二次验证绕过。
+     *   实测已复现。
+     *
+     * ★ 只在**响应层**调用；Tasks::get() 保持返回原始 payload 供 worker 使用。
+     */
+    public static function sanitizeForClient(array $task): array
+    {
+        $p = $task['payload'] ?? null;
+        if (is_array($p)) {
+            $had = !empty($p['root_password']);
+            $safe = [];
+            foreach ($p as $k => $v) {
+                if ($k === 'root_password') {
+                    continue;
+                }
+                $safe[$k] = $v;
+            }
+            if ($had) {
+                $safe['has_root_password'] = true;
+            }
+            $task['payload'] = $safe;
+            return $task;
+        }
+        // payload 是 JSON 字符串（解码失败时 decodeRow 会保留原样）→ 先解再脱敏
+        if (is_string($p) && $p !== '') {
+            $decoded = json_decode($p, true);
+            if (is_array($decoded)) {
+                $task['payload'] = self::sanitizeForClient(['payload' => $decoded])['payload'];
+            }
+        }
+        return $task;
+    }
+
     /** 取单个任务（payload/result 已解码，字段与 Python get_task 一致） */
     public static function get(string $id): ?array
     {
@@ -302,19 +342,56 @@ final class Tasks
     }
 
     /**
+     * 擦掉日志文本里的明文凭据值，保留键名便于排查。
+     *
+     * ★ 为什么要在**出口**擦：日志表历史上被写入过明文凭据（创建实例成功时
+     *   拼过 `| Root密码 <明文>`），而 /api/logs 与 /ws/logs 对所有 view 权限
+     *   用户开放（viewer 是只读角色）。只在写入侧不再写是不够的 ——
+     *   **已经落库的那些行**照样会被读走，所以出口兜一道。
+     *
+     * 只匹配「键 + 值」的确定形态，不做泛化替换，避免把正常日志改花
+     * （实测：「Root 密码模式无效，已按 SSH 密钥模式处理」这类文案不会被误伤）。
+     */
+    public static function sanitizeLogMessage(string $msg): string
+    {
+        if ($msg === '') {
+            return $msg;
+        }
+        // Root密码 <值> / root_password=<值> / password: <值> / 密码=<值>
+        $msg = (string) preg_replace(
+            '/(Root密码|root_password|ROOT_PASSWORD|password|passwd|密码)'
+            . '(\s*[:：=]\s*|\s+)\S+/iu',
+            '$1$2***',
+            $msg
+        );
+        // sshpass -p <密码>
+        $msg = (string) preg_replace('/(sshpass\s+-p\s*)\S+/i', '$1***', $msg);
+        return $msg;
+    }
+
+    /**
      * 增量取日志：id > $sinceId，可按 task_id 过滤。
      * 字段与 Python get_logs 一致（id/ts/task_id/level/message）。
+     * ★ 返回值已做凭据擦除，调用方（Web API / WebSocket）直接下发即可。
      */
     public static function listLogs(int $sinceId = 0, int $limit = 500, ?string $taskId = null): array
     {
         $limit = max(1, min($limit, 5000));
         if ($taskId !== null && $taskId !== '') {
-            return Db::all(
+            $rows = Db::all(
                 'SELECT * FROM logs WHERE id>? AND task_id=? ORDER BY id LIMIT ?',
                 [$sinceId, $taskId, $limit]
             );
+        } else {
+            $rows = Db::all('SELECT * FROM logs WHERE id>? ORDER BY id LIMIT ?', [$sinceId, $limit]);
         }
-        return Db::all('SELECT * FROM logs WHERE id>? ORDER BY id LIMIT ?', [$sinceId, $limit]);
+        foreach ($rows as &$r) {
+            if (isset($r['message'])) {
+                $r['message'] = self::sanitizeLogMessage((string) $r['message']);
+            }
+        }
+        unset($r);
+        return $rows;
     }
 
     /** 清空日志（危险操作，调用方需写审计） */

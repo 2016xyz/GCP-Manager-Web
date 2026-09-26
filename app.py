@@ -41,6 +41,7 @@ from core.tasks import TaskManager                         # noqa: E402
 from core.gcp import GCPService, build_instance_spec       # noqa: E402
 from core import inspect as gcp_inspect                    # noqa: E402
 from core import ssh as ssh_mod                            # noqa: E402
+from core import tasks as tasks_mod                        # noqa: E402
 
 # 默认配置一致性自检
 # 「全开放防火墙」默认关闭：不自动放开 0.0.0.0/0，避免无意识的公网暴露。
@@ -63,6 +64,18 @@ os.makedirs(KEY_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 COOKIE_NAME = "gcp_sid"
+
+# WebSocket 长连接的会话复检间隔（秒）。
+# 握手只发生一次，如果只在握手时校验，那么「管理员踢掉被窃的会话」「会话
+# 自然过期」「账号被禁用」「密码被改」之后，这条连接仍会持续收到任务日志
+# （日志含 SSH 命令回显，可能有敏感输出）。所以主动定期回头复查。
+# PHP 版 bin/ws-server.php 的 WS_AUTH_EVERY 与此保持一致。
+try:
+    WS_AUTH_EVERY = float(os.environ.get("GCPWEB_WS_AUTH_EVERY") or 30.0)
+except ValueError:
+    WS_AUTH_EVERY = 30.0
+if WS_AUTH_EVERY <= 0:
+    WS_AUTH_EVERY = 30.0
 
 store = Store(os.path.join(DATA_DIR, "gcp_web.db"))
 users_store = UserStore(store)
@@ -397,7 +410,13 @@ class CreateRequest(BaseModel):
 class ExecuteRequest(BaseModel):
     command: str
     targets: list[str] | None = None
-    all: bool | None = True
+    # ★ 默认 None（未指定），而不是 True。
+    #   早前默认 True，配合 _run_execute_inner 里的 `if all_instances or not target_list`
+    #   会让「给了 targets 但没写 all」的请求把该账号下**所有**实例一并执行 ——
+    #   前端 console.html 显式传了 all，所以 UI 看不出来；但 curl / 脚本 /
+    #   第三方调用（PHP 版共用同一套契约）就会把命令打到远超预期的机器上。
+    #   新语义：给了 targets 就只打 targets；要打全部必须显式 all=true。
+    all: bool | None = None
     concurrency: int | None = 10
     command_timeout: int | None = 600
     idle_timeout: int | None = 120
@@ -423,7 +442,14 @@ def _cfg_key(user_id):
 @app.get("/api/auth/captcha")
 def api_captcha():
     cid, code = captcha_store.new()
-    return {"ok": True, "captcha_id": cid, "image": captcha_store.render_png(code),
+    # ★ 生成失败时明确报错（503），不降级成「明文验证码」。
+    #   缺失 Pillow 的部署必须先把依赖装上，而不是拿到一个形同虚设的验证码。
+    try:
+        image = captcha_store.render_png(code)
+    except RuntimeError as exc:
+        # 这条验证码用不上了，让它自然过期即可（不额外消费，避免依赖内部 API）
+        raise HTTPException(503, str(exc))
+    return {"ok": True, "captcha_id": cid, "image": image,
             "expires_in": auth_mod.CAPTCHA_TTL}
 
 
@@ -810,6 +836,8 @@ def api_project_zones(request: Request, account_id: int = 0, region: str = ""):
 # ----------------------------------------------------------------------
 _INSPECT_CACHE = {}          # {(account_id, sections, region, zone): (ts, payload)}
 INSPECT_TTL = 45             # 秒；重复刷新页面不必反复打 GCP
+# 单飞等待上限（秒）：跟在别人后面等同一个 key 的勘察结果，最多等这么久
+INSPECT_WAIT_SEC = 90
 # ★ 缓存必须配锁：这在多 worker / 多线程下是共享可变字典。
 # 无锁时「判断存在 → 取出 → 写入 → 按大小淘汰」互相交错，
 # 轻则淘汰逻辑算错、重则并发 dict 变更。同时它还能防缓存击穿：
@@ -901,6 +929,36 @@ def api_inspect(request: Request, account_id: int = 0, sections: str = "",
         if now - ts < INSPECT_TTL:
             return {**cached, "cached": True, "age": int(now - ts)}
 
+    # ★ 单飞（single-flight）：同一个 key 只允许一个请求真正去打 GCP。
+    #   为什么必须做：整套勘察是 20~90 秒、几十个 GCP API 调用；`/api/inspect`
+    #   只要 view 权限（最低角色也能打），没单飞的话并发 N 次就是 N 次全量勘察 ——
+    #   GCP 配额和本机线程/带宽一起被打满。_INSPECT_INFLIGHT 早就定义了却**从未被用过**
+    #   （死代码），这里把它用起来。
+    _i_am_leader = False
+    if not fresh:
+        with _INSPECT_LOCK:
+            if ck not in _INSPECT_INFLIGHT:
+                _INSPECT_INFLIGHT.add(ck)
+                _i_am_leader = True
+    else:
+        _i_am_leader = True          # fresh=1 是显式要求绕缓存，让它自己去跑
+    if not _i_am_leader:
+        # 别人正在跑同一个 key：等它把缓存写好（最多等 INSPECT_WAIT_SEC）
+        deadline = time.time() + INSPECT_WAIT_SEC
+        while time.time() < deadline:
+            time.sleep(0.25)
+            with _INSPECT_LOCK:
+                _hit = _INSPECT_CACHE.get(ck)
+                if _hit and not fresh:
+                    ts, cached = _hit
+                    return {**cached, "cached": True, "age": int(time.time() - ts)}
+                if ck not in _INSPECT_INFLIGHT:
+                    break            # 领头的失败了/放弃了 → 自己接手
+        # 等超时也没结果：不阻塞用户，自己跑一遍（退化为旧行为）
+        with _INSPECT_LOCK:
+            _INSPECT_INFLIGHT.add(ck)
+        _i_am_leader = True
+
     try:
         res = gcp_inspect.inspect_sections(
             acc["key_path"], acc["project_id"], acc["email"], ordered,
@@ -908,6 +966,10 @@ def api_inspect(request: Request, account_id: int = 0, sections: str = "",
             proxy=acc.get("proxy", ""), proxy_type=acc.get("proxy_type", "HTTPS"))
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        if _i_am_leader:
+            with _INSPECT_LOCK:
+                _INSPECT_INFLIGHT.discard(ck)
 
     payload = {
         "ok": True, "cached": False,
@@ -921,12 +983,15 @@ def api_inspect(request: Request, account_id: int = 0, sections: str = "",
     }
     # 时间戳取「完成时刻」而非开始时刻：整套勘察可能跑 20-90 秒，
     # 若记开始时刻，条目一存进去就已经超过 TTL，缓存永远不命中。
-    _INSPECT_CACHE[ck] = (time.time(), payload)
-    # 缓存别无限涨
-    if len(_INSPECT_CACHE) > 32:
-        oldest = sorted(_INSPECT_CACHE.items(), key=lambda kv: kv[1][0])[:8]
-        for k, _ in oldest:
-            _INSPECT_CACHE.pop(k, None)
+    # ★ 写入与淘汰都必须在锁内：这里是无锁共享 dict，并发写会和别的线程的
+    #   `with _INSPECT_LOCK: .get()` 交错 —— 轻则淘汰算错，重则
+    #   `RuntimeError: dictionary changed size during iteration`（排序时被改）。
+    with _INSPECT_LOCK:
+        _INSPECT_CACHE[ck] = (time.time(), payload)
+        if len(_INSPECT_CACHE) > 32:
+            oldest = sorted(_INSPECT_CACHE.items(), key=lambda kv: kv[1][0])[:8]
+            for k, _ in oldest:
+                _INSPECT_CACHE.pop(k, None)
     return payload
 
 
@@ -941,8 +1006,27 @@ def api_get_config(request: Request):
 @app.post("/api/config")
 def api_set_config(request: Request, payload: dict):
     user = require(request, "settings")
-    # 显式保存时才允许写入危险开关（用户主动点了「保存为默认配置」）
-    data = {k: v for k, v in (payload or {}).items() if v is not None}
+    # ★ 只接受已知键，并把数值字段规整成合法整数。
+    #   早前是「去掉 None 后整体存」，于是任意键都能落库，而且可以在页面上把
+    #   disk_size_gb 存成 "abc" —— 之后每次「创建实例」都会 500（因为 spec 为空时
+    #   会回落到这份已保存的配置）。现在：未知键直接拒绝，数值字段按范围夹取。
+    known = set(catalog.DEFAULT_CONFIG.keys())
+    data = {}
+    unknown = []
+    for k, v in (payload or {}).items():
+        if v is None:
+            continue
+        if k not in known:
+            unknown.append(k)
+            continue
+        data[k] = v
+    if unknown:
+        raise HTTPException(400, "不认识的配置项：" + ", ".join(sorted(unknown)[:10]))
+    # 数值字段：非法即回落默认值，绝不把 "abc" 存进库
+    for key, lo, hi in (("disk_size_gb", 1, 65536), ("max_per_region", 1, 200)):
+        if key in data:
+            data[key] = catalog.safe_int(data[key], catalog.safe_int(
+                catalog.DEFAULT_CONFIG.get(key), lo), lo, hi)
     store.set_setting(_cfg_key(user["user_id"]), data)
     users_store.audit(user["username"], client_ip(request), "save_config")
     return {"ok": True, "scope": "user"}
@@ -951,13 +1035,15 @@ def api_set_config(request: Request, payload: dict):
 @app.post("/api/cost/estimate")
 def api_cost_estimate(request: Request, payload: dict):
     require(request, "view")
+    # ★ 用 safe_int 而不是裸 int()：早前传 {"hours":"abc"} 会 ValueError → 500
     return {"ok": True, "estimate": catalog.estimate_monthly_cost(
         payload.get("machine_type", catalog.DEFAULT_CONFIG["machine_type"]),
         payload.get("disk_type", catalog.DEFAULT_CONFIG["disk_type"]),
-        payload.get("disk_size_gb", catalog.DEFAULT_CONFIG["disk_size_gb"]),
+        catalog.safe_int(payload.get("disk_size_gb"),
+                         catalog.DEFAULT_CONFIG["disk_size_gb"], 1, 65536),
         payload.get("region", "us-central1"),
-        hours=int(payload.get("hours", 730)),
-        count=int(payload.get("count", 1)),
+        hours=catalog.safe_int(payload.get("hours"), 730, 1, 24 * 366),
+        count=catalog.safe_int(payload.get("count"), 1, 1, 1000),
         preemptible=bool(payload.get("preemptible")),
         spot=bool(payload.get("spot")),
     )}
@@ -1157,6 +1243,19 @@ def api_update_account(acc_id: int, request: Request, payload: dict):
     if not acc:
         raise HTTPException(404, "账号不存在")
 
+    # ★ 字段白名单：本接口只负责「备注 / 代理 / 代理协议」。
+    #   早前是 `fields = dict(payload)` 原样透传给 store，而 store 的白名单里
+    #   **含 key_path** —— 于是 operator 能用 PATCH 改掉 key_path，绕开
+    #   POST /api/accounts 里「必须校验内容确实是服务账号 JSON」那道检查。
+    #   改完 GET /api/accounts 会回 key_exists / key_file，
+    #   这就成了一个任意路径存在性探测（oracle）；更糟的是响应里把 key_path
+    #   从 updated 里滤掉了，调用方**看不出自己改过它**。
+    #   密钥路径只能经 POST /api/accounts（带内容校验）写入，不允许在这里改。
+    _ALLOWED = {"label", "proxy", "proxy_type"}
+    _unknown = sorted(set(payload) - _ALLOWED)
+    if _unknown:
+        raise HTTPException(400, "不允许修改字段：" + ", ".join(_unknown)
+                            + f"（本接口只支持：{', '.join(sorted(_ALLOWED))}）")
     fields = dict(payload)
 
     if "label" in fields:
@@ -1190,7 +1289,9 @@ def api_update_account(acc_id: int, request: Request, payload: dict):
     if not fields:
         raise HTTPException(400, "没有要修改的字段")
     store.update_account(acc_id, **fields)
-    return {"ok": True, "updated": sorted(k for k in fields if k != "key_path")}
+    # 如实回显实际改动的字段（以前这里把 key_path 滤掉，调用方看不出自己改过它 ——
+    # 现在 key_path 根本不允许改，就不需要再藏了）
+    return {"ok": True, "updated": sorted(fields.keys())}
 
 
 @app.get("/api/accounts/instance_counts")
@@ -1481,7 +1582,12 @@ def api_instance_action(req: ActionRequest, request: Request):
 @app.get("/api/tasks")
 def api_tasks(request: Request, limit: int = Query(100, ge=1, le=1000)):
     require(request, "view")
-    return {"ok": True, "tasks": tm.api_tasks_snapshot(limit), "db_tasks": store.get_tasks(limit)}
+    # ★ 两条来源都要脱敏：api_tasks_snapshot 内部已做，db_tasks 是直接读库的
+    #   原始行（payload 里含创建任务用的 root_password 明文）。
+    return {"ok": True,
+            "tasks": tm.api_tasks_snapshot(limit),
+            "db_tasks": [tasks_mod.sanitize_task_for_client(t)
+                         for t in store.get_tasks(limit)]}
 
 
 @app.get("/api/tasks/{task_id}")
@@ -1490,7 +1596,9 @@ def api_task(task_id: str, request: Request):
     task = tm.api_tasks.get(task_id) or store.get_task(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
-    return {"ok": True, "task": task}
+    # ★ 这里读的是 tm.api_tasks 的**原始对象**（没走 snapshot 的脱敏），
+    #   必须自己再过一次，否则详情接口就成了绕过脱敏的后门。
+    return {"ok": True, "task": tasks_mod.sanitize_task_for_client(task)}
 
 
 @app.post("/api/tasks/{task_id}/cancel")
@@ -1585,10 +1693,20 @@ SSHKEY_READ_DIRS = [
 ]
 
 # 公钥内容前缀（只认这些，读到的任何其它内容一律拒绝）
+# 允许的 SSH 公钥前缀。
+# ★ 末尾两类是 FIDO 安全钥匙（YubiKey 等）的**公钥类型名**，是 OpenSSH 协议常量，
+#   不是密钥本体。早前这里只写了 "sk-ssh-ed25519" / "sk-ecdsa-sha2-"（缺 @openssh.com
+#   后缀），虽然 startswith 仍然能匹配上，但写全更不容易让人误解成别的东西。
+#
+# ⚠ 维护提示：这两个字面量以 sk- 开头，会被某些"密钥打码"环节显示成 ***，
+#   于是 cat/grep 看到的可能不是文件真实内容 —— 判断前先看 git diff，
+#   别据此就以为源码被改坏了（本项目踩过一次这个坑）。
 _PUBKEY_PREFIXES = ("ssh-rsa", "ssh-ed25519", "ssh-dss", "ecdsa-sha2-",
-                    "sk-ssh-ed25519", "sk-ecdsa-sha2-", "ssh-rsa-cert",
+                    "sk-ssh-ed25519@openssh.com",
+                    "sk-ecdsa-sha2-nistp256@openssh.com",
+                    "ssh-rsa-cert",
                     "ssh-ed25519-cert", "ecdsa-sha2-nistp256-cert")
-# 明显是私钥的文件名，一律不读
+
 _PRIVATE_KEY_HINTS = (".pem", ".key", ".ppk", ".pfx", ".p12", ".jks", ".keystore")
 _MAX_PUBKEY_BYTES = 8192
 
@@ -1691,6 +1809,10 @@ async def ws_logs(ws: WebSocket):
     await ws.accept()
     since = 0
     first = True
+    # ★ 会话复检时刻。WebSocket 是长连接，握手只发生一次 —— 只在握手时校验
+    #   会造成「管理员踢掉被窃的会话后，那条连接仍在持续收到任务日志」
+    #   （日志含 SSH 命令回显，可能有敏感输出）。所以这里定期回头确认。
+    last_auth = time.time()
     try:
         try:
             init = await asyncio.wait_for(ws.receive_json(), timeout=1.5)
@@ -1699,6 +1821,15 @@ async def ws_logs(ws: WebSocket):
             pass
         await ws.send_json({"type": "hello", "since_id": since, "user": sess["username"]})
         while True:
+            # 每 WS_AUTH_EVERY 秒复检一次：会话被吊销 / 已过期 / 账号被禁用 /
+            # 需要改密 → 立即断开，不再推送任何内容
+            if time.time() - last_auth >= WS_AUTH_EVERY:
+                last_auth = time.time()
+                still = users_store.get_session(token) if token else None
+                if not still or bool(still.get("must_change")):
+                    await ws.close(code=4401 if not still else 4403)
+                    return
+
             logs = store.get_logs(since, 200)
             if logs:
                 since = logs[-1]["id"]
