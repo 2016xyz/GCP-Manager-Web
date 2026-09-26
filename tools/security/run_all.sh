@@ -39,6 +39,7 @@ run "ws_revoke（WS 会话吊销生效）"           python3 tools/security/poc_
 run "execute_all（execute 的 all 三态语义）" python3 tools/security/poc_execute_all.py
 run "proxy_race（代理环境变量并发隔离）"     python3 tools/security/poc_proxy_race.py
 run "log_password_leak（日志凭据擦除）"      python3 tools/security/poc_log_password_leak.py
+run "low_hardening（枚举/会话吊销/脚本 trace）" python3 tools/security/poc_low_hardening.py
 run "singleflight（勘察缓存单飞）"           php php/tests/singleflight_check.php
 run "fd_inherit（worker 不继承监听套接字）"  php php/tests/fd_inherit_check.php
 

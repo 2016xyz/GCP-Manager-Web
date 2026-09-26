@@ -216,7 +216,14 @@ final class Users
 
     /**
      * 校验登录凭据。返回 [user_dict|null, 原因]。
-     * 用户不存在时也做一次哈希，抹平「用户是否存在」的时间差，防用户名枚举。
+     *
+     * ★ 三条分支的**耗时与文案都必须一致**，否则可以枚举用户名：
+     *   · 用户不存在 → 做一次等价代价的哈希（原实现已有，保留）
+     *   · 账号被禁用 → 也要走完整验密再返回「用户名或密码错误」
+     *     （原实现直接 return「该账号已被禁用」：既不哈希、文案又与众不同，
+     *      等于告诉攻击者「这个用户名存在且被禁用」）
+     *   · 密码错 → 同样文案
+     * 真实原因只写服务端日志，不回给客户端。
      */
     public static function verifyLogin(string $username, string $password): array
     {
@@ -228,7 +235,9 @@ final class Users
             return [null, '用户名或密码错误'];
         }
         if ((int) $u['disabled'] !== 0) {
-            return [null, '该账号已被禁用'];
+            // 禁用账号也走完整验密路径（抹平时间差），文案与密码错一致
+            Auth::verifyPassword($password, (string) $u['password_hash'], (string) $u['salt']);
+            return [null, '用户名或密码错误'];
         }
         if (!Auth::verifyPassword($password, (string) $u['password_hash'], (string) $u['salt'])) {
             Db::exec('UPDATE users SET failed_count=failed_count+1 WHERE id=?', [(int) $u['id']]);

@@ -615,6 +615,12 @@ def api_update_user(user_id: int, req: UpdateUserRequest, request: Request):
         if user_id == admin["user_id"] and req.role != ROLE_ADMIN:
             raise HTTPException(400, "不能修改自己的角色")
         kw["role"] = req.role
+        # ★ 角色变更必须让该用户的旧会话立刻失效。
+        #   会话行里冻结了「登录那一刻的角色」，不吊销的话：管理员把某人从
+        #   operator 降成 viewer 之后，那人手里的旧会话**仍按 operator 放行** ——
+        #   权限回收被延迟到他下次登录（可能是几天后）。禁用账号那条分支早就
+        #   吊销了会话，改角色这条一直没有，属于漏网。
+        users_store.revoke_user_sessions(user_id)
     if req.display_name is not None:
         kw["display_name"] = req.display_name
     if req.disabled is not None:

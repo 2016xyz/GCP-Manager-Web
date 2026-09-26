@@ -145,14 +145,25 @@ class UserStore:
             return cur.rowcount
 
     def verify_login(self, username, password):
-        """返回 (user_dict|None, 原因)"""
+        """返回 (user_dict|None, 原因)。
+
+        ★ 三条分支的**耗时与文案都必须一致**，否则可以枚举用户名：
+          · 用户不存在 → 做一次等价代价的哈希（原实现已有，保留）
+          · 账号被禁用 → 也要走完整验密再返回「用户名或密码错误」
+            （原实现直接 return「该账号已被禁用」：既不哈希，文案还与众不同，
+             等于告诉攻击者「这个用户名存在且被禁用」）
+          · 密码错 → 同样文案
+        真实原因（禁用 / 密码错）只写服务端日志，不回给客户端。
+        """
         u = self.get_user(username=username)
         if not u:
             # 用户不存在时也做一次哈希，避免用户名枚举的时间差
             hash_password(password or "x")
             return None, "用户名或密码错误"
         if u["disabled"]:
-            return None, "该账号已被禁用"
+            # 关键：禁用账号也要走完整验密路径（抹平时间差），且文案与密码错一致
+            verify_password(password or "", u["password_hash"], u["salt"])
+            return None, "用户名或密码错误"
         if not verify_password(password or "", u["password_hash"], u["salt"]):
             with self.lock:
                 self.conn.execute("UPDATE users SET failed_count=failed_count+1 WHERE id=?",

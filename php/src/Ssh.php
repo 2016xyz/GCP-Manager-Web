@@ -361,10 +361,20 @@ final class Ssh
 set -euxo pipefail
 mkdir -p /root
 LOG_FILE=/root/gcp_root_mode.log
+# 日志文件先建成 600 再接管输出：默认 umask 下 tee 会建出 644，
+# 而同机其它用户不应该看到这份安装过程记录
+: > "$LOG_FILE"
+chmod 600 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[INFO] starting root password mode setup"
 export DEBIAN_FRONTEND=noninteractive
+# ★ 改密码这一行必须关掉 trace。
+#   `set -x` 会把每条命令连参数一起回显到 stderr，而上面刚把 stderr 重定向进了
+#   $LOG_FILE —— 于是 'root:<明文密码>' 会被原样写进实例上的日志文件；
+#   该日志同时进 GCP 串口输出缓冲区，等于把 root 密码留在了别处。
+set +x
 echo 'root:__PWD__' | chpasswd
+set -x
 passwd -u root || true
 if [ -f /etc/ssh/sshd_config ]; then
   sed -i 's/^\s*#\?\s*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config || true

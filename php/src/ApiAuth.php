@@ -332,6 +332,16 @@ final class ApiAuth
             }
         }
         $n = Users::updateUser($uid, $kw);
+        // ★ 改角色 / 禁用 后必须让该用户的旧会话立刻失效。
+        //   会话行里冻结了「登录那一刻的 role」（代码里是 SELECT s.*），而
+        //   Auth::requirePerm 读的就是会话里的 role —— 不吊销的话，把某人从
+        //   operator 降成 viewer 之后，他手里的旧会话**仍按 operator 放行**，
+        //   权限回收被延迟到下次登录。
+        //   （禁用那条靠 Sessions::getSession 的 user_disabled 联动能兜住，
+        //     但那是「读到会话时才发现」，不如显式吊销干净；这里两条都吊销。）
+        if (array_key_exists('role', $kw) || !empty($kw['disabled'])) {
+            Users::revokeUserSessions($uid);
+        }
         Users::addAudit(
             (string) ($me['username'] ?? ''), Http::clientIp(), 'update_user',
             (string) $target['username'], json_encode($kw, JSON_UNESCAPED_UNICODE) ?: '', true

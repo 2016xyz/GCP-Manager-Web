@@ -534,7 +534,14 @@ cap_d = client.get("/api/auth/captcha").json()
 r = client.post("/api/auth/login", json={"username": "op1", "password": "Op1@GCP2026!",
                                          "captcha_id": cap_d["captcha_id"],
                                          "captcha_code": auth_mod.captcha_store._items[cap_d["captcha_id"]]["code"]})
-check("被禁用用户无法登录", r.status_code == 401 and "禁用" in r.json().get("detail", ""), r.text[:120])
+# ★ 断言改成「文案与密码错**完全一致**」而不是「含『禁用』字样」。
+#   早前禁用分支会回「该账号已被禁用」，那条文案既不哈希（耗时 0ms vs 100ms）
+#   又与密码错的文案不同 —— 等于告诉攻击者「这个用户名存在且被禁用」。
+#   现在三条分支统一回「用户名或密码错误」，这里连文案一起锁住，防止被改回去。
+_detail = r.json().get("detail", "")
+check("被禁用用户无法登录", r.status_code == 401, r.text[:120])
+check("★ 禁用账号的文案与密码错一致（防用户名枚举）",
+      _detail == "用户名或密码错误", f"实际文案：{_detail!r}")
 client.patch(f"/api/users/{uid_op}", json={"disabled": False})
 switch("admin", ADMIN_PW)
 
