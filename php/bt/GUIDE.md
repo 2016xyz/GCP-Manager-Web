@@ -87,8 +87,65 @@ curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/php/in
 `/bt/*.sh` 全都可能被直接下载。设了运行目录后 Web 根就是 `public/`，
 `src/` 与 `data/` 在 Web 之外，物理不可达。
 
-> 即使忘了设，本项目的伪静态规则里也有 `deny all` 兜底 —— 但那是纵深防御的第二层，
+> 即使忘了设，本项目的伪静态规则里也有兜底 —— 但那是纵深防御的第二层，
 > 不能替代正确设置。
+
+### ★★ 血泪坑：伪静态规则里**绝不能**写 `location = /index.php` ★★
+
+线上实测踩过，后果严重，务必记住：
+
+nginx 的 location 匹配优先级是
+**「精确 `=` > `^~` 前缀 > 正则（按书写顺序）> 最长前缀」**。
+
+宝塔的站点配置里有一份 PHP-FPM 转发（`enable-php-XX.conf`）：
+
+```nginx
+location ~ [^/]\.php(/|$)
+{
+    try_files $uri =404;
+    fastcgi_pass  unix:/tmp/php-cgi-82.sock;
+    ...
+}
+```
+
+如果你在**伪静态**里写了：
+
+```nginx
+location = /index.php { client_max_body_size 8m; fastcgi_read_timeout 300s; }
+```
+
+这个**精确匹配优先级最高**，会直接**盖掉**上面那份带 `fastcgi_pass` 的正则 location；
+而你这份没有 `fastcgi_pass` —— 于是 `/index.php` 退化成**静态文件**：
+
+```
+GET /login  →  200
+Content-Type: application/octet-stream
+Content-Length: 12053          ← 正好是 public/index.php 的大小
+<?php  /**  index.php —— 唯一入口：中间件 + 路由分发  ...   ← 源码被整个下载
+```
+
+**所有路由全废 + 入口源码泄漏**。修法：
+
+* 伪静态里**只做**「路由到入口 + 拒绝敏感路径」，**PHP 解析一律交给宝塔**；
+* 需要调超时/上传上限，用**服务器级**指令，放进宝塔的站点扩展目录
+  （站点配置里已被 `include`，且在 `location` 之外，会被各 location 继承）：
+
+  ```bash
+  mkdir -p /www/server/panel/vhost/nginx/extension/<你的域名>
+  cat > /www/server/panel/vhost/nginx/extension/<你的域名>/tuning.conf <<'EOF'
+  client_max_body_size    8m;
+  fastcgi_read_timeout  300s;
+  fastcgi_send_timeout  300s;
+  EOF
+  nginx -t && nginx -s reload
+  ```
+
+> 自检一行（必须输出 0）：
+> `grep -cE '^[[:space:]]*location[[:space:]]*=[[:space:]]*/index\.php' \
+>    /www/server/panel/vhost/rewrite/<你的域名>.conf`
+
+另外敏感目录用 `^~` 前缀匹配（`location ^~ /data/ { return 404; }`）而不是普通正则 ——
+`^~` 的优先级高于正则，能稳定压过宝塔那份 PHP 正则，避免 `/src/x.php` 被送进 PHP-FPM。
 
 ---
 

@@ -2761,6 +2761,26 @@ else:
           "/proc/self/fd" in open(os.path.join(_php_root, "bin", "task-runner.php"),
                                   encoding="utf-8").read())
 
+    # ── 宝塔伪静态规则：绝不能出现 `location = /index.php`（真实事故，见下）──────
+    # 事故经过：nginx 的 location 优先级是「精确 = > ^~ 前缀 > 正则（按书写顺序）> 最长前缀」。
+    # 早先版本在 bt/nginx-rewrite.conf 里写了 `location = /index.php { client_max_body_size …; }`
+    # 想「只补超时」。但这个精确匹配会**盖掉宝塔 enable-php-XX.conf 里那份带 fastcgi_pass 的
+    # 正则 location**，而它自己没有 fastcgi_pass —— 于是 /index.php 退化成静态文件被直接下载：
+    #     GET /login → 200  application/octet-stream  12053 字节（正是 public/index.php 的源码）
+    # 线上实测复现，所有路由全废、且泄漏入口源码。修法：删掉该块，PHP 解析交给宝塔；
+    # 超时/上传上限改用**服务器级**指令（vhost 的 extension 目录 include，会被各 location 继承）。
+    _rw = open(os.path.join(_php_root, "bt", "nginx-rewrite.conf"), encoding="utf-8").read()
+    # 只看「非注释行」—— 文件里用注释解释了这个坑，注释里出现这些字样是正常的
+    _rwd = [ln for ln in _rw.splitlines() if not ln.lstrip().startswith("#")]
+    _active_index = [ln for ln in _rwd if re.match(r"^\s*location\s*=\s*/index\.php", ln)]
+    check("★ 伪静态规则里没有生效的 `location = /index.php`（否则会盖掉宝塔的 PHP 转发）",
+          not _active_index, f"发现 {len(_active_index)} 处生效指令")
+    check("★ 敏感目录用 ^~ 前缀匹配（优先级高于正则，稳定压过宝塔的 PHP 正则）",
+          all(f"location ^~ /{d}/" in _rw for d in ("src", "bin", "bt", "data", "tools")),
+          "至少一个敏感目录没用 ^~")
+    check("★ 伪静态规则里不得出现生效的 fastcgi_pass（PHP 解析交给宝塔，避免重复/冲突）",
+          not any("fastcgi_pass" in ln for ln in _rwd), "规则文件里出现了生效的 fastcgi_pass")
+
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

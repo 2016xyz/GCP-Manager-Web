@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.3.2';
+    public const VERSION = '1.3.3';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,17 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.3.3',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【宝塔部署致命缺陷·线上实测复现】bt/nginx-rewrite.conf 里写了 `location = /index.php { client_max_body_size 8m; fastcgi_read_timeout 300s; }`，想「只补超时」。但 nginx 的 location 优先级是「精确 = > ^~ 前缀 > 正则（按书写顺序）> 最长前缀」，这个精确匹配**盖掉了宝塔 enable-php-XX.conf 里那份带 fastcgi_pass 的正则 location**，而它自己没有 fastcgi_pass —— 于是 /index.php 退化成静态文件被直接下载：GET /login → 200 application/octet-stream 12053 字节（正是 public/index.php 的源码）。后果：所有路由全废 + 入口源码泄漏。已在真实宝塔（CentOS Stream 9 + 宝塔 9.0.0 + PHP 8.2）上复现并修复',
+                    '修法：伪静态只保留「路由到入口 + 拒绝敏感路径」，PHP 解析一律交给宝塔；需要调超时/上传上限改用**服务器级**指令，放进宝塔站点扩展目录 `/www/server/panel/vhost/nginx/extension/<域名>/tuning.conf`（在 location 之外，会被各 location 继承）',
+                    '敏感目录由普通正则改为 `^~` 前缀匹配（location ^~ /src/ 等）：`^~` 优先级高于正则，能稳定压过宝塔那份 PHP 正则，避免 /src/*.php 被送进 PHP-FPM 执行',
+                    'tests_e2e.py 新增 3 条断言锁死该缺陷：伪静态里不得有生效的 `location = /index.php`、不得有生效的 fastcgi_pass、敏感目录必须用 ^~（断言只看非注释行，避免把说明文字算进去）',
+                    'php/bt/GUIDE.md 新增「血泪坑」小节：完整原理、事故现象、修法与一行自检命令',
+                ],
+            ],
             [
                 'version' => '1.3.2',
                 'date'    => '2026-09-27',
