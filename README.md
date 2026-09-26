@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.2.5-1a73e8)
+![版本](https://img.shields.io/badge/version-1.2.6-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -45,6 +45,18 @@ curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/instal
 
 装完即可打开 `http://<你的IP>:8000/`。
 
+**安装目录（很重要，升级时要用）**
+
+| 执行方式 | 装到哪里 |
+|---|---|
+| `curl … \| bash`（root） | **`/opt/gcp-manager-web`** |
+| `curl … \| bash`（非 root） | `$HOME/gcp-manager-web` |
+| 在克隆好的仓库里 `bash install.sh` | 就地安装（仓库所在目录） |
+| 显式指定 | 用多少是多少（`APP_DIR=…`） |
+
+安装结束时会打印**真实的安装目录**和一条可直接复制的升级命令；
+同时路径会写入 `/etc/gcp-manager-web.path`——忘了装在哪就 `cat` 这个文件。
+
 指定端口 / 目录 / 不装服务：
 
 ```bash
@@ -60,9 +72,6 @@ curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/instal
 curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh \
   | ONLY_FETCH=1 bash
 ```
-
-管道模式下会把源码下载到 `./gcp-manager-web`（有 git 用 `git clone`，没有则下
-`main.tar.gz`）；在已克隆的仓库里执行 `bash install.sh` 则就地安装，不会重复下载。
 
 > 若你的 shell 已经为别的程序设了 `PORT`，会被脚本继承（安装时会明确标注
 > 「来自环境变量 PORT」）。想固定端口就显式传 `PORT=8000`。
@@ -164,12 +173,27 @@ systemctl disable gcp-manager-web      # 取消开机自启
 
 ## 升级到最新版
 
+`update.sh` 是**升级通道**，前提是这台机器已经装过（首次安装见上面「快速开始」）。
+
+先确认装在哪（不确定就查这一条）：
+
 ```bash
-cd /opt/gcp-manager-web && bash update.sh
+cat /etc/gcp-manager-web.path 2>/dev/null \
+  || find / -maxdepth 4 -name app.py -path '*gcp*' 2>/dev/null | head
+```
+
+然后进那个目录执行：
+
+```bash
+cd /opt/gcp-manager-web && bash update.sh     # 默认安装位置（root + 管道安装）
 ```
 
 `update.sh` 会拉取最新代码、更新依赖、重启服务，**全程不碰 `data/` 目录**
 （账号、密钥、数据库都在那里，升级不会丢）。
+
+> 目录不对也不会白跑：`update.sh` 自己会去 `/etc/gcp-manager-web.path`、
+> 常见位置、浅层搜索里找部署目录；确实没装过它会明确告诉你「先装再用」，
+> 而不是丢一句「找不到 app.py」。
 
 只想知道有没有新版本、不想动手：
 
@@ -183,12 +207,12 @@ bash update.sh --check
 |---|---|
 | `bash update.sh` | 更新到最新版并重启服务 |
 | `bash update.sh --check` | 只比对版本，不做任何改动 |
-| `APP_DIR=/opt/gcp-manager-web bash update.sh` | 部署目录不在当前目录时指定 |
+| `APP_DIR=/your/path bash update.sh` | 部署目录不在当前目录时指定 |
 | `FORCE=1 bash update.sh` | 本地有未提交改动时也强制更新（**改动会被丢弃**） |
 | `NO_RESTART=1 bash update.sh` | 只更新代码，不重启服务 |
 | `PIP_TIMEOUT=600 bash update.sh` | 网络慢时放宽依赖安装超时 |
 
-联网直接执行（不用先进目录）：
+联网直接执行（不用先进目录，脚本会自己定位）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/update.sh | bash
@@ -207,10 +231,10 @@ curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/update
 
 ### 回滚
 
-git 安装会打印更新前的提交号，照着回退即可：
+git 安装会打印更新前的提交号，照着回退即可（目录换成你自己的，默认 `/opt/gcp-manager-web`）：
 
 ```bash
-cd /opt/gcp-manager-web
+cd "$(cat /etc/gcp-manager-web.path 2>/dev/null || echo /opt/gcp-manager-web)"
 git reset --hard <更新前的提交号>
 sudo systemctl restart gcp-manager-web
 ```

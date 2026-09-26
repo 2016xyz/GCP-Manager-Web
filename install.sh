@@ -39,11 +39,35 @@ fi
 PORT_WAS_SET="${PORT:+yes}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
-# 有本地源码就地安装；管道模式装到 ./gcp-manager-web
-APP_DIR="${APP_DIR:-${SRC_DIR:-$PWD/gcp-manager-web}}"
+# 安装目录解析优先级：APP_DIR 环境变量 > 本地源码所在目录 > 默认绝对路径。
+#
+# ★ 为什么管道模式要用绝对路径：
+#   原来是 `${SRC_DIR:-$PWD/gcp-manager-web}` —— 管道模式（README 推荐的一行命令
+#   `curl … | bash`）下 SRC_DIR 为空，于是装到「执行时的当前目录」下。
+#   用户在 /root 执行 → 装到 /root/gcp-manager-web；而 README 的升级指引写的是
+#   `cd /opt/gcp-manager-web && bash update.sh` —— 路径对不上，升级时直接
+#   `cd: 没有那个文件或目录`。安装路径依赖「你在哪执行」，对用户不可预测。
+#   现在管道模式固定装到绝对路径：root 用 /opt/gcp-manager-web（与文档一致），
+#   非 root 用 $HOME/gcp-manager-web（/opt 通常不可写）。
+if [ -n "${APP_DIR:-}" ]; then
+  APP_DIR="$APP_DIR"
+elif [ -n "$SRC_DIR" ]; then
+  APP_DIR="$SRC_DIR"                      # 在克隆的仓库里就地安装
+elif [ "$(id -u)" = "0" ]; then
+  APP_DIR="/opt/gcp-manager-web"
+else
+  APP_DIR="${HOME:-$PWD}/gcp-manager-web"
+fi
+# 落成绝对路径，避免后续 cd 到别处后相对路径失效
+case "$APP_DIR" in
+  /*) : ;;
+  *)  APP_DIR="$PWD/$APP_DIR" ;;
+esac
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 SERVICE_NAME="${SERVICE_NAME:-gcp-manager-web}"
 PY="${PYTHON:-python3}"
+# 安装路径标记文件：装完写一份，之后「忘了装在哪」可直接读它定位
+INSTALL_MARKER="${INSTALL_MARKER:-/etc/gcp-manager-web.path}"
 
 C_OK='\033[32m'; C_WARN='\033[33m'; C_ERR='\033[31m'; C_DIM='\033[2m'; C_0='\033[0m'
 ok()   { printf "${C_OK}  ✓${C_0} %s\n" "$*"; }
@@ -306,6 +330,17 @@ fi
 # ── 6. 收尾信息 ────────────────────────────────────────────────────────────
 step "完成"
 
+# 记录安装路径，解决「装完过一阵忘了装在哪」。
+# 之前安装路径取决于执行时的当前目录，而 README 的升级指引写死了
+# /opt/gcp-manager-web —— 用户按文档升级会直接 `cd: 没有那个文件或目录`。
+# 写一份标记后，update.sh 能在找不到 app.py 时自动定位到这里。
+if [ "$(id -u)" = "0" ] && [ -n "${INSTALL_MARKER:-}" ]; then
+  if printf '%s\n' "$APP_DIR" > "$INSTALL_MARKER" 2>/dev/null; then
+    chmod 644 "$INSTALL_MARKER" 2>/dev/null || true
+    info "安装路径已记录到 $INSTALL_MARKER（忘了装在哪可 cat 它）"
+  fi
+fi
+
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$IP" ] || IP="127.0.0.1"
 
@@ -313,6 +348,7 @@ printf "\n"
 APP_VER="$(grep -m1 '^VERSION = ' "$APP_DIR/core/version.py" 2>/dev/null | cut -d'"' -f2 || true)"
 printf "  版本     ${C_OK}v%s${C_0}\n" "${APP_VER:-unknown}"
 printf "  仓库     ${C_DIM}https://github.com/2016xyz/GCP-Manager-Web${C_0}\n"
+printf "  安装目录 ${C_OK}%s${C_0}\n" "$APP_DIR"
 printf "  控制台   ${C_OK}http://%s:%s/${C_0}\n" "$IP" "$PORT"
 printf "  本机访问 http://127.0.0.1:%s/\n" "$PORT"
 printf "  API 文档 http://127.0.0.1:%s/docs\n" "$PORT"

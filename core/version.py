@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,31 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.2.6",
+        "date": "2026-09-26",
+        "notes": [
+            "修复「按文档升级却报 cd: 没有那个文件或目录」——安装路径与文档不一致，"
+            "属交付物缺陷，非使用问题。三处一起改，并真跑验证了 4 个场景",
+            "★ 根因：install.sh 的管道模式（README 推荐的一行命令 curl … | bash）"
+            "默认装到 $PWD/gcp-manager-web，即「你在哪个目录执行就装到哪」；"
+            "而 README 的升级指引写死 cd /opt/gcp-manager-web && bash update.sh。"
+            "两处对不上时，cd 在 update.sh 运行之前就失败了，脚本连解释的机会都没有",
+            "★ install.sh：管道模式默认改为绝对路径 —— root 装 /opt/gcp-manager-web"
+            "（与文档一致），非 root 装 $HOME/gcp-manager-web；在克隆仓库里执行仍是"
+            "就地安装；APP_DIR 显式指定优先级最高。安装路径统一落成绝对路径",
+            "★ install.sh：装完把真实安装路径写入 /etc/gcp-manager-web.path，"
+            "并在收尾信息中新增「安装目录」一行（升级命令本来就打印真实路径）",
+            "★ update.sh：新增部署目录自动定位 —— 在 /etc/gcp-manager-web.path、"
+            "常见位置（/opt、/srv、$HOME 等）、浅层搜索中找一个真部署（排除 .bak/.old/"
+            "临时目录，且必须同时有 app.py 与 core/version.py）。找到了自动切过去；"
+            "确实没装过则明确提示「update.sh 是升级通道，不能代替首次安装」并给出"
+            "安装命令与查找命令，退出码 1 —— 而不是丢一句「找不到 app.py」",
+            "★ README：新增「安装目录」对照表（哪种执行方式装到哪）；升级章节补"
+            "「先确认装在哪」的查找命令，并说明目录不对也不会白跑；回滚章节的写死"
+            "路径改为从标记文件读取",
+        ],
+    },
     {
         "version": "1.2.5",
         "date": "2026-09-26",

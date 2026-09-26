@@ -50,7 +50,65 @@ echo
 echo "══ GCP Manager Web · 升级 ══"
 info "部署目录 $APP_DIR"
 
-[ -f "$APP_DIR/app.py" ] || die "在 $APP_DIR 找不到 app.py，请用 APP_DIR= 指定正确的部署目录"
+# ── 部署目录定位 ────────────────────────────────────────────────────────────
+# 为什么需要这段：安装路径曾是「执行 install.sh 时的当前目录」，而文档里的
+# 升级指引写死了 /opt/gcp-manager-web —— 两处对不上时，用户敲
+# `cd /opt/gcp-manager-web && bash update.sh` 会在 **cd 阶段**就报
+# 「没有那个文件或目录」，根本轮不到本脚本解释。
+# 现在：找不到 app.py 就自动去标记文件 / 常见位置 / 浅层搜索里定位；
+# 确实没有则明确告诉用户「这台机器还没装过」，而不是一句找不到 app.py。
+locate_app_dir() {
+  local c
+  # 1) 安装时写的标记文件（install.sh 会写）
+  if [ -f /etc/gcp-manager-web.path ]; then
+    c="$(head -n1 /etc/gcp-manager-web.path 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$c" ] && [ -f "$c/app.py" ] && { echo "$c"; return 0; }
+  fi
+  # 2) 常见部署位置
+  for c in /opt/gcp-manager-web /srv/gcp-manager-web /usr/local/gcp-manager-web \
+           "${HOME:-/root}/gcp-manager-web" /root/gcp-manager-web; do
+    [ -f "$c/app.py" ] && { echo "$c"; return 0; }
+  done
+  # 3) 浅层搜索（限定名字含 gcp，排除备份/临时目录，避免误认 .bak / .old）
+  local hit
+  hit="$(find /opt /srv /root /home /usr/local -maxdepth 4 -name app.py \
+          -path '*gcp*' 2>/dev/null \
+          | grep -Ev '/(\.|~)|\.bak|\.old|\.orig|\.save|-bak|-old|/backup|/tmp' \
+          | head -n1 || true)"
+  if [ -n "$hit" ]; then
+    c="$(dirname "$hit")"
+    [ -f "$c/app.py" ] && [ -f "$c/core/version.py" ] && { echo "$c"; return 0; }
+  fi
+  return 1
+}
+
+if [ ! -f "$APP_DIR/app.py" ]; then
+  warn "在 $APP_DIR 找不到 app.py，尝试自动定位部署目录…"
+  if FOUND="$(locate_app_dir)"; then
+    APP_DIR="$FOUND"
+    ok "已定位到部署目录 $APP_DIR"
+  else
+    cat >&2 <<'EOF'
+
+  ✘ 找不到任何已部署的实例。
+
+  常见原因：**这台机器还没装过** —— update.sh 只是「已安装之后的升级通道」，
+  不能代替首次安装（很多人先试更新才发现还没装）。
+
+  首次安装（装完会打印真实安装路径与升级命令）：
+      curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/install.sh | bash
+
+  确认装过、只是路径不同，就显式指定：
+      APP_DIR=/你的/部署路径 bash update.sh
+
+  想知道它装在哪个目录：
+      cat /etc/gcp-manager-web.path 2>/dev/null \
+        || find / -maxdepth 4 -name app.py -path '*gcp*' 2>/dev/null | head
+
+EOF
+    exit 1
+  fi
+fi
 cd "$APP_DIR"
 
 # ── 数据目录兜底备份 ────────────────────────────────────────────────

@@ -1923,11 +1923,16 @@ if _inst:
 
     # 端到端：模拟管道模式（无 BASH_SOURCE）执行 ONLY_FETCH，验证真能自举
     _tmp = tempfile.mkdtemp(prefix="gcpweb-inst-")
+    # 显式指定 APP_DIR：管道模式默认已改为绝对路径（root → /opt/gcp-manager-web），
+    # 不再落在 cwd 下。测试要的是「能不能自举出源码」，所以自己指定隔离目录，
+    # 不依赖默认值、也不污染 /opt。
+    _dst_dir = os.path.join(_tmp, "gcp-manager-web")
     _pipe = _sp.run(
         ["bash", "-c",
-         f'cat "{BASE_DIR}/install.sh" | ONLY_FETCH=1 REPO_URL="{BASE_DIR}" bash'],
+         f'cat "{BASE_DIR}/install.sh" | ONLY_FETCH=1 APP_DIR="{_dst_dir}" '
+         f'REPO_URL="{BASE_DIR}" bash'],
         cwd=_tmp, capture_output=True, text=True, timeout=180)
-    _dst = os.path.join(_tmp, "gcp-manager-web", "app.py")
+    _dst = os.path.join(_dst_dir, "app.py")
     check("★ 管道模式实测：能自举出源码（无 BASH_SOURCE 报错）",
           _pipe.returncode == 0 and os.path.exists(_dst),
           f"rc={_pipe.returncode} app.py={os.path.exists(_dst)} "
@@ -2561,6 +2566,89 @@ check("★ ★ T5 fmtTime 只定义一次（原来定义了两次，后者覆盖
 check("★ ★ T5 fmtTime 同时支持数字时间戳与 ISO 字符串",
       "t < 1e12 ? t*1000 : t" in _html.replace(" ", " ")
       or ("<1e12" in _html.replace(" ", "") and "Date.parse" in _html))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# U 段：安装/升级路径一致性（用户按文档升级报 cd: 没有那个文件或目录）
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n" + "-" * 76)
+print("U 段：安装路径与文档一致性")
+print("-" * 76)
+
+_inst = open(os.path.join(BASE_DIR, "install.sh"), encoding="utf-8").read()
+_upd = open(os.path.join(BASE_DIR, "update.sh"), encoding="utf-8").read()
+_rd = open(os.path.join(BASE_DIR, "README.md"), encoding="utf-8").read()
+
+# ── U1. install.sh：默认安装目录必须是绝对路径，不能再依赖 $PWD ──
+_inst_code = "\n".join(l for l in _inst.split("\n")
+                            if not l.lstrip().startswith("#"))
+check("★ ★ U1 install.sh 不再把 $PWD/gcp-manager-web 当默认（代码行，不含注释）",
+      "SRC_DIR:-$PWD/gcp-manager-web" not in _inst_code
+      and '$PWD/gcp-manager-web' not in _inst_code,
+      "仍出现在代码里")
+check("★ ★ U1 管道模式 root 默认装到 /opt/gcp-manager-web（与 README 一致）",
+      'APP_DIR="/opt/gcp-manager-web"' in _inst)
+check("★ U1 非 root 默认装到 $HOME/gcp-manager-web（/opt 不可写时不报错）",
+      'APP_DIR="${HOME:-$PWD}/gcp-manager-web"' in _inst)
+check("★ U1 在克隆仓库里执行仍是就地安装",
+      'APP_DIR="$SRC_DIR"' in _inst)
+check("★ U1 APP_DIR 显式指定优先级最高",
+      'if [ -n "${APP_DIR:-}" ]; then' in _inst)
+check("★ U1 安装目录落成绝对路径（避免后续 cd 后相对路径失效）",
+      "落成绝对路径" in _inst or 'APP_DIR="$PWD/$APP_DIR"' in _inst)
+
+# ── U2. install.sh：写路径标记 + 收尾打印 ──
+check("★ ★ U2 install.sh 把安装路径写入标记文件",
+      "INSTALL_MARKER" in _inst and "/etc/gcp-manager-web.path" in _inst)
+check("★ U2 收尾信息打印「安装目录」",
+      'printf "  安装目录 ' in _inst)
+check("★ U2 收尾打印的升级命令用的是真实 APP_DIR（非写死）",
+      'printf "    升级      bash %s/update.sh' in _inst)
+
+# ── U3. update.sh：部署目录自动定位 ──
+check("★ ★ U3 update.sh 有 locate_app_dir 定位函数", "locate_app_dir()" in _upd)
+check("★ ★ U3 定位覆盖三条路径：标记文件 / 常见位置 / 浅层搜索",
+      "/etc/gcp-manager-web.path" in _upd and "/opt/gcp-manager-web" in _upd
+      and "-maxdepth 4 -name app.py" in _upd)
+check("★ U3 浅层搜索排除备份与临时目录（不误认 .bak/.old）",
+      ".bak" in _upd and ".old" in _upd and "/tmp" in _upd)
+check("★ U3 定位结果必须同时有 app.py 与 core/version.py（防认错目录）",
+      'core/version.py" ]' in _upd)
+check("★ ★ U3 确实没装过时给出「更新是升级通道、不能代替首次安装」的指引",
+      "不能代替首次安装" in _upd or "升级通道" in _upd)
+check("★ U3 指引里含首次安装命令与查找命令",
+      "install.sh | bash" in _upd and "gcp-manager-web.path" in _upd)
+check("★ U3 该分支退出码非 0", "    exit 1\n  fi\nfi\ncd \"$APP_DIR\"" in _upd
+      or _upd.count("exit 1") >= 2)
+# 定位必须发生在「报错退出」之前 —— 原实现是直接 die，用户看不到任何帮助
+_p_loc = _upd.find("locate_app_dir()")
+_p_die = _upd.find("找不到任何已部署的实例")
+check("★ ★ U3 定位逻辑在报错之前（用户不会只看到一句「找不到 app.py」）",
+      0 < _p_loc < _p_die, f"locate@{_p_loc} die@{_p_die}")
+check("★ U3 老的裸 die 已移除", 'die "在 $APP_DIR 找不到 app.py' not in _upd)
+
+# ── U4. README：安装目录说明 + 升级章节自洽 ──
+check("★ ★ U4 README 有「安装目录」对照表（说明不同执行方式装到哪）",
+      "**安装目录（很重要，升级时要用）**" in _rd and "`/opt/gcp-manager-web`" in _rd)
+check("★ U4 README 说明路径写入 /etc/gcp-manager-web.path",
+      "/etc/gcp-manager-web.path" in _rd)
+check("★ U4 README 升级章节给了「先确认装在哪」的查找命令",
+      'cat /etc/gcp-manager-web.path 2>/dev/null' in _rd)
+check("★ U4 README 明说 update.sh 是升级通道、前提是已装过",
+      "升级通道" in _rd)
+check("★ U4 README 不再出现「管道模式装到 ./gcp-manager-web」的旧描述",
+      "会把源码下载到 `./gcp-manager-web`" not in _rd)
+check("★ U4 README 回滚章节不再写死路径",
+      'cd "$(cat /etc/gcp-manager-web.path' in _rd)
+
+# ── U5. 两个脚本语法与版本一致性 ──
+import subprocess as _sp
+_r1 = _sp.run(["bash", "-n", os.path.join(BASE_DIR, "install.sh")],
+              capture_output=True, text=True)
+_r2 = _sp.run(["bash", "-n", os.path.join(BASE_DIR, "update.sh")],
+              capture_output=True, text=True)
+check("★ U5 install.sh 通过 bash -n", _r1.returncode == 0, _r1.stderr[:120])
+check("★ U5 update.sh 通过 bash -n", _r2.returncode == 0, _r2.stderr[:120])
 
 
 print("\n" + "=" * 76)
