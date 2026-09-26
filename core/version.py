@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.2.7"
+VERSION = "1.3.0"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,33 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.3.0",
+        "date": "2026-09-27",
+        "notes": [
+            "新增 PHP 版（php/ 目录）：与 Python 版同一套界面、同一套 API、同一个数据库结构，"
+            "零 composer 依赖，纯 PHP 8.0+ 实现。前端 console.html / login.html / vendor 从 "
+            "Python 版原样复制、一行未改（sha256 可校验），因为后端复刻了逐字段一致的 JSON 契约",
+            "★ 宝塔面板支持：php/bt/GUIDE.md 逐步引导（运行目录设 /public、伪静态规则、"
+            "PHP 扩展与禁用函数、计划任务）、php/bt/nginx-rewrite.conf、php/bt/bt-install.sh "
+            "（环境自查 + 目录权限 + 初始化 + 计划任务注册）",
+            "★ PHP 版安装引导：php/install-php.sh（裸机一键，自动装 PHP 与扩展）+ "
+            "php/update-php.sh（升级，绝不碰 data/）+ php/README-PHP.md",
+            "与 Python 版可共用数据：密码哈希逐位相同（PBKDF2-HMAC-SHA256/200000 轮/16 字节随机盐），"
+            "实测双向交叉认证通过（Python 生成 → PHP 校验、PHP 生成 → Python 校验）",
+            "并发模型改为 SQLite WAL + busy_timeout=5000 + BEGIN IMMEDIATE（PHP-FPM 是多进程，"
+            "不能用文件锁模拟线程锁）；后台任务改由 CLI worker（bin/task-runner.php）领取，"
+            "宝塔可用计划任务兜底；实时日志由独立进程 bin/ws-server.php 提供（纯手写 RFC6455，"
+            "无 composer 依赖），未启动时前端自动退化为轮询",
+            "安全：与 Python 版同一套纪律 —— 强制改密在中间件拦、登录限速只信任可信代理来的 XFF、"
+            "全部 SQL 预处理、实例列表白名单式丢弃密码字段、账号列表不外发 key_path 与代理明文、"
+            "命令用数组参数不经 shell、未认证 WS 客户端以 4401 关闭且不下发任何日志",
+            "★ 新增 135 项 PHP 冒烟断言 + 30 项浏览器端到端 + 4 项 WebSocket 安全验证 + "
+            "51 条路由的双版响应契约并排比对工具（php/tests/）",
+            "★ 本轮审计发现并修复（详见报告）：「账号导入校验返回值契约不一致导致静默建空账号」、"
+            "「key_path 接受 file:// 等流包装器」、「CSP 缺 unsafe-eval 导致控制台白屏」",
+        ],
+    },
     {
         "version": "1.2.7",
         "date": "2026-09-26",

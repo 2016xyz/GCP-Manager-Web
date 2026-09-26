@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>统一协同平台</title>
+    <!--
+      ══════════════════════════════════════════════════════════════════
+      登录页视觉来自 https://github.com/2016xyz/sysuahb
+      的 web/views/login/index.html，DOM 结构、类名、层级逐字保持一致。
+
+      与上游的差异（仅在与后端对接的必要处，视觉零差异）：
+        1. 资源路径 {{.web_base_url}}/static/… → /static/…
+        2. 验证码由服务端模板渲染改为 GET /api/auth/captcha 取 base64 图，
+           仍注入到同样的 <img class="captcha-img"> 里
+        3. 提交改用 /api/auth/login（本产品自身的鉴权），
+           不再走上游的 RSA + nonce + PoW 协议
+        4. 上游的 PoW 计算（pow-worker.js）未移植 —— 本产品后端不校验 PoW，
+           移植过来只会是无用的等待
+        5. 语言切换保留了同样的交互与样式，仅登录页文案生效
+
+      资源全部本地托管，无 CDN 依赖（内网可用）。
+      ══════════════════════════════════════════════════════════════════
+    -->
+    <link href="/static/vendor/fontawesome/css/fontawesome.min.css" rel="stylesheet">
+    <link href="/static/vendor/fontawesome/css/solid.min.css" rel="stylesheet">
+    <link href="/static/vendor/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/login.css" rel="stylesheet">
+</head>
+
+<body class="login-page">
+    <main class="wow-login-page">
+        <div class="wow-login-background" aria-hidden="true"></div>
+        <div class="wow-login-content">
+            <header class="wow-login-header">
+                <div class="wow-login-title">统一协同平台</div>
+                <div class="wow-login-subtitle">Unified Collaboration Platform</div>
+            </header>
+            <section class="wow-login-card">
+                <div class="wow-language-switch i18n">
+                    <button id="languagemenu" type="button" aria-label="Language">中文</button>
+                    <ul class="language-list">
+                        <li lang="zh-CN"><a>简体中文</a></li>
+                        <li lang="en-US"><a>English</a></li>
+                    </ul>
+                </div>
+                <form class="wow-login-form" onsubmit="return false;">
+                    <div class="wow-input-group form-group">
+                        <span class="wow-input-icon user-icon" aria-hidden="true"><i class="fas fa-user"></i></span>
+                        <input class="form-control" name="username" id="username" placeholder="请输入账号"
+                               autocomplete="username" required="" type="text">
+                    </div>
+                    <div class="wow-input-group form-group">
+                        <span class="wow-input-icon password-icon" aria-hidden="true"><i class="fas fa-lock"></i></span>
+                        <input class="form-control login-pwd" name="password" id="password" placeholder="请输入密码"
+                               autocomplete="current-password" required="" type="password">
+                        <button type="button" class="pwd-toggle" aria-label="toggle password" onclick="togglePwd(this)"><i class="fas fa-eye"></i></button>
+                    </div>
+                    <div class="wow-verification form-group">
+                        <input class="wow-captcha-input" name="captcha" id="captcha" placeholder="请输入验证码"
+                               autocomplete="off" required="" maxlength="8" type="text">
+                        <div class="captcha-container" title="点击刷新验证码">
+                            <img class="captcha-img" id="captchaImg" alt="验证码" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+                        </div>
+                    </div>
+                    <label class="wow-remember"><input type="checkbox" name="remember" id="remember"> <span>记住账号</span></label>
+                    <button id="loginBtn" class="btn btn-primary btn-login block full-width"
+                            onclick="if (this.form.reportValidity()) login()" type="submit">
+                        <span class="btn-label">登录</span>
+                        <span class="btn-spinner" aria-hidden="true"><i class="fas fa-circle-notch fa-spin"></i></span>
+                    </button>
+                </form>
+            </section>
+
+            <!-- 版本号与仓库地址。
+                 这是相对上游 sysuahb 的一处新增（上游无此区块），
+                 放在卡片之外，沿用同一套配色与动效，不改变卡片本身的结构。 -->
+            <footer class="wow-login-footer">
+                <a class="wow-login-repo" id="repoLink" href="#" target="_blank"
+                   rel="noopener noreferrer" title="在 GitHub 上查看源码">
+                    <svg class="gh-ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                    <span id="repoText">GitHub</span>
+                </a>
+                <span class="wow-login-vsep"></span>
+                <span class="wow-login-ver">v<span id="verText">—</span></span>
+            </footer>
+        </div>
+    </main>
+
+    <!-- 首次登录强制改密（本产品自身的流程，样式沿用同一套配色） -->
+    <div class="pw-mask" id="pwMask" hidden>
+        <section class="wow-login-card pw-card">
+            <h3 class="pw-title">请设置新密码</h3>
+            <p class="pw-sub">首次登录需修改初始密码后才能进入控制台</p>
+            <div class="wow-input-group form-group">
+                <span class="wow-input-icon" aria-hidden="true"><i class="fas fa-lock"></i></span>
+                <input class="form-control" id="oldPw" type="password" placeholder="当前密码" autocomplete="current-password">
+            </div>
+            <div class="wow-input-group form-group">
+                <span class="wow-input-icon" aria-hidden="true"><i class="fas fa-key"></i></span>
+                <input class="form-control" id="newPw" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
+            </div>
+            <div class="pw-bar" id="pwBar"><i></i></div>
+            <div class="pw-tip" id="pwTip"></div>
+            <div class="wow-input-group form-group" style="margin-top:14px">
+                <span class="wow-input-icon" aria-hidden="true"><i class="fas fa-key"></i></span>
+                <input class="form-control" id="newPw2" type="password" placeholder="再次输入新密码" autocomplete="new-password">
+            </div>
+            <button class="btn btn-primary btn-login block full-width" id="pwSubmit" type="button">
+                <span class="btn-label">确认修改</span>
+                <span class="btn-spinner" aria-hidden="true"><i class="fas fa-circle-notch fa-spin"></i></span>
+            </button>
+        </section>
+    </div>
+
+    <script src="/static/vendor/jquery-3.7.1.min.js"></script>
+    <script type="text/javascript">
+        /* ══════════════════════════════════════════════════════════════
+           showMsg —— 移植自 sysuahb web/static/js/language.js
+           居中遮罩式提示（成功/错误/加载三种），视觉与上游一致
+           ══════════════════════════════════════════════════════════════ */
+        function showMsg(text, type = 'success', dur = 1500, cb) {
+            var old = document.getElementById('wangmarket_loading');
+            if (old) old.parentNode.removeChild(old);
+            var isLong = text && text.length > 5;
+
+            var svg;
+            if (type === 'error') {
+                svg = '<svg style="width:3rem;height:3rem;padding:1rem;box-sizing:content-box;" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M696.832 326.656c-12.8-12.8-33.28-12.8-46.08 0L512 465.92 373.248 327.168c-12.8-12.8-33.28-12.8-46.08 0s-12.8 33.28 0 46.08L466.432 512l-139.264 139.264c-12.8 12.8-12.8 33.28 0 46.08s33.28 12.8 46.08 0L512 558.08l138.752 139.264c12.288 12.8 32.768 12.8 45.568 0.512l0.512-0.512c12.8-12.8 12.8-33.28 0-45.568L557.568 512l139.264-139.264c12.8-12.8 12.8-33.28 0-46.08 0 0.512 0 0 0 0zM512 51.2c-254.464 0-460.8 206.336-460.8 460.8s206.336 460.8 460.8 460.8 460.8-206.336 460.8-460.8-206.336-460.8-460.8-460.8z m280.064 740.864c-74.24 74.24-175.104 116.224-280.064 115.712-104.96 0-205.824-41.472-280.064-115.712S115.712 616.96 115.712 512s41.472-205.824 116.224-280.064C306.176 157.696 407.04 115.712 512 116.224c104.96 0 205.824 41.472 280.064 116.224 74.24 74.24 116.224 175.104 115.712 280.064 0.512 104.448-41.472 205.312-115.712 279.552z" fill="#ffffff"></path></svg>';
+            } else if (type === 'success') {
+                svg = '<svg style="width:3rem;height:3rem;padding:1rem;box-sizing:content-box;" viewBox="0 0 1024 1024"><path d="M384 887.456L25.6 529.056 145.056 409.6 384 648.544 878.944 153.6 998.4 273.056z" fill="#ffffff"/></svg>';
+            } else {
+                svg = '<i class="fas fa-circle-notch fa-spin" style="width:3rem;height:3rem;padding:1rem;box-sizing:content-box;display:block;color:#fff;font-size:1.6rem;line-height:1;text-align:center"></i>';
+            }
+
+            var clickable = (type === 'error' || type === 'success');
+            var w = document.createElement('div');
+            w.id = 'wangmarket_loading';
+            w.style = 'position:fixed;top:0;z-index: 2147483647;width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:center';
+            w.innerHTML =
+                '<div id="loading">'
+                  + '<div id="loading_box" style="background-color:#2e2d3c;border-radius:0.3rem;opacity:0.8;min-width:6rem;min-height:4.8rem;max-width:20rem;display:flex;flex-wrap:wrap;align-items:center;'
+                    + (!isLong ? 'flex-direction:column;' : '') + (clickable ? 'cursor:pointer;' : '') + '">'
+                    + '<div style="display:flex;">' + svg + '</div>'
+                    + '<div style="font-size:1rem;box-sizing:border-box;color:white;flex:1;padding:1rem;' + (!isLong ? 'padding-top:0;' : '') + '">'
+                      + text +
+                    '</div>'
+                  + '</div>'
+                + '</div>';
+            document.body.appendChild(w);
+
+            var timer = setTimeout(function () {
+                if (w && w.parentNode) w.parentNode.removeChild(w);
+                if (typeof cb === 'function') cb();
+            }, dur);
+
+            if (clickable) {
+                var box = document.getElementById('loading_box');
+                if (box) {
+                    box.addEventListener('click', function () {
+                        clearTimeout(timer);
+                        if (w && w.parentNode) w.parentNode.removeChild(w);
+                        if (typeof cb === 'function') cb();
+                    }, { once: true, passive: true });
+                }
+            }
+        }
+
+        /* ── 语言切换（仅登录页文案）──
+           上游由 language.js 注入 <li lang="…">，按钮文字取语言全名，
+           且 li 里的国旗 <img> 被 CSS 隐藏（display:none），此处同理只留文字 */
+        var I18N = {
+            'zh-CN': { title:'统一协同平台', user:'请输入账号',
+                       pwd:'请输入密码', captcha:'请输入验证码', remember:'记住账号', login:'登录',
+                       processing:'处理中', ok:'登录成功', fail:'登录失败，请重试' },
+            'en-US': { title:'Unified Collaboration Platform', user:'Username',
+                       pwd:'Password', captcha:'Verification code', remember:'Remember me', login:'Sign in',
+                       processing:'Processing', ok:'Signed in', fail:'Sign in failed, please retry' }
+        };
+        var lang = 'zh-CN';
+        function applyLang(l) {
+            lang = l;
+            var t = I18N[l];
+            document.querySelector('.wow-login-title').textContent = t.title;
+            document.querySelector('#username').placeholder = t.user;
+            document.querySelector('#password').placeholder = t.pwd;
+            document.querySelector('#captcha').placeholder = t.captcha;
+            document.querySelector('.wow-remember span').textContent = t.remember;
+            document.querySelector('#loginBtn .btn-label').textContent = t.login;
+            document.documentElement.lang = l;
+            document.getElementById('languagemenu').textContent =
+                document.querySelector('.language-list li[lang="' + l + '"]').textContent.trim();
+        }
+        document.querySelectorAll('.language-list li').forEach(function (li) {
+            li.addEventListener('click', function () {
+                document.getElementById('languagemenu').setAttribute('lang', li.getAttribute('lang'));
+                applyLang(li.getAttribute('lang'));
+            });
+        });
+
+        /* ── 密码可见切换（与上游同名同实现）── */
+        function togglePwd(btn) {
+            var $input = $(btn).siblings('input.login-pwd');
+            var show = $input.attr('type') === 'password';
+            $input.attr('type', show ? 'text' : 'password');
+            $(btn).find('i').toggleClass('fa-eye fa-eye-slash');
+        }
+
+        /* ── 与后端交互 ── */
+        var captchaId = '';
+        async function jfetch(url, opt) {
+            var o = Object.assign({ headers: { 'Content-Type': 'application/json' } }, opt || {});
+            var r = await fetch(url, o);
+            var j;
+            try { j = await r.json(); } catch (e) { j = { ok:false, error:'响应解析失败 HTTP ' + r.status }; }
+            j.__status = r.status;
+            return j;
+        }
+
+        /* 版本号与仓库地址：单一来源在后端 core/version.py。
+           /api/version 是匿名可读接口，登录页无需登录即可展示。 */
+        async function loadVersion() {
+            try {
+                const r = await fetch('/api/version').then(x => x.json());
+                if (!r || !r.ok) return;
+                const vt = document.getElementById('verText');
+                const rt = document.getElementById('repoText');
+                const rl = document.getElementById('repoLink');
+                if (vt) vt.textContent = r.version || '—';
+                if (rt && r.repo_name) rt.textContent = r.repo_name;
+                if (rl && r.repo) {
+                    rl.href = r.repo;
+                    rl.title = '在 GitHub 上查看源码：' + r.repo;
+                }
+            } catch (e) { /* 取不到版本不影响登录，静默降级 */ }
+        }
+
+        async function refreshCaptcha() {
+            var r = await jfetch('/api/auth/captcha');
+            if (r && r.ok) {
+                captchaId = r.captcha_id;
+                document.getElementById('captchaImg').src = r.image;
+            }
+        }
+        document.getElementById('captchaImg').addEventListener('click', function () {
+            document.getElementById('captcha').value = '';
+            refreshCaptcha();
+        });
+
+        /* ── 登录 ── */
+        var loginBtn = document.getElementById('loginBtn');
+        async function login() {
+            var username = document.getElementById('username').value.trim();
+            var password = document.getElementById('password').value;
+            var code = document.getElementById('captcha').value.trim();
+            if (!code) { document.getElementById('captcha').focus(); return showMsg(I18N[lang].captcha, 'error', 2000); }
+
+            loginBtn.disabled = true;
+            loginBtn.classList.add('loading');
+            showMsg(I18N[lang].processing, 'loading', 60000);
+
+            var r = await jfetch('/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ username: username, password: password,
+                                       captcha_id: captchaId, captcha_code: code })
+            });
+
+            if (r.ok) {
+                if (document.getElementById('remember').checked) {
+                    localStorage.setItem('nps_login_username', username);
+                } else {
+                    localStorage.removeItem('nps_login_username');
+                }
+                loginBtn.classList.remove('loading');
+                showMsg(I18N[lang].ok, 'success', 1000, function () {
+                    if (r.user && r.user.must_change_password) {
+                        document.getElementById('pwMask').hidden = false;
+                        document.getElementById('oldPw').value = password;
+                        loginBtn.disabled = false;
+                        return;
+                    }
+                    location.href = '/';
+                });
+                return;
+            }
+
+            /* 失败：后端用 HTTPException，响应体是 {"detail": "..."}（不是 error）。
+               只读 r.error 会永远拿到 undefined，于是所有具体原因
+               （验证码错误 / 用户名或密码错误 / 锁定）都被吞掉、只剩通用提示。
+               这里 error/detail 都取。 */
+            var msg = r.error || r.detail || I18N[lang].fail;
+            var isCaptcha = (r.__status === 400);
+            refreshCaptcha();
+            if (isCaptcha) {
+                document.getElementById('captcha').value = '';
+                document.getElementById('captcha').focus();
+            }
+            loginBtn.disabled = false;
+            loginBtn.classList.remove('loading');
+            showMsg(msg, 'error', 3000);
+            return false;
+        }
+        window.login = login;
+
+        /* ── 记住账号 ── */
+        $(function () {
+            var saved = localStorage.getItem('nps_login_username');
+            if (saved) {
+                $('input[name="username"]').val(saved);
+                $('input[name="remember"]').prop('checked', true);
+            }
+        });
+
+        /* ── 强制改密 ── */
+        function pwScore(pw) {
+            var s = 0;
+            if (pw.length >= 8) s++;
+            if (pw.length >= 12) s++;
+            if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) s++;
+            if (/[0-9]/.test(pw) || /[^A-Za-z0-9]/.test(pw)) s++;
+            return Math.min(s, 4);
+        }
+        document.getElementById('newPw').addEventListener('input', function () {
+            var s = pwScore(this.value);
+            var colors = ['#e5e7eb', '#ef4444', '#f59e0b', '#10b981', '#3d53f5'];
+            var labels = ['', '太弱', '一般', '较强', '很强'];
+            document.querySelector('#pwBar i').style.width = (s * 25) + '%';
+            document.querySelector('#pwBar i').style.background = colors[s];
+            document.getElementById('pwTip').textContent = this.value ? labels[s] : '';
+        });
+
+        document.getElementById('pwSubmit').addEventListener('click', async function () {
+            var oldPw = document.getElementById('oldPw').value;
+            var n1 = document.getElementById('newPw').value;
+            var n2 = document.getElementById('newPw2').value;
+            if (!n1 || n1.length < 8) return showMsg('新密码至少 8 位', 'error', 2500);
+            if (n1 !== n2) return showMsg('两次输入的新密码不一致', 'error', 2500);
+            if (n1 === oldPw) return showMsg('新密码不能与原密码相同', 'error', 2500);
+
+            var btn = document.getElementById('pwSubmit');
+            btn.disabled = true; btn.classList.add('loading');
+            var r = await jfetch('/api/auth/change_password', {
+                method: 'POST',
+                body: JSON.stringify({ old_password: oldPw, new_password: n1 })
+            });
+            btn.disabled = false; btn.classList.remove('loading');
+            if (r.ok) {
+                showMsg('密码已修改', 'success', 900, function () { location.href = '/'; });
+            } else {
+                showMsg(r.error || r.detail || '修改失败', 'error', 3000);
+            }
+        });
+
+        /* ── 初始化：已登录且无需改密则直接进入控制台 ── */
+        (async function init() {
+            refreshCaptcha();
+            loadVersion();
+            var me = await jfetch('/api/auth/me');
+            if (me.ok && me.authenticated && !me.user.must_change_password) { location.href = '/'; return; }
+            if (me.ok && me.authenticated && me.user.must_change_password) {
+                document.getElementById('username').value = me.user.username;
+                document.getElementById('pwMask').hidden = false;
+            }
+        })();
+    </script>
+</body>
+</html>
