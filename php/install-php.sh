@@ -23,6 +23,9 @@ set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/2016xyz/GCP-Manager-Web.git}"
 APP_DIR="${APP_DIR:-}"
+# 记录 PORT 是否来自环境变量：有些 shell 里 PORT 是给别的程序用的，
+# 被静默继承会让人以为「默认端口变了」（Python 版 install.sh 同样处理）
+PORT_WAS_SET="${PORT:+yes}"
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
 NO_SERVICE="${NO_SERVICE:-0}"
@@ -67,7 +70,12 @@ case "$APP_DIR" in
 esac
 
 printf "  ${B}安装目录${N} %s\n" "$APP_DIR"
-printf "  ${B}端口${N}     %s（监听 %s）\n" "$PORT" "$HOST"
+if [ -n "$PORT_WAS_SET" ]; then
+  printf "  ${B}端口${N}     %s ${Y}(来自环境变量 PORT，非默认 8080)${N}\n" "$PORT"
+else
+  printf "  ${B}端口${N}     %s\n" "$PORT"
+fi
+printf "  ${B}监听${N}     %s\n" "$HOST"
 
 # ── 1. 下载源码 ─────────────────────────────────────────────────────────────
 step "获取源码"
@@ -181,7 +189,8 @@ php -m 2>/dev/null | grep -qix sockets \
   || warn "缺 sockets → 实时日志自动退化为轮询（不影响功能）"
 
 # 被禁用的关键函数（有些发行版/面板默认禁）
-_dis="$( { php -i 2>/dev/null | grep -i '^disable_functions' || true; } | head -n1 | cut -d'>' -f2- | tr -d ' ')"
+# 用 ini_get 直接读（解析 php -i 文本容易把 "no value => no value" 当值）
+_dis="$(php -r 'echo ini_get("disable_functions");' 2>/dev/null | tr -d ' \t')"
 _blk=""
 for fn in proc_open proc_get_status escapeshellarg; do
   printf '%s' ",$_dis," | grep -q ",$fn," && _blk="$_blk $fn"

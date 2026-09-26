@@ -994,15 +994,30 @@ final class ApiGcp
     public static function create(array $p): void
     {
         $b = Http::jsonBody();
+
+        // ★ 参数校验必须**先于**业务检查。
+        //   Python 版用 Pydantic 模型（count: Field(default=1, ge=1, le=200)），
+        //   FastAPI 在 handler 执行之前就完成校验 → 越界直接 422，与有没有账号无关。
+        //   早前把「有没有账号」放在前面，导致没有账号时 count=9999 也返回 200，
+        //   两版行为不一致（实测：PHP 200 / Python 422）。
+        if (array_key_exists('count', $b)) {
+            $rawCount = $b['count'];
+            if (!is_int($rawCount) && !(is_string($rawCount) && preg_match('/^-?\d+$/', $rawCount))) {
+                Json::err('count 必须是整数', 400);
+            }
+            $count = (int) $rawCount;
+            if ($count < 1 || $count > 200) {
+                Json::err('count 需在 1-200 之间（防止误操作造成费用灾难）', 400);
+            }
+        } else {
+            $count = 1;
+        }
+
         $accounts = Store::getAccounts();
         if (empty($accounts)) {
             // ★ 与 Python 的 tm.submit_create 一致：这是**业务性拒绝**，
             //   HTTP 仍是 200，用 ok:false + error 表达（前端读 r.error 显示）。
             Json::out(['ok' => false, 'error' => '没有匹配的账号，请先导入 GCP 服务账号 JSON'], 200);
-        }
-        $count = (int) ($b['count'] ?? 1);
-        if ($count < 1 || $count > 200) {
-            Json::err('数量需在 1-200 之间', 400);
         }
         $ids = $b['account_ids'] ?? null;
         if (is_array($ids) && $ids !== []) {

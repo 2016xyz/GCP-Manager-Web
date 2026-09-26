@@ -135,8 +135,11 @@ fi
 
 # 被禁用的关键函数（宝塔默认禁一堆）
 c_info "检查禁用函数…"
-dis="$( { "$PHP_BIN" -i 2>/dev/null | grep -i '^disable_functions' || true; } \
-        | head -n1 | cut -d'>' -f2- | tr -d ' ' )"
+# ★ 直接用 ini_get 读，不要去解析 `php -i` 的文本：
+#   php -i 的输出是 `指令 => 局部值 => 全局值`，用 cut/awk 拆很容易把
+#   "no value => no value" 整段当成值（实测踩过）。ini_get 返回的是真值，
+#   未设置时为空字符串，语义干净。
+dis="$( "$PHP_BIN" -r 'echo ini_get("disable_functions");' 2>/dev/null | tr -d ' \t' )"
 blocked=()
 for fn in proc_open proc_get_status exec shell_exec escapeshellarg putenv; do
   if printf '%s' ",$dis," | grep -q ",$fn,"; then blocked+=("$fn"); fi
@@ -151,7 +154,8 @@ fi
 
 # open_basedir —— 宝塔默认会把 open_basedir 限制在站点目录，
 # 而 PHP 版会在自身 php/ 目录内读写，通常没问题；但如果 data 目录被设在站点之外就会报错。
-obd="$( { "$PHP_BIN" -i 2>/dev/null | grep -i '^open_basedir' || true; } | head -n1 | cut -d'>' -f2- )"
+obd="$( "$PHP_BIN" -r 'echo ini_get("open_basedir");' 2>/dev/null | tr -d ' \t' )"
+# ini_get 未设置时返回空字符串（不是 "no value"）—— 空即未限制
 if [ -n "$obd" ] && [ "$obd" != "no value" ]; then
   c_warn "open_basedir 已开启：$obd"
   c_info "若要自定义 GCPWEB_DATA_DIR 到站点之外，需把该路径加进 open_basedir"

@@ -28,6 +28,40 @@ declare(strict_types=1);
 require __DIR__ . '/../src/bootstrap.php';
 
 // ------------------------------------------------------------------
+// ★ 关闭从父进程继承来的文件描述符
+//
+// 为什么必须做：worker 由 Web 侧用 proc_open 拉起（见 Tasks::spawnWorker），
+// 而 fork+exec 出来的子进程默认继承父进程的全部 fd —— **包括 Web 服务器的
+// 监听套接字**。后果实测过：测试期间反复创建任务后，主进程被 kill 掉，
+// 端口却仍被 11 个 worker 子进程占着不放（ss 里十几个 pid 同时 LISTEN 同一个
+// 端口），既看不出是谁在占，也没法正常重启服务。
+//
+// 这里在启动时主动关掉 3 以上的所有可访问 fd（0/1/2 保留）。Linux 专属做法，
+// 而本项目的目标环境就是 Linux（宝塔/裸机/Docker）。
+// 失败不影响功能（拿不到 /proc 时静默跳过）。
+// ------------------------------------------------------------------
+if (is_dir('/proc/self/fd') && ($dh = @opendir('/proc/self/fd')) !== false) {
+    $keep = [0, 1, 2];
+    // opendir 本身占用一个 fd，需一并跳过（否则把遍历句柄关掉会中断循环）
+    $dirFd = null;
+    $entries = [];
+    while (($e = readdir($dh)) !== false) {
+        if (ctype_digit($e)) {
+            $entries[] = (int) $e;
+        }
+    }
+    // /proc/self/fd 里的最大值通常就是 dirFd
+    closedir($dh);
+    $dirFd = $entries ? max($entries) : null;
+    foreach ($entries as $fd) {
+        if (in_array($fd, $keep, true) || $fd === $dirFd) {
+            continue;
+        }
+        @fclose(@fopen('php://fd/' . $fd, 'r'));
+    }
+}
+
+// ------------------------------------------------------------------
 // 参数解析
 // ------------------------------------------------------------------
 $opts = ['once' => false, 'sleep' => 2, 'task' => null, 'stale' => Tasks::STALE_SECONDS];

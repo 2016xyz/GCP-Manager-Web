@@ -110,16 +110,21 @@ with sync_playwright() as pw:
 
     vue_ok = page.evaluate("() => typeof window.Vue !== 'undefined'")
     ok("控制台页 Vue 本地加载成功（vendor/vue.global.prod.js）") if vue_ok else bad("控制台页 Vue 未加载 → 会白屏")
-    info = page.evaluate("""() => {
+    # 版本号从接口动态取，别在测试里写死（否则每次升版都要改测试）
+    ver = page.evaluate(
+        "async () => (await (await fetch('/api/version', {credentials:'include'})).json()).version || ''"
+    )
+    info = page.evaluate("""(want) => {
         const t = document.body.innerText;
         return {
-            hasVersion: /v?1\\.2\\.7/.test(t),
+            version: want,
+            hasVersion: want !== '' && t.indexOf(want) !== -1,
             navItems: [...document.querySelectorAll('.sb-nav a, nav a, aside a')].map(a=>a.textContent.trim()).filter(Boolean).slice(0,20),
             cards: document.querySelectorAll('.card, .panel, .grid > *').length,
             text: t.slice(0, 400)
         };
-    }""")
-    ok(f"页面含版本号") if info["hasVersion"] else bad("页面没显示版本号")
+    }""", ver)
+    ok(f"页面显示版本号 v{info['version']}（动态取自 /api/version）") if info["hasVersion"] else bad(f"页面没显示版本号（期望 {info['version']}）")
     ok(f"侧栏导航项 {len(info['navItems'])} 个：{info['navItems'][:6]}") if info["navItems"] else bad("侧栏导航为空")
     ok(f"内容区块 {info['cards']} 个") if info["cards"] > 0 else bad("页面无内容区块")
 

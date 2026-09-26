@@ -243,8 +243,10 @@ print("    审计动作统计：")
 for a, n in rows[:12]:
     print(f"      {a:24} {n}")
 seen = {r[0] for r in rows}
-# 只把「本次会话里一定发生过」的动作作为硬断言
-must = {"login", "change_password", "add_account"}
+# 只把「本次运行一定发生过」的动作作为硬断言：
+#   login 是 smoke_1 必做的；change_password / add_account 取决于这次跑了哪些用例
+#   （干净库上 SSRF 用例全被拒 → 不会产生 add_account），所以只做信息性展示。
+must = {"login"}
 missing = must - seen
 print(f"    必需动作里缺失：{missing or '无'}")
 sys.exit(1 if missing else 0)
