@@ -2387,7 +2387,14 @@ check("★ 有 X-Frame-Options / nosniff / Referrer-Policy",
 check("★ ★ count 有上限（防误建海量实例烧钱）",
       "le=200" in _app and "Field(default=1, ge=1, le=200)" in _app)
 check("★ audit/tasks/logs 的 limit 有上限",
-      "Query(200, ge=1, le=1000)" in _app and "Query(500, ge=1, le=5000)" in _app)
+      # audit 已改为服务端分页：page_size 上限 200，向后兼容的 limit 上限 1000
+      "page_size: int = Query(5, ge=1, le=200)" in _app
+      and "limit: int = Query(0, ge=0, le=1000)" in _app
+      and "Query(500, ge=1, le=5000)" in _app)
+check("★ ★ 操作审计是服务端分页（不再一次拉 200 条）",
+      "def api_audit(request: Request, page: int = Query(1, ge=1)," in _app
+      and "count_audit()" in _app
+      and "get_audit(page_size, (page - 1) * page_size)" in _app)
 check("★ 用户名校验在服务端做（前端正则可绕过）",
       "用户名只能包含字母、数字、下划线、点、横线或 @" in
       open(os.path.join(BASE_DIR, "core", "users.py"), encoding="utf-8").read())
@@ -2401,7 +2408,12 @@ check("★ ★ 验证码用加密安全随机源",
       "secrets.choice(_CAPTCHA_ALPHABET)" in _auth
       and "random.choice(_CAPTCHA_ALPHABET)" not in _auth)
 check("★ 验证码清理持锁（原为数据竞争）",
-      "_gc" in _auth and "with self._lock:" in _auth.split("def _gc")[1][:400])
+      # 不用固定长度窗口找锁：_gc 的注释长短会变，窗口会误判。
+      # 改为取出整个 _gc 函数体再找 with self._lock:
+      "_gc" in _auth and "with self._lock:" in
+      _auth.split("def _gc")[1].split("\n    def ")[0])
+check("★ 验证码表有容量上限（未认证接口，防内存膨胀）",
+      "MAX_ITEMS" in _auth and "MAX_ITEMS = 20000" in _auth)
 check("★ 登录限速表有容量上限（原为无界增长）",
       "MAX_TRACKED" in _auth and "_prune" in _auth)
 check("★ 缓存 _INSPECT_CACHE 有锁（原为并发裸字典）",
@@ -2456,6 +2468,100 @@ check("★ ★ 未改密用户连 /ws/logs 被拒（HTTP 中间件管不到 WS �
 check("★ WS 端点自身带 must_change 判断",
       'await ws.close(code=4403)' in _app
       and "WebSocket 是独立的握手路径" in _app)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T 段：本轮迭代（审计分页 / 代理探测 / 命令执行页机器列表 / 状态中文
+#       + 顺带查出的两个前端缺陷：代理密码打码、fmtTime 重复定义）
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n" + "-" * 76)
+print("T 段：本轮 4 项改动 + 2 项顺带修复")
+print("-" * 76)
+
+_html = open(os.path.join(BASE_DIR, "static", "console.html"), encoding="utf-8").read()
+_gcp_src = open(os.path.join(BASE_DIR, "core", "gcp.py"), encoding="utf-8").read()
+
+# 前面的 WS 用例把会话切成了「未改密用户」，先切回管理员，
+# 否则 T 段的 /api/audit 会被 must_change_password 中间件 403 掉。
+login("admin", ADMIN_PW)
+check("★ T0 已切回管理员身份（T 段前置条件）",
+      client.get("/api/status").json().get("ok") is True)
+
+# ── T1. 操作审计分页 ──────────────────────────────────────────────────────
+_r = client.get("/api/audit?page=1&page_size=5").json()
+check("★ T1 审计分页：默认每页 5 条", len(_r.get("audit", [])) == 5, str(len(_r.get("audit", []))))
+check("★ T1 审计分页：响应带 total/page/pages/page_size",
+      all(k in _r for k in ("total", "page", "pages", "page_size")),
+      str(sorted(_r.keys())))
+check("★ T1 审计分页：页数与总数自洽",
+      _r["pages"] == max(1, -(-_r["total"] // 5)), f"{_r['pages']} vs {_r['total']}")
+_oob = client.get("/api/audit?page=99999&page_size=5").json()
+check("★ T1 审计分页：越界页码被夹回合法范围", 1 <= _oob["page"] <= _oob["pages"])
+check("★ T1 审计分页：page=0 / 超大 page_size 被拒",
+      client.get("/api/audit?page=0&page_size=5").status_code == 422
+      and client.get("/api/audit?page=1&page_size=99999").status_code == 422)
+check("★ T1 审计分页：兼容旧调用 ?limit=N", "audit" in client.get("/api/audit?limit=10").json())
+check("★ T1 前端默认每页 5 条 + 有翻页控件",
+      "auditPageSize:5" in _html and "上一页" in _html and "下一页" in _html and "跳转" in _html)
+check("★ T1 前端不再硬拉 200 条", "?limit=200" not in _html)
+
+# ── T2. 账号代理探测 ──────────────────────────────────────────────────────
+check("★ T2 后端有 test_proxy 实现", "def test_proxy(" in _gcp_src)
+check("★ T2 有 /api/accounts/{id}/test_proxy 路由",
+      "/api/accounts/{acc_id}/test_proxy" in _app)
+check("★ T2 前端有「测代理」「测试全部代理」",
+      "测代理" in _html and "测试全部代理" in _html
+      and "testProxyAccount" in _html and "testAllProxies" in _html)
+check("★ ★ T2 探测目标硬编码为模块常量（不接受请求方 URL → 无 SSRF）",
+      'PROXY_TEST_URL = "https://www.googleapis.com/discovery/v1/apis"' in _gcp_src)
+try:
+    from core import gcp as _g
+    check("★ T2 非法代理配置被拒（不发外连）", _g.test_proxy("不是代理", "HTTPS")["ok"] is False)
+    check("★ ★ T2 不存在的代理 → 探测失败（证明真发请求）",
+          _g.test_proxy("127.0.0.1:9", "HTTPS", timeout=3)["ok"] is False)
+    check("★ T2 未配置代理时标注 empty=True（不冒充代理可用）",
+          _g.test_proxy("", "HTTPS", timeout=3).get("empty") is True)
+    # 顺带修复：代理密码打码（原来 host:port:user:pass 完全不遮）
+    check("★ ★ 代理密码打码：host:port:user:pass 形态",
+          _g.mask_proxy("1.2.3.4:8080:user:secretPw") == "1.2.3.4:8080:user:***")
+    check("★ ★ 代理密码打码：scheme://user:pass@host 形态",
+          _g.mask_proxy("socks5h://u:secretPw@h:1080") == "socks5h://u:***@h:1080")
+    check("★ 无密码的 host:port 不误伤", _g.mask_proxy("1.2.3.4:8080") == "1.2.3.4:8080")
+except Exception as _e:
+    check(f"★ T2 代理探测逻辑可调用（{type(_e).__name__}）", False, str(_e)[:80])
+
+# ── T3. 命令执行页机器列表 ────────────────────────────────────────────────
+try:
+    _exec_tpl = _html.split("tab==='exec'")[1].split("tab==='tasks'")[0]
+except IndexError:
+    _exec_tpl = ""
+check("★ ★ T3 命令执行页有「目标实例」卡片", "目标实例" in _exec_tpl)
+check("★ ★ T3 命令执行页渲染实例列表（v-for instances）", 'v-for="i in instances"' in _exec_tpl)
+check("★ T3 复选框与实例列表页共用 checkedInst",
+      ':value="i.name" v-model="checkedInst"' in _exec_tpl)
+check("★ T3 有全选/全不选/只选运行中", all(t in _exec_tpl for t in ("全选", "全不选", "只选运行中")))
+check("★ T3 空列表有引导文案", "暂无实例" in _exec_tpl)
+
+# ── T4. 实例状态中文 ──────────────────────────────────────────────────────
+check("★ T4 有 vmStatusLabel", "vmStatusLabel(s){" in _html)
+_zh = {"RUNNING": "运行中", "PROVISIONING": "创建中", "STAGING": "准备中", "STOPPING": "停止中",
+       "STOPPED": "已停止", "SUSPENDING": "挂起中", "SUSPENDED": "已挂起",
+       "REPAIRING": "修复中", "TERMINATED": "已终止"}
+_body = _html.split("vmStatusLabel(s){")[1].split("},")[0].replace(" ", "")
+check("★ ★ T4 九种 GCP 状态全部有中文映射",
+      all(f"{k}:'{v}'" in _body for k, v in _zh.items()),
+      str([k for k, v in _zh.items() if f"{k}:'{v}'" not in _body]))
+check("★ T4 实例列表状态列改用中文",
+      "vmStatusLabel(i.status)" in _html and _html.count("vmStatusLabel(i.status)") >= 3)
+
+# ── T5. 顺带修复：fmtTime 重复定义（数字时间戳被打回原形）─────────────────
+import re as _re
+_t5_cnt = len(_re.findall(r"\n    fmtTime\(", _html))
+check("★ ★ T5 fmtTime 只定义一次（原来定义了两次，后者覆盖前者）",
+      _t5_cnt == 1, f"实际 {_t5_cnt} 处")
+check("★ ★ T5 fmtTime 同时支持数字时间戳与 ISO 字符串",
+      "t < 1e12 ? t*1000 : t" in _html.replace(" ", " ")
+      or ("<1e12" in _html.replace(" ", "") and "Date.parse" in _html))
+
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

@@ -244,8 +244,20 @@ class UserStore:
                 (time.time(), username or "-", ip or "-", action, target, detail, 1 if ok else 0))
             self.conn.commit()
 
-    def get_audit(self, limit=200):
+    def count_audit(self):
+        """审计记录总数（分页用；走 idx_audit_ts 索引，代价 O(1) 级）。"""
+        with self.lock:
+            return self.conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+
+    def get_audit(self, limit=200, offset=0):
+        """按 ts 倒序取一页审计记录。
+
+        ★ 分页改造：原来是「一次拉最近 200 条」，管理页每次刷新都要把
+        200 行读出来再判断有没有被截断 —— 库一大就是无谓负载。现在由调用方
+        给 limit/offset，服务端只取需要的那一页（LIMIT ? OFFSET ?）。
+        """
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM audit ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+                "SELECT * FROM audit ORDER BY ts DESC LIMIT ? OFFSET ?",
+                (limit, max(0, offset))).fetchall()
         return [dict(r) for r in rows]

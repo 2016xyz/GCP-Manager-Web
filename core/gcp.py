@@ -205,17 +205,107 @@ def parse_proxy_input(proxy_text, fallback_proxy_type="HTTPS"):
 
 
 def mask_proxy(proxy_text):
-    """展示用：把代理里的密码打码，避免账号页面上直接看到明文密码"""
+    """展示用：把代理里的密码打码，避免账号页面上直接看到明文密码。
+
+    ★ 修复：原来只处理 `scheme://user:pass@host:port` 这一种写法 ——
+    只要字符串里没有 `@` 就直接原样返回。但本产品**文档里明确支持**
+    `host:port:user:pass` 这种写法（见账号页的输入提示），录入后被原样存库、
+    也被原样回显到账号列表，等于把代理密码明文摆在页面上。
+
+    实测：
+        mask_proxy("1.2.3.4:8080:user:secretPw") → "1.2.3.4:8080:user:secretPw"  ← 泄漏
+    修复后：
+        mask_proxy("1.2.3.4:8080:user:secretPw") → "1.2.3.4:8080:user:***"
+    """
     raw = (proxy_text or "").strip()
-    if not raw or "@" not in raw:
+    if not raw:
         return raw
-    head, _, tail = raw.rpartition("@")
-    if "://" in head:
-        scheme, _, cred = head.partition("://")
-        if ":" in cred:
-            u, _, _ = cred.partition(":")
-            return f"{scheme}://{u}:***@{tail}"
+    if "@" in raw:
+        head, _, tail = raw.rpartition("@")
+        if "://" in head:
+            scheme, _, cred = head.partition("://")
+            if ":" in cred:
+                u, _, _ = cred.partition(":")
+                return f"{scheme}://{u}:***@{tail}"
+        return raw
+    # `host:port:user:pass` 形态：4 段、第 2 段是端口 → 打码第 4 段
+    parts = raw.split(":")
+    if len(parts) == 4 and parts[1].isdigit() and "://" not in raw:
+        return f"{parts[0]}:{parts[1]}:{parts[2]}:***"
     return raw
+
+
+# 代理连通性探测的目标地址：**硬编码**，绝不接受请求方传入
+# （否则就成了 SSRF —— 攻击者可拿它扫内网）。选这个地址的理由：
+#   1. 与真实用途同域（googleapis.com），能真实反映「这个代理能不能访问 GCP」；
+#   2. 响应体极小（约 100KB 的 API 索引的 HEAD/小 GET），开销可忽略。
+PROXY_TEST_URL = "https://www.googleapis.com/discovery/v1/apis"
+
+
+def test_proxy(proxy_text, proxy_type="HTTPS", timeout=12, url=PROXY_TEST_URL):
+    """真实探测代理是否可用：**经该代理**发一个轻量 HTTPS 请求，返回延迟与结果。
+
+    为什么必须真发请求：配置写法合法（parse_proxy_input 过了）不等于代理**活着** ——
+    常见失败是代理地址/端口写错、代理需要认证但密码错、代理只允许特定出口。
+    只看配置格式会给出「配置正确」的假象，用户拿到的是连不上的账号。
+
+    返回 dict：
+      ok         是否可用（HTTP < 400 才算通）
+      empty      未配置代理（此时走直连探测，结果只反映本机外网能力）
+      latency_ms 往返毫秒
+      status     目标返回的 HTTP 状态码
+      via        代理类型标签
+      error      失败原因（含异常类型，便于区分「代理不可达」与「代理拒绝」）
+      blocked_by_proxy  是否疑似「代理活着但拦了目标」
+    """
+    parsed = parse_proxy_input(proxy_text, fallback_proxy_type=proxy_type)
+    base = {"latency_ms": 0, "status": 0, "url": url, "error": "",
+            "proxy_display": mask_proxy(proxy_text), "empty": False,
+            "blocked_by_proxy": False}
+    if not parsed.get("ok"):
+        return {**base, "ok": False, "via": "",
+                "error": parsed.get("error") or "代理配置不合法"}
+
+    is_empty = bool(parsed.get("empty"))
+    purl = parsed.get("proxy_url") or ""
+    via = parsed.get("proxy_type_label") or ""
+    base.update({"empty": is_empty, "via": via})
+    # proxy_url 里可能带明文密码，外发前统一打码
+    display = mask_proxy(purl) if purl else "直连"
+
+    try:
+        import requests                      # 懒加载：只在探测时才需要
+    except Exception as exc:                 # pragma: no cover
+        return {**base, "ok": False, "error": f"缺少 requests 依赖：{exc}"}
+
+    proxies = {"http": purl, "https": purl} if purl else None
+    t0 = time.time()
+    try:
+        # stream=True：拿到响应头就算通，不必等下完响应体
+        r = requests.get(url, proxies=proxies, timeout=timeout, stream=True,
+                         headers={"User-Agent": "GCP-Manager-Web/proxy-test"})
+        ms = int((time.time() - t0) * 1000)
+        code = r.status_code
+        try:
+            r.close()
+        except Exception:
+            pass
+        ok = code < 400
+        return {**base, "ok": ok, "latency_ms": ms, "status": code,
+                "error": "" if ok else f"目标返回 HTTP {code}",
+                "display": display}
+    except Exception as exc:
+        ms = int((time.time() - t0) * 1000)
+        name = type(exc).__name__
+        msg = str(exc) or name
+        # 区分两类失败，避免把「代理活着但被目标拒绝」误报成「代理挂了」
+        blocked = (not is_empty) and any(
+            k in msg for k in ("407", "Proxy Authentication", "proxy auth", "tunnel",
+                               "SSLError", "SSLCertVerificationError"))
+        return {**base, "ok": False, "latency_ms": ms,
+                "error": f"{name}: {msg[:220]}",
+                "blocked_by_proxy": bool(blocked),
+                "display": display}
 
 
 class ProxyEnvContext:

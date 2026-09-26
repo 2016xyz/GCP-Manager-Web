@@ -108,6 +108,9 @@ class CaptchaStore:
         self._items = {}
         self._lock = threading.Lock()
         self._last_gc = 0
+        # 容量上限。CAPTCHA_TTL 是 300 秒，正常使用下同时存在的验证码
+        # 不会超过在线人数；2 万条已远超任何真实场景，纯粹是防滥用。
+        self.MAX_ITEMS = 20000
 
     def _gc(self):
         """
@@ -118,9 +121,20 @@ class CaptchaStore:
         抛 RuntimeError: dictionary changed size during iteration。
         另外 _last_gc 的「读—判断—写」也没保护，多线程会同时进来重复清理。
         现在整个判断+清理都在同一把锁内完成。
+
+        ★ 另外加了容量上限：/api/auth/captcha 是**未认证**接口，每次调用都往
+        这张表里塞一条记录。原来只有按 TTL（300 秒）的过期清理，也就是说
+        300 秒内无论来多少请求都会全部堆在内存里 —— 单机每秒几百个请求就
+        能堆出几十万条记录。满了之后按插入顺序淘汰最旧的（先到期的本来就
+        最可能先到期，且淘汰旧的总比让它无界增长好）。
         """
         with self._lock:
             now = time.time()
+            # 容量检查每次调用都要做（len 是 O(1)），否则表会无限涨
+            while len(self._items) >= self.MAX_ITEMS:
+                self._items.pop(next(iter(self._items)), None)
+            # 过期清扫保持节流：每次 new() 都全表遍历会变成新的 CPU 负担
+            # （未认证接口，放大效应明显）。O(1) 的容量检查放在节流之外。
             if now - self._last_gc < 30:
                 return
             self._last_gc = now

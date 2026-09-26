@@ -675,9 +675,27 @@ def api_kill_session(token_ref: str, request: Request):
 
 
 @app.get("/api/audit")
-def api_audit(request: Request, limit: int = Query(200, ge=1, le=1000)):
+def api_audit(request: Request, page: int = Query(1, ge=1),
+              page_size: int = Query(5, ge=1, le=200),
+              limit: int = Query(0, ge=0, le=1000)):
+    """操作审计（服务端分页）。
+
+    ★ 改造点：原来是 `?limit=200` 一次拉最近 200 条 —— 管理页每点一次刷新
+    就要读 200 行，随审计表增长是纯浪费。现在默认「一页 5 条」，
+    响应带 total/page/pages 供前端翻页。
+
+    `limit` 保留为向后兼容别名（旧调用 ?limit=100 等价于「第 1 页取 100 条」），
+    现有测试脚本与 PoC 无需改动。
+    """
     require(request, "user")
-    return {"ok": True, "audit": users_store.get_audit(limit)}
+    if limit:                      # 兼容旧调用形态
+        page_size, page = limit, 1
+    total = users_store.count_audit()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), pages)          # 越界自动夹到合法范围
+    items = users_store.get_audit(page_size, (page - 1) * page_size)
+    return {"ok": True, "audit": items, "total": total,
+            "page": page, "page_size": page_size, "pages": pages}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -949,9 +967,45 @@ def api_cost_estimate(request: Request, payload: dict):
 # 账号
 # ═══════════════════════════════════════════════════════════════════════════
 def _load_json_info(path):
+    """读出服务账号 JSON 的 (client_email, project_id)"""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data.get("client_email", ""), data.get("project_id", "")
+
+
+# GCP 服务账号密钥 JSON 的必要特征。
+# ★ 为什么要做这个校验：/api/accounts 的 key_path 与 import_dir 的 folder
+# 都是**请求方给的任意路径**（前端默认值就是 /root/keys/xxx.json，属正常用法，
+# 不能锁目录）。但不加校验时，这两个接口等价于「按路径读取服务器上任意 JSON，
+# 并把 client_email / project_id 回显给调用方」，甚至能把任意 JSON 注册成
+# GCP 凭据去用（POST /api/accounts/{id}/test 会真的拿它调 GCP）。
+# 加上「必须真的是服务账号密钥」这条之后，普通 JSON（应用配置、其它程序的
+# 凭据文件、package.json 之类）既读不出字段也注册不了，而正常导入流程照旧。
+_SA_REQUIRED = ("type", "private_key", "client_email", "project_id")
+
+
+def _is_service_account_json(path):
+    """返回 (ok, reason)。只接受结构确实是 GCP 服务账号密钥的 JSON。"""
+    try:
+        if not os.path.isfile(path):
+            return False, "文件不存在"
+        if os.path.getsize(path) > 256 * 1024:
+            return False, "文件过大（服务账号密钥通常只有几 KB）"
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        return False, f"不是合法的 JSON：{exc}"
+    if not isinstance(data, dict):
+        return False, "JSON 顶层不是对象"
+    missing = [k for k in _SA_REQUIRED if not data.get(k)]
+    if missing:
+        return False, ("不是 GCP 服务账号密钥（缺少字段："
+                       + "、".join(missing) + "）")
+    if data.get("type") != "service_account":
+        return False, f"type 必须是 service_account，实际是 {data.get('type')!r}"
+    if "@" not in str(data.get("client_email", "")):
+        return False, "client_email 不像一个邮箱"
+    return True, ""
 
 
 @app.get("/api/accounts")
@@ -1021,19 +1075,23 @@ def api_add_account(request: Request, payload: dict):
             json.dump(info, f, ensure_ascii=False, indent=2)
     if not key_path:
         raise HTTPException(400, "缺少 key_path 或 json_content")
-    if not os.path.exists(key_path):
-        raise HTTPException(400, f"文件不存在：{key_path}")
-    try:
-        email, project_id = _load_json_info(key_path)
-    except Exception as exc:
-        raise HTTPException(400, f"无法读取服务账号 JSON：{exc}")
+    # ★ 必须真的是服务账号密钥：否则这个接口就等价于「按路径读服务器上任意
+    # JSON 并把 client_email/project_id 回显」，甚至能把任意 JSON 当凭据用
+    ok_sa, sa_why = _is_service_account_json(key_path)
+    if not ok_sa:
+        users_store.audit(user["username"], client_ip(request), "add_account_rejected",
+                          target=str(key_path)[:200], detail=sa_why, ok=False)
+        raise HTTPException(400, f"无法导入：{sa_why}")
+    email, project_id = _load_json_info(key_path)
     email = (payload.get("email") or email).strip()
     project_id = (payload.get("project_id") or project_id).strip()
     acc_id, created = store.upsert_account_by_key(
         email, project_id, key_path, payload.get("proxy", ""),
         payload.get("proxy_type", "HTTPS"), payload.get("label", ""))
+    # 记路径：key_path 是任意路径，事后要能查出「谁导入了哪个文件」
     users_store.audit(user["username"], client_ip(request), "add_account",
-                      target=email, detail=f"created={created}")
+                      target=email,
+                      detail=f"created={created} path={str(key_path)[:200]}")
     return {"ok": True, "account_id": acc_id, "created": created,
             "email": email, "project_id": project_id, "key_path": key_path}
 
@@ -1042,11 +1100,25 @@ def api_add_account(request: Request, payload: dict):
 async def api_upload_account(request: Request, file: UploadFile = File(...),
                              proxy: str = Form(""), proxy_type: str = Form("HTTPS")):
     user = require(request, "account")
-    raw = await file.read()
+    # ★ 上限：服务账号密钥 JSON 只有 2~3KB，给 256KB 已经很宽松。
+    # 原来不设限，await file.read() 会把整个文件读进内存 —— 传个几 GB 的
+    # 文件就能把服务打爆（内存 + 磁盘双杀）。
+    MAX_UPLOAD = 256 * 1024
+    raw = await file.read(MAX_UPLOAD + 1)
+    if len(raw) > MAX_UPLOAD:
+        raise HTTPException(413, f"文件过大（上限 {MAX_UPLOAD // 1024}KB）")
+    if not raw.strip():
+        raise HTTPException(400, "文件为空")
     try:
         info = json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise HTTPException(400, f"JSON 解析失败：{exc}")
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        raise HTTPException(400, "这不是 GCP 服务账号密钥 JSON"
+                                 "（需要 type=service_account）")
+    for k in ("private_key", "client_email", "project_id"):
+        if not info.get(k):
+            raise HTTPException(400, f"服务账号密钥缺少字段：{k}")
     name = os.path.basename(file.filename or "account.json")
     if not name.endswith(".json"):
         name += ".json"
@@ -1164,20 +1236,51 @@ def api_test_account(acc_id: int, request: Request):
         return {"ok": False, "error": str(exc)}
 
 
+@app.post("/api/accounts/{acc_id}/test_proxy")
+def api_test_account_proxy(acc_id: int, request: Request):
+    """真实探测该账号配置的代理是否可用（经代理发一个轻量请求）。
+
+    与 /test 的区别：/test 验的是「凭据 + 网络整体能不能列出实例」，
+    失败时你分不清是密钥错了还是代理挂了。这里**只**验代理本身，
+    让「代理配错」和「密钥/权限错了」两件事可以被分开定位。
+
+    权限同 /test（view）：只读探测，不改任何状态，也不回发明文代理密码。
+    """
+    require(request, "view")
+    acc = store.get_account(acc_id)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    res = gcp_mod.test_proxy(acc.get("proxy") or "", acc.get("proxy_type") or "HTTPS")
+    users_store.audit(request.state.user["username"], client_ip(request),
+                      "test_proxy", acc.get("email") or str(acc_id),
+                      f"ok={res.get('ok')} {res.get('error') or ''}"[:200],
+                      ok=bool(res.get("ok")))
+    return {"ok": True, "result": res}
+
+
 @app.post("/api/accounts/import_dir")
 def api_import_dir(request: Request, payload: dict):
     user = require(request, "account")
     folder = (payload.get("folder") or "").strip()
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "目录不存在")
-    out = []
-    for name in sorted(os.listdir(folder)):
+    MAX_SCAN = 500              # 单次最多扫这么多文件，避免被人指向一个巨型目录
+    out, skipped = [], []
+    for name in sorted(os.listdir(folder))[:MAX_SCAN]:
         if not name.lower().endswith(".json"):
             continue
         path = os.path.join(folder, name)
+        # ★ 同 /api/accounts：只收结构确实是服务账号密钥的文件。
+        # 原来只要「能 json.load 出 client_email」就收，等于把目录里任意 JSON
+        # 的字段回显给调用方。
+        ok_sa, sa_why = _is_service_account_json(path)
+        if not ok_sa:
+            skipped.append({"file": name, "reason": sa_why})
+            continue
         try:
             email, project_id = _load_json_info(path)
-        except Exception:
+        except Exception as exc:
+            skipped.append({"file": name, "reason": f"读取失败：{exc}"})
             continue
         acc_id, created = store.upsert_account_by_key(
             email, project_id, path, payload.get("proxy", ""), payload.get("proxy_type", "HTTPS"))
@@ -1185,19 +1288,45 @@ def api_import_dir(request: Request, payload: dict):
                     "account_id": acc_id, "created": created})
     users_store.audit(user["username"], client_ip(request), "import_dir",
                       target=folder, detail=f"{len(out)} 个")
-    return {"ok": True, "imported": len(out), "accounts": out}
+    return {"ok": True, "imported": len(out), "accounts": out,
+            "skipped": skipped[:20], "skipped_count": len(skipped)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 实例
 # ═══════════════════════════════════════════════════════════════════════════
+def _sanitize_vm_row(vm):
+    """
+    去掉实例记录里的敏感字段，只留一个 has_password 标记。
+
+    ★ 为什么必须有这个函数：`vm_passwords` 表里的 `password` 列存的是实例的
+    **root 密码明文**，而列表接口只需要 `view` 权限 —— viewer 是只读角色。
+    曾经 `GET /api/instances?sync=false` 直接把 `store.get_all_vms()` 的结果
+    返回（该方法内部是 `SELECT * FROM vm_passwords`），实测只读账号一次请求
+    就能拿到**全部实例的 root 密码明文**，把「看明文必须重新输入自己的登录
+    密码」这道二次验证彻底绕过。敏感字段只允许经 POST /api/instances/password
+    出示（那里做了登录密码复核 + 限速 + 审计）。
+
+    注意这里是**白名单式的显式丢弃**而不是挑几个字段删：以后往表里加新敏感列
+    也不会因为忘记脱敏而泄漏。
+    """
+    row = dict(vm or {})
+    has_pw = bool(row.get("password"))
+    for k in ("password", "root_password", "private_key", "ssh_private_key",
+              "secret", "token"):
+        row.pop(k, None)
+    row["has_password"] = has_pw
+    return row
+
+
 @app.get("/api/instances")
 def api_instances(request: Request, account_ids: str = "", sync: bool = True):
     require(request, "view")
     ids = [x for x in (account_ids or "").split(",") if x.strip()]
     if sync:
         return tm.list_all_instances(ids)
-    return {"ok": True, "instances": store.get_all_vms()}
+    # ⚠ 不能直接把 get_all_vms() 原样返回：它含 root 密码明文（见 _sanitize_vm_row）
+    return {"ok": True, "instances": [_sanitize_vm_row(v) for v in store.get_all_vms()]}
 
 
 @app.get("/api/install_presets")
