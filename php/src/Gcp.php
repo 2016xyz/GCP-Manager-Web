@@ -598,9 +598,22 @@ final class Gcp
                 curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
             }
         }
+        $headStatus = 0;      // HEAD 模式下由 HEADERFUNCTION 抓到的状态码
         if ($headOnly) {
-            // 只取响应头（test_proxy 用：拿到状态码即算通）
-            curl_setopt($ch, CURLOPT_NOBODY, true);
+            // ★ 绝不能用 CURLOPT_NOBODY —— 那是发 **HEAD** 请求，而我们的探测目标
+            //   https://www.googleapis.com/discovery/v1/apis 在 HEAD 下一律返回 404
+            //   （实测 HEAD=404 / GET=200），而判定是 `$code < 400`，
+            //   于是**代理完全正常也会被判成「不通」**，用户看到的就是「代理不可用」。
+            //   正确做法：发 GET，拿到响应头后立刻中断传输 —— 状态码已到手，
+            //   不必等下完 body（那个 discovery 列表有 380KB）。
+            curl_setopt($ch, CURLOPT_HTTPGET, true);
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($c, $line) use (&$headStatus) {
+                if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $mm)) {
+                    $headStatus = (int) $mm[1];
+                }
+                return strlen($line);
+            });
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, static fn($c, $chunk) => 0);
         }
 
         // 代理：URL 里可能带 user:pass，curl 会自行解析凭据
@@ -619,7 +632,16 @@ final class Gcp
         curl_close($ch);
 
         if ($errno !== 0) {
+            // headOnly 模式下我们用 WRITEFUNCTION 返回 0 主动中断传输，
+            // curl 会把它报成 CURLE_WRITE_ERROR(23)。这不是故障：
+            // 只要状态码已经拿到，就说明请求**已经通了**，应照常返回状态码。
+            if ($headOnly && $errno === 23 && $headStatus > 0) {
+                return ['status' => $headStatus, 'body' => '', 'error' => ''];
+            }
             return ['status' => 0, 'body' => '', 'error' => 'curl(' . $errno . '): ' . $err];
+        }
+        if ($headOnly && $headStatus > 0) {
+            $status = $headStatus;   // 以 HEADERFUNCTION 抓到的为准（重定向场景更准）
         }
         return ['status' => $status, 'body' => is_string($resp) ? $resp : '', 'error' => ''];
     }

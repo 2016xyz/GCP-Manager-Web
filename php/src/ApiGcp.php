@@ -734,8 +734,13 @@ final class ApiGcp
             $kw['proxy'] = trim((string) $b['proxy']);
         }
         if (array_key_exists('proxy_type', $b)) {
-            $pt = (string) $b['proxy_type'];
-            if (!in_array($pt, ['HTTPS', 'HTTP', 'SOCKS5'], true)) {
+            $pt = strtoupper((string) $b['proxy_type']);
+            // ★ 白名单以 Gcp::PROXY_TYPE_LABELS 为**唯一来源**，不要在这里再硬编码一份。
+            //   曾经的写法是 in_array($pt, ['HTTPS','HTTP','SOCKS5']) —— 漏了 SOCKS5H 与
+            //   SOCKS4，而前端两个下拉提供的恰恰是 SOCKS5H/SOCKS4，用户一选就 400
+            //   「不支持的代理类型：SOCKS5H」。测试之所以没拦住，是因为用例发的是
+            //   前端根本不产生的 'SOCKS5'。详见 tests_e2e.py 的前后端契约断言。
+            if (!array_key_exists($pt, Gcp::PROXY_TYPE_LABELS)) {
                 Json::err('不支持的代理类型：' . $pt, 400);
             }
             $kw['proxy_type'] = $pt;
@@ -819,7 +824,7 @@ final class ApiGcp
             Json::ok(['result' => ['ok' => false, 'empty' => true,
                                    'error' => '该账号未配置代理', 'display' => '']]);
         }
-        if (!in_array($proxyType, ['HTTPS', 'HTTP', 'SOCKS5'], true)) {
+        if (!array_key_exists(strtoupper($proxyType), Gcp::PROXY_TYPE_LABELS)) {
             Json::err('不支持的代理类型：' . $proxyType, 400);
         }
         // 只读探测，不改任何状态、不发往用户指定的地址

@@ -2781,6 +2781,64 @@ else:
     check("★ 伪静态规则里不得出现生效的 fastcgi_pass（PHP 解析交给宝塔，避免重复/冲突）",
           not any("fastcgi_pass" in ln for ln in _rwd), "规则文件里出现了生效的 fastcgi_pass")
 
+    # ── 前后端代理类型契约 ★（真实事故：UI 能选、后端 400）────────────────────
+    # 事故：前端两个 <select> 提供 HTTPS/HTTP/SOCKS5H/SOCKS4，后端 ApiGcp 却硬编码
+    #       in_array($pt, ['HTTPS','HTTP','SOCKS5']) —— SOCKS5H 与 SOCKS4 **两个 UI 选项
+    #       全被 400**「不支持的代理类型：SOCKS5H」，用户存不了代理、也测不了代理。
+    #       而测试用例发的是前端根本不产生的 'SOCKS5'，所以测试一直全绿、UI 一直是坏的。
+    # 锁法：把前端所有 <option> 值逐一拿去后端权威白名单（Gcp::PROXY_TYPE_LABELS）里对，
+    #       再从反方向锁一遍「后端不许再自己硬编码一份」。
+    _gcps = open(os.path.join(_php_root, "src", "Gcp.php"), encoding="utf-8").read()
+    _plbl = _gcps[_gcps.find("PROXY_TYPE_LABELS"):]
+    _plbl = _plbl[:_plbl.find("];")]
+    _backend_types = set(re.findall(r"'([A-Z0-9]+)'\s*=>", _plbl))
+    _html = open(os.path.join(BASE_DIR, "static", "console.html"), encoding="utf-8").read()
+    _ui_types = set(re.findall(r'<option value="(HTTPS|HTTP|SOCKS\dH?)"', _html))
+    check("★ 前端代理下拉的每个选项，后端白名单都必须认（防止 UI 能选、API 400）",
+          _ui_types and _ui_types <= _backend_types,
+          f"UI 提供了但后端不认：{sorted(_ui_types - _backend_types)}")
+    # ★ 源码模式断言一律先剥注释：说明文字里常要原样引用「旧写法」，不剥就会自伤
+    _apigcp_code = "\n".join(ln for ln in _apigcp.splitlines()
+                             if not ln.lstrip().startswith(("*", "//", "#", "/*")))
+    check("★ 代理类型白名单只此一份：ApiGcp 里不得再硬编码 in_array(..., ['HTTPS','HTTP',...])",
+          not re.search(r"in_array\(\s*\$(?:pt|proxyType)\s*,\s*\[\s*'HTTPS'", _apigcp_code),
+          "ApiGcp.php 里又出现了硬编码白名单，应改用 Gcp::PROXY_TYPE_LABELS")
+    check("★ SOCKS5H 与 SOCKS4 必须都在后端白名单里（曾经正是这两个被漏掉）",
+          {"SOCKS5H", "SOCKS4"} <= _backend_types,
+          f"缺失：{sorted({'SOCKS5H','SOCKS4'} - _backend_types)}")
+    # curl 层：从白名单出发、反查 curl_proxy_type 的 switch 有没有对应分支
+    # （截取函数体再找，避免拿整份文件匹配被注释/别处字面量误命中）
+    _cpt = _gcps[_gcps.find("function curl_proxy_type"):]
+    _cpt = _cpt[:_cpt.find("\n    }")]
+    _cpt_cases = set(re.findall(r"case\s+'([A-Z0-9]+)'\s*:", _cpt))
+    check("★ curl 层能处理白名单里的每一种类型（否则存得进、连不上）",
+          _backend_types <= _cpt_cases,
+          f"curl_proxy_type 未覆盖：{sorted(_backend_types - _cpt_cases)}")
+
+    # ── 代理探测必须用 GET，不能用 HEAD ★（真实事故：好代理被判「不通」）──────────
+    # 事故：test_proxy 走 curl_request(..., headOnly:true)，而那个分支设的是
+    #       CURLOPT_NOBODY —— 等于发 **HEAD**。可探测目标 PROXY_TEST_URL
+    #       （https://www.googleapis.com/discovery/v1/apis）在 HEAD 下一律 404
+    #       （实测 HEAD=404 / GET=200），而判定是 `$code < 400` ——
+    #       **代理完全正常也被判成「不通」**，用户看到「代理不可用」，
+    #       于是去怀疑代理、怀疑网络，唯独不会怀疑到探测实现上。
+    # 修法：发 GET，用 HEADERFUNCTION 抓状态码，WRITEFUNCTION 立刻中断传输
+    #       （discovery 列表 380KB，不能真下完）；中断会被报成 CURLE_WRITE_ERROR(23)，
+    #       只要状态码已拿到就当成功。
+    # Python 版不受影响：它用的是 requests.get（真 GET）。
+    check("★ 代理探测不得用 CURLOPT_NOBODY（HEAD 会让 googleapis 返 404，好代理被判不通）",
+          "CURLOPT_NOBODY" not in _gcps or "绝不能用 CURLOPT_NOBODY" in _gcps,
+          "curl_request 里又出现了 CURLOPT_NOBODY")
+    _tp = _gcps[_gcps.find("function test_proxy"):]
+    _tp = _tp[:_tp.find("\n    }")]
+    check("★ test_proxy 走 GET（headOnly=true）+ 拿到响应头即中断",
+          "'GET'" in _tp and "true // 只取响应头" in _tp.replace("，", ","),
+          "test_proxy 的请求方式被改了")
+    check("★ 探测目标仍是硬编码常量（防 SSRF），不得由请求参数传入",
+          "PROXY_TEST_URL = 'https://www.googleapis.com/discovery/v1/apis'" in _gcps
+          and "string $url = self::PROXY_TEST_URL" in _tp,
+          "PROXY_TEST_URL 被改成可外部传入")
+
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

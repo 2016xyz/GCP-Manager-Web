@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.3.3';
+    public const VERSION = '1.3.4';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,19 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.3.4',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【修复】PHP 版设不了 SOCKS5H/SOCKS4 代理：前端两个下拉提供的是 HTTPS / HTTP / SOCKS5H / SOCKS4，而 ApiGcp 里两处硬编码白名单写的是 in_array($pt, [\'HTTPS\',\'HTTP\',\'SOCKS5\']) —— **SOCKS5H 与 SOCKS4 这两个 UI 选项全被 400**「不支持的代理类型：SOCKS5H」，用户既存不了代理也测不了代理',
+                    '根因是「白名单有两份」：权威集合本来是 Gcp::PROXY_TYPE_LABELS（HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H），ApiGcp 却又手写了一份且已与前端脱节。现已改为统一查 Gcp::PROXY_TYPE_LABELS，并顺手把传入的类型 toUpper 归一化（前端/接口大小写不一致时也稳）',
+                    '★ 为什么测试没拦住：用例发的是前端根本不产生的 \'SOCKS5\'，等于一直在测一个不存在的契约。已新增 4 条**前后端契约断言**：把 console.html 里所有 <option value> 取出来逐个要求后端白名单认；反向再锁一遍 ApiGcp 不得再硬编码白名单；并校验 curl_proxy_type 覆盖白名单全部类型。该类断言一律先剥注释行再匹配（说明文字里要原样引用旧写法，不剥会自伤）',
+                    '【修复·更严重】PHP 版代理探测用 HEAD，导致**能用的代理一律被判「不通」**：test_proxy 经 curl_request(headOnly:true) 落到 CURLOPT_NOBODY，即发 HEAD 请求；而探测目标 PROXY_TEST_URL = https://www.googleapis.com/discovery/v1/apis 在 HEAD 下一律返回 404（实测 HEAD=404 / GET=200），判定又是 `$code < 400` —— 于是代理完全正常也显示「代理不可用」，用户只会去怀疑代理和网络，不会怀疑探测实现。已改为发 GET + HEADERFUNCTION 抓状态码 + WRITEFUNCTION 立刻中断传输（discovery 列表 380KB，不能真下完）；中断被 curl 报成 CURLE_WRITE_ERROR(23)，只要状态码已拿到就当成功。Python 版用的是 requests.get，不受影响',
+                    '实测（真实 SOCKS5 代理，4 个用例全部 ok=true / HTTP 200 / ~1.1s）：socks5h:// + SOCKS5H、socks5h:// + HTTPS（前端默认值，靠 scheme 纠正）、socks5:// + SOCKS5（归一化为 SOCKS5H）、大小写混写 Socks5H:// —— 全部通过；curl -v 确认走的是 SOCKS5 远端解析（remotely resolved）且出口 IP 变为代理 IP',
+                    '新增 3 条断言锁死 HEAD 陷阱：curl_request 不得出现 CURLOPT_NOBODY、test_proxy 必须走 GET、PROXY_TEST_URL 必须仍是硬编码常量（防 SSRF）',
+                    'Python 版不受影响：它本来就没有这层白名单，直接把 proxy_type 交给 parse_proxy_input 校验',
+                ],
+            ],
             [
                 'version' => '1.3.3',
                 'date'    => '2026-09-27',
