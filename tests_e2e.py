@@ -2672,6 +2672,89 @@ check("★ V2 DEBIAN_FRONTEND 经 env 传递",
 check("★ V2 抽出统一 pkg_install（apt/dnf/yum 共用）", "pkg_install()" in _inst)
 
 
+# ── W 段：PHP 版关键不变量（防止两版漂移）─────────────────────────────────
+print("\n" + "-" * 76)
+print("W 段：PHP 版不变量")
+print("-" * 76)
+
+_php_root = os.path.join(BASE_DIR, "php")
+if not os.path.isdir(_php_root):
+    check("PHP 版目录存在", False, "php/ 不存在")
+else:
+    check("★ PHP 版目录存在且结构完整",
+          all(os.path.exists(os.path.join(_php_root, x)) for x in
+              ["public/index.php", "src/Config.php", "src/Auth.php", "src/ApiGcp.php",
+               "bin/init.php", "bin/task-runner.php", "bin/ws-server.php",
+               "install-php.sh", "update-php.sh", "bt/bt-install.sh",
+               "bt/nginx-rewrite.conf", "bt/GUIDE.md", "README-PHP.md", "INTERFACES.md"]))
+
+    # ★ 版本号单一事实来源：php/src/Version.php 由 core/version.py 生成，必须一致
+    _cv = re.search(r'^VERSION\s*=\s*"([^"]+)"',
+                    open(os.path.join(BASE_DIR, "core/version.py"), encoding="utf-8").read(), re.M)
+    _pv = re.search(r"public const VERSION = '([^']+)'",
+                    open(os.path.join(_php_root, "src", "Version.php"), encoding="utf-8").read())
+    check("★ ★ PHP 版版本号与 core/version.py 一致（单一事实来源）",
+          _cv and _pv and _cv.group(1) == _pv.group(1),
+          f"py={_cv.group(1) if _cv else '?'} php={_pv.group(1) if _pv else '?'}")
+
+    # ★ 生成器可复现：再跑一次生成，内容必须不变
+    _before = open(os.path.join(_php_root, "src", "Version.php"), encoding="utf-8").read()
+    _g = _sp.run(["python3", "tools/gen_php_version.py"], cwd=BASE_DIR,
+                 capture_output=True, text=True, timeout=60)
+    _after = open(os.path.join(_php_root, "src", "Version.php"), encoding="utf-8").read()
+    check("★ Version.php 可被生成器幂等复现（改了 Python 侧就该重跑生成）",
+          _g.returncode == 0 and _before == _after, "生成结果与现有文件不一致")
+
+    # ★ 前端逐字节一致：这是「PHP 版前端一行未改」这一前提的硬保证
+    import filecmp as _fc
+    _diff = []
+    for _root, _dirs, _files in os.walk(os.path.join(BASE_DIR, "static")):
+        for _f in _files:
+            _src = os.path.join(_root, _f)
+            _rel = os.path.relpath(_src, os.path.join(BASE_DIR, "static"))
+            _dst = os.path.join(_php_root, "public", "static", _rel)
+            if not os.path.isfile(_dst) or not _fc.cmp(_src, _dst, shallow=False):
+                _diff.append(_rel)
+    check("★ ★ PHP 版前端与 Python 版逐字节一致（console.html/login.*/vendor）",
+          not _diff, f"不一致: {_diff[:5]}")
+
+    # ★ PHP 语法：全部文件必须通过 php -l（本机没 php 时跳过而不是假装通过）
+    if _sp.run(["bash", "-c", "command -v php"], capture_output=True).returncode == 0:
+        _bad = []
+        for _root, _dirs, _files in os.walk(_php_root):
+            _dirs[:] = [d for d in _dirs if d not in ("data", "vendor")]
+            for _f in _files:
+                if not _f.endswith(".php"):
+                    continue
+                _p = os.path.join(_root, _f)
+                if _sp.run(["php", "-l", _p], capture_output=True).returncode != 0:
+                    _bad.append(os.path.relpath(_p, BASE_DIR))
+        check("★ PHP 文件全部通过 php -l 语法检查", not _bad, f"失败: {_bad[:5]}")
+    else:
+        print("  ⏭  跳过 PHP 语法检查（本机没有 php）")
+
+    # ★ 安全不变量：CSP 必须含 unsafe-eval（Vue 运行期编译），且拒绝流包装器
+    _http = open(os.path.join(_php_root, "src", "Http.php"), encoding="utf-8").read()
+    check("★ ★ PHP 的 CSP 含 unsafe-eval（缺了控制台会白屏且无其它报错）",
+          "unsafe-eval" in _http)
+    check("★ PHP 的 CSP font-src 含 data:（FontAwesome 内联字体）",
+          "font-src 'self' data:" in _http)
+    _apigcp = open(os.path.join(_php_root, "src", "ApiGcp.php"), encoding="utf-8").read()
+    check("★ ★ key_path 拒绝流包装器（file:// php:// data:// 等）",
+          "只接受本地文件系统路径" in _apigcp and "://#" in _apigcp or
+          "不接受" in _apigcp and "包装器" in _apigcp)
+    # 4 个调用点：addAccount 的两条分支(json_content / key_path) + uploadAccount + importDir
+    check("★ 账号导入显式解构 [bool, reason] 元组（不得按异常处理）—— 4 处调用点全覆盖",
+          _apigcp.count("[$saOk, $saWhy] = Gcp::validate_service_account") == 4,
+          f"实际 {_apigcp.count('[$saOk, $saWhy] = Gcp::validate_service_account')} 处")
+    check("★ count 参数校验在「有无账号」业务判断之前（对齐 FastAPI 校验时机）",
+          _apigcp.find("$count > 200") < _apigcp.find("没有匹配的账号"),
+          "count 校验被排在了业务判断之后")
+    check("★ worker 启动时关闭继承的 fd（否则会占住 Web 监听套接字）",
+          "/proc/self/fd" in open(os.path.join(_php_root, "bin", "task-runner.php"),
+                                  encoding="utf-8").read())
+
+
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:

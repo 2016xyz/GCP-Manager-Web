@@ -34,6 +34,18 @@
 
 ## 快速开始
 
+> **PHP 版**（v1.3.0 新增）：界面、API、数据库结构与 Python 版完全一致，
+> 零 composer 依赖，**适合宝塔面板用户**或只有 PHP 环境的服务器。
+> 见 [`php/README-PHP.md`](php/README-PHP.md) 与宝塔逐步引导 [`php/bt/GUIDE.md`](php/bt/GUIDE.md)。
+> 两版可共用同一个数据目录（密码哈希逐位相同，已实测双向交叉认证）。
+>
+> ```bash
+> # 宝塔面板
+> cd /www/wwwroot/你的域名/php && bash bt/bt-install.sh --site /www/wwwroot/你的域名/php
+> # 裸机 / VPS
+> curl -fsSL https://raw.githubusercontent.com/2016xyz/GCP-Manager-Web/main/php/install-php.sh | bash
+> ```
+
 ### 方式一：一键脚本（推荐，裸机 / VPS）
 
 ```bash
