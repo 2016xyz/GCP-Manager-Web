@@ -1720,8 +1720,14 @@ final class Gcp
     /**
      * dry-run 预览 —— 对应 Python _plan_preview。
      * 只做**只读**清点（list_instances），不创建任何资源、不产生费用。
+     *
+     * ★ public 而不是 private（2026-09-27）：API 层的同步 dry-run 分支要用它。
+     *   早前 API 层图省事自己拼了个 `build_instance_spec()` 的结果当 plan 返回 ——
+     *   那是「机型/磁盘规格对象」，不是计划数组，前端 `plan.forEach` 直接炸
+     *   （Vue runtime-5：plan.forEach is not a function），整块预检结果渲染不出来。
+     *   现在 API 层与 worker 共用这一个实现，不可能再分叉。
      */
-    private static function plan_preview(array $accounts, int $count, array $spec, array $rawSpec): array
+    public static function plan_preview(array $accounts, int $count, array $spec, array $rawSpec): array
     {
         $out = [];
         foreach ($accounts as $acc) {

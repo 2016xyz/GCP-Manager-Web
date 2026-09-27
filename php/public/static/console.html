@@ -2320,6 +2320,21 @@ const __APP_REF__ = createApp({
     },
     async api(path){ return this.raw(path); },
     async post(path, data){ return this.raw(path, {method:'POST', body:JSON.stringify(data||{})}); },
+
+    /* 接口返回值的数组兜底。
+       ★ 为什么需要：后端只要有一次契约漂移（本该是数组、返回了对象），
+         紧接着的 .forEach 就会抛 Vue runtime-5「xxx.forEach is not a function」，
+         而页面只显示一句"渲染错误"，看不出是接口违约 —— 不好排查也不好解释。
+         PHP 版的 dry-run 就真的这样踩过一次（plan 返回了机型规格对象）。
+       处理原则：不炸整页 + 留下可查的痕迹；**不静默吞掉**异常值。 */
+    asArr(v, what){
+      if(Array.isArray(v)) return v;
+      if(v !== undefined && v !== null){
+        console.warn(`[接口契约] ${what || '返回值'} 期望数组，实收 ` +
+                     `${Object.prototype.toString.call(v)}`, v);
+      }
+      return [];
+    },
     async del(path){ return this.raw(path, {method:'DELETE'}); },
     async patch(path, data){ return this.raw(path, {method:'PATCH', body:JSON.stringify(data||{})}); },
     fail(r, fallback){ this.toast((r && (r.error||r.detail)) || fallback || '操作失败', 'r'); },
@@ -2590,7 +2605,8 @@ const __APP_REF__ = createApp({
                                        : '/api/accounts/instance_counts');
         if(r && r.ok && r.counts){
           const m = {};
-          r.counts.forEach(c => { m[String(c.account_id)] = c.inst_count_live; });
+          this.asArr(r.counts, '/api/accounts/instance_counts 的 counts')
+            .forEach(c => { m[String(c.account_id)] = c.inst_count_live; });
           this.accounts.forEach(a => {
             if(m[String(a.id)] !== undefined) a.inst_count_live = m[String(a.id)];
           });
@@ -2935,7 +2951,19 @@ const __APP_REF__ = createApp({
             const r = await this.post('/api/create', this.buildPayload(dry));
             if(!r.ok){ this.fail(r); return; }
             if(dry){
-              const plan = r.plan || [];
+              // ★ 别信 r.plan 一定是数组：PHP 版曾经在这条路径上返回「机型规格对象」，
+              //   直接 plan.forEach 会抛 Vue runtime-5（plan.forEach is not a function），
+              //   整块预检结果渲染不出来，而错误提示只说"渲染错误"，完全看不出是接口违约。
+              //   这里显式判类型并把原始响应打出来，让问题一眼可见、而不是猜。
+              const plan = Array.isArray(r.plan) ? r.plan : null;
+              if(!plan){
+                this.modal = {title:'预检结果异常',
+                  sub:'服务端返回的 plan 不是数组（接口契约违约）',
+                  body:'期望：Array（每个账号一条记录）\n'
+                     + '实收：' + Object.prototype.toString.call(r.plan) + '\n\n'
+                     + '原始响应：\n' + JSON.stringify(r, null, 2)};
+                return;
+              }
               let body = '';
               plan.forEach(p=>{
                 body += p.error ? `✕ ${p.account}\n   ${p.error}\n\n`
@@ -3083,9 +3111,12 @@ const __APP_REF__ = createApp({
       if(!r.ok) return this.fail(r);
       const t = r.task, res = t.result;
       let txt = `任务 ${t.id}\n类型：${t.kind}\n状态：${this.statusLabel(t.status)}\n说明：${t.message||'-'}\n创建：${this.fmtTime(t.created_at)}\n`;
-      if(res && res.results){
-        txt += `\n结果（${res.results.filter(x=>x.ok).length}/${res.results.length} 成功）\n` + '─'.repeat(60) + '\n';
-        res.results.forEach(x=>{
+      // ★ 兜底：res.results / res.instances 一旦不是数组，下面的 .length / .forEach 就会炸整页。
+      const _results = this.asArr(res && res.results, '任务结果的 results');
+      const _instances = this.asArr(res && res.instances, '任务结果的 instances');
+      if(_results.length){
+        txt += `\n结果（${_results.filter(x=>x.ok).length}/${_results.length} 成功）\n` + '─'.repeat(60) + '\n';
+        _results.forEach(x=>{
           txt += `\n[${x.name||x.account||'-'}] ${x.ok?'✅ 成功':'❌ 失败'}`;
           if(x.ip) txt += `  ip=${x.ip}`;
           if(x.zone) txt += `  zone=${x.zone}`;
@@ -3094,9 +3125,9 @@ const __APP_REF__ = createApp({
           if(x.error) txt += `\n  错误：${x.error}`;
           txt += '\n' + '─'.repeat(60) + '\n' + (x.output||x.post_command_tail||x.verify_output||'（无输出）') + '\n';
         });
-      } else if(res && res.instances){
+      } else if(_instances.length){
         txt += `\n实例明细\n` + '─'.repeat(60) + '\n';
-        res.instances.forEach(x=>{
+        _instances.forEach(x=>{
           txt += `\n[${x.name||'-'}] ${x.ok?'✅':'❌'} ${x.stage?'阶段='+x.stage:''} ${x.ip?'ip='+x.ip:''}\n`;
           if(x.root_password) txt += `  Root密码：${x.root_password}\n`;
           if(x.error) txt += `  错误：${x.error}\n`;
@@ -3130,10 +3161,11 @@ const __APP_REF__ = createApp({
       ws.onmessage = ev=>{
         let d=null; try{ d=JSON.parse(ev.data); }catch(e){ return; }
         if(d.type==='hello') this.logSeq = d.since_id || 0;
-        if(d.type==='logs' && d.items.length){
+        const _items = this.asArr(d.items, `WS ${d.type} 的 items`);
+        if(d.type==='logs' && _items.length){
           // 去重：服务端可能重发已见过的行（断线重连 / 并发轮询），
           // 只接受 id 严格大于本地游标的日志，避免页面出现重复内容。
-          const fresh = d.items.filter(l => l.id > this.logSeq);
+          const fresh = _items.filter(l => l.id > this.logSeq);
           if(!fresh.length) return;
           this.logSeq = fresh[fresh.length-1].id;
           const append = (old, items, keep) => {
@@ -3148,10 +3180,10 @@ const __APP_REF__ = createApp({
         }
         if(d.type==='tasks'){
           const map = {};
-          d.items.forEach(t=>map[t.id]=t);
+          _items.forEach(t=>map[t.id]=t);
           this.tasks = this.tasks.map(t=>map[t.id] ? {...t, ...map[t.id]} : t);
           const known = new Set(this.tasks.map(t=>t.id));
-          d.items.forEach(t=>{ if(!known.has(t.id)) this.tasks.unshift(t); });
+          _items.forEach(t=>{ if(!known.has(t.id)) this.tasks.unshift(t); });
         }
       };
     },

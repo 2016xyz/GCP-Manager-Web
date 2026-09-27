@@ -3035,8 +3035,67 @@ else:
                 _mism.append(_ks)
         check("★ 两版生成的预装脚本逐字节一致（含空选择与全选）",
               not _mism, f"不一致的组合：{_mism}")
-    else:
-        check("★ 两版生成的预装脚本逐字节一致（本机无 php，跳过）", True, "")
+    # ── dry-run 契约：`plan` 必须是**数组**（PHP 曾在这里返回对象，前端整块炸）──
+    # 现象：点「预检」后弹出「渲染错误 · Vue runtime-5] plan.forEach is not a function」，
+    #   页面其余部分还能用 —— 用户看不出这是接口违约，只会以为前端坏了。
+    # 根因：ApiGcp::create() 的同步 dry-run 分支自己调了 build_instance_spec()，
+    #   那返回的是机型规格对象 {machine_type, disk_type, ...}，不是「每账号一条」的计划数组。
+    #   而 worker 里那条 dry-run 路径（Gcp::runCreateTask）用的才是真的 plan_preview ——
+    #   同一个功能两条实现，其中一条调错了函数。
+    _apigcp = open(f"{BASE_DIR}/php/src/ApiGcp.php", encoding="utf-8").read()
+    _gcpphp = open(f"{BASE_DIR}/php/src/Gcp.php", encoding="utf-8").read()
+    _apigcp_code = "\n".join(l for l in _apigcp.splitlines() if not l.strip().startswith(("//", "*", "/*")))
+
+    check("★ PHP dry-run 走 Gcp::plan_preview（而不是把 build_instance_spec 当 plan 返回）",
+          "Gcp::plan_preview(" in _apigcp_code,
+          "dry-run 分支没调用 plan_preview —— plan 会返回规格对象，前端 plan.forEach 会炸")
+    check("★ PHP dry-run 分支里不再出现 build_instance_spec 冒充 plan",
+          not re.search(r"\$plan\s*=\s*Gcp::build_instance_spec", _apigcp_code),
+          "又用 build_instance_spec 的返回值当 plan 了")
+    check("★ Gcp::plan_preview 是 public（API 层与 worker 共用同一实现，不可能再分叉）",
+          re.search(r"public static function plan_preview\(", _gcpphp) is not None)
+    check("★ PHP dry-run 与 worker 都指向同一个 plan_preview 实现",
+          _gcpphp.count("self::plan_preview(") + _apigcp_code.count("Gcp::plan_preview(") >= 2)
+
+    # 前端必须有类型兜底：违约时给诊断，而不是抛 Vue runtime-5 崩掉渲染
+    check("★ 前端对 r.plan 判 Array.isArray（违约时给诊断而非崩页）",
+          "Array.isArray(r.plan)" in _html)
+    check("★ 前端有 asArr() 数组兜底助手（不静默吞掉异常值，会 console.warn）",
+          "asArr(v, what)" in _html and "接口契约" in _html
+          and "console.warn" in _html)
+    # 所有对接口返回值的数组方法都要过兜底（同类 bug 一次性收口）
+    _unguarded = [l.strip()[:80] for l in _html.splitlines()
+                  if re.search(r"\b(r|res|d)\.(results|instances|counts|items)\.(forEach|map|filter|length)\b", l)
+                  and "Array.isArray" not in l]
+    check("★ 不再有对接口返回值的无保护 .forEach/.map/.filter/.length",
+          not _unguarded, f"仍有：{_unguarded}")
+
+    # 两版 plan_preview 的**形状**必须一致（键集合相同，且都返回数组）
+    _pyplan = _ipmod  # noqa: F841  （仅确保模块已加载）
+    _plankeys_py = {"account", "project_id", "existing_instances", "region_usage",
+                    "available_regions", "planned_instances", "can_create", "machine_type"}
+    _miss_php = [k for k in _plankeys_py if f"'{k}'" not in _gcpphp]
+    check("★ PHP plan 的记录字段与 Python 齐平（前端按这些键渲染）",
+          not _miss_php, f"PHP 缺字段：{_miss_php}")
+
+    if os.path.exists("/usr/bin/php") or os.path.exists("/usr/local/bin/php"):
+        # 拿一个假账号打 plan_preview：会走异常分支，但**必须仍然返回数组**
+        # —— 这条正是原 bug 的照妖镜（原实现返回的是对象，is_array 判否）。
+        _planshape = subprocess.run(
+            ["php", "-r",
+             f"require '{BASE_DIR}/php/src/Gcp.php'; require '{BASE_DIR}/php/src/Catalog.php';"
+             " $p = @Gcp::plan_preview([['id'=>'1','email'=>'x@y.z','project_id'=>'p','key_path'=>'/nope.json']],"
+             " 2, ['machine_type'=>'e2-micro'], []);"
+             " echo json_encode(['is_array'=>is_array($p), 'n'=>count($p),"
+             " 'keys'=>array_keys($p[0] ?? [])], JSON_UNESCAPED_UNICODE);"],
+            capture_output=True, text=True)
+        _pj = {}
+        try:
+            _pj = json.loads(_planshape.stdout.strip().splitlines()[-1])
+        except Exception:
+            pass
+        check("★ PHP plan_preview 返回数组（假账号走异常分支也必须是数组）",
+              _pj.get("is_array") is True and _pj.get("n") == 1, str(_planshape.stdout)[:200])
 
 
 print("\n" + "=" * 76)

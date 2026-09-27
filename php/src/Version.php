@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.4.1';
+    public const VERSION = '1.4.2';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,18 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.4.2',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【修复·PHP 版】点「预检（Dry-run）」后弹出「渲染错误 · Vue runtime-5] plan.forEach is not a function」，预检结果区整块渲染不出来（页面其余部分可用）。根因：ApiGcp::create() 的同步 dry-run 分支自己拼了 build_instance_spec() 的结果当 plan —— 那是「机型/磁盘规格对象」{machine_type, disk_type, disk_size_gb, ...}，不是「每个账号一条」的计划数组，前端拿到对象后 .forEach 直接抛异常。而 worker 里那条 dry-run 路径（Gcp::runCreateTask）用的才是真的 plan_preview —— 同一个功能两条实现，API 层那条调错了函数。修复：plan_preview 改为 public，API 层与 worker 共用同一实现，不可能再分叉',
+                    '【修复·PHP 版】dry-run 任务现在也会写日志并把 plan 存进 result、当场判 done，与 Python 的 update_task(task_id, \'done\', \'dry-run 预览完成\', {\'plan\': plan}) 对齐；原先 PHP 只建了任务就返回，任务列表里那条 dry-run 永远悬着',
+                    '【加固·前端】新增 asArr(v, what) 数组兜底助手：接口返回值不是数组时不再炸整页，而是返回 [] 并 console.warn 打出实收类型与原始值 —— 不静默吞掉异常值。r.plan 另加了显式 Array.isArray 判断，违约时直接弹出「预检结果异常」并附原始响应 JSON，一眼能看出是接口违约而不是前端坏了',
+                    '【加固·前端】同类隐患一次性收口：另外 6 处对接口返回值的无保护 .forEach/.map/.filter/.length（accounts 实时实例数 counts、任务详情 results/instances、WS 轮询 items ×2）全部过 asArr。这些今天能跑只是因为后端恰好返回数组，契约一漂移就是整页崩',
+                    '【测试】新增 9 条断言（738 通过 / 0 失败）：PHP dry-run 必须走 Gcp::plan_preview、不得再用 build_instance_spec 冒充 plan、plan_preview 必须 public、两版都指向同一实现、前端必须 Array.isArray 判 plan、asArr 助手存在且会告警、全仓无对接口返回值的无保护数组方法、PHP plan 字段与 Python 齐平、以及用假账号实打一次 plan_preview 断言「返回的必须是数组」（原 bug 的照妖镜）',
+                    '★ 这类 bug 的特征：后端一处契约漂移，前端只报一句「渲染错误」，用户看不出是接口问题；而单测如果只断言「接口 200 / ok true」就完全抓不住。线上复现证据：POST /api/create {dry_run:true} → plan 类型 = object',
+                ],
+            ],
             [
                 'version' => '1.4.1',
                 'date'    => '2026-09-27',

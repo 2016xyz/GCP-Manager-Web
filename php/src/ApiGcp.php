@@ -1105,9 +1105,22 @@ final class ApiGcp
         }
 
         if (!empty($b['dry_run'])) {
-            // 预演：只算计划，不建任务、不碰云
-            $plan = Gcp::build_instance_spec($b['spec'] ?? null);
-            $id = Tasks::create('create', array_merge($b, ['dry_run' => true]));
+            // 预演：只读清点，不碰云、不产生费用。
+            //
+            // ★ 必须走 Gcp::plan_preview（= worker 里那份实现）。
+            //   早前这条同步捷径自己调了 build_instance_spec()，那返回的是
+            //   「机型/磁盘规格对象」{machine_type, disk_type, ...}，不是计划数组；
+            //   前端拿到对象后 `plan.forEach` 抛
+            //   「Vue runtime-5: plan.forEach is not a function」，
+            //   整个预检结果区渲染不出来（页面其余部分还能用）。
+            //   现在与 worker 共用同一实现，且下方断言锁死"plan 必须是数组"。
+            $rawSpec = is_array($b['spec'] ?? null) ? $b['spec'] : [];
+            $spec    = Gcp::build_instance_spec($rawSpec);
+            $plan    = Gcp::plan_preview($accounts, $count, $spec, $rawSpec);
+            $id      = Tasks::create('create', array_merge($b, ['dry_run' => true]));
+            Tasks::addLog($id, 'success', 'dry-run 预览完成（只读清点，未创建任何资源）');
+            // 镜像 Python：dry-run 任务当场判 done 并把 plan 存进 result
+            Tasks::update($id, 'done', 'dry-run 预览完成', ['dry_run' => true, 'plan' => $plan]);
             Json::ok(['task_id' => $id, 'dry_run' => true, 'plan' => $plan]);
         }
 
