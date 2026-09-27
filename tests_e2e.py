@@ -1451,9 +1451,13 @@ check("★ 生成脚本内含 _run_remote 助手",
 check("★ 助手先下载到临时文件再执行（脚本走文件、stdin 走 /dev/null）",
       'curl -fsSL --retry 3 --connect-timeout 20 "$_u" -o "$_f"' in _all_scripts
       and 'sh "$_f" "$@" </dev/null' in _all_scripts)
-check("★ 所有远程脚本都改走 _run_remote",
-      _all_scripts.count("_run_remote https") >= 4
-      and "get.docker.com | sh" not in _all_scripts)
+# ★ 数「真正的调用行」而不是写死的 URL 形式 —— 之前写死 `_run_remote https`，
+#   结果 ekko 改成传变量（_run_remote "$_ns"）之后计数掉了，断言反而误报。
+_re_rm_calls = [ln for ln in _all_scripts.splitlines()
+                if _re2.match(r"^\s*_run_remote\s", ln)]
+check("★ 所有远程脚本都改走 _run_remote（数调用行，不写死 URL 形式）",
+      len(_re_rm_calls) >= 5
+      and "get.docker.com | sh" not in _all_scripts, f"实际 {len(_re_rm_calls)} 处")
 # 只看代码行 —— 注释里会引用这个反例做说明
 # 排除注释行与 echo 出来的「给人看的手动重试提示」——
 # 后者是让用户在终端里手动执行的，人的 stdin 是 tty，原样写没问题。
@@ -1470,6 +1474,43 @@ check("★ 助手下载失败有明确提示且清理临时文件",
 for _k in _ip.INSTALL_PRESETS:
     check(f"★ 预设 {_k} 的脚本仍带 stdin 兜底",
           "</dev/null" in _ip.build_script([_k]))
+
+# ═══ 预设脚本不能假定发行版（用户实测：ekko 在 CentOS 上 0/9）═════════════
+# 现象：预装 ekko 全失败，报「NodeSource 源配置失败，无法安装 Node.js」。
+# 根因：脚本里写死了 deb.nodesource + apt-get，而目标镜像是 CentOS Stream 9
+#       （没有 apt-get）。Debian 的源脚本下载得下来，但会拒绝在 CentOS 上执行。
+check("★ 生成脚本里有 _os_family() 发行版判断助手",
+      "_os_family() {" in _all_scripts)
+check("★ 生成脚本里有 _pkg_install() 按发行版装包助手",
+      "_pkg_install() {" in _all_scripts)
+check("★ _os_family 同时识别 Debian 系与 RHEL 系（含 ID_LIKE）",
+      "*debian*|*ubuntu*" in _all_scripts and "*rhel*|*fedora*|*centos*" in _all_scripts
+      and "ID_LIKE" in _all_scripts)
+check("★ _os_family 认不出发行版时退回「哪个包管理器在」，而不是直接放弃",
+      "command -v apt-get >/dev/null 2>&1; then echo deb" in _all_scripts
+      and "then echo rpm; return 0; fi" in _all_scripts)
+_ekko = _ip.build_script(["ekko"])
+check("★ ekko 按族系选 NodeSource 源（不再写死 deb.nodesource）",
+      "deb.nodesource.com/setup_lts.x" in _ekko and "rpm.nodesource.com/setup_lts.x" in _ekko
+      and '_fam="$(_os_family)"' in _ekko)
+check("★ ekko 装 nodejs 走 _pkg_install（不再写死 apt-get）",
+      "_pkg_install nodejs" in _ekko
+      and "apt-get install -y nodejs" not in _ekko)
+check("★ ekko 会打印识别到的发行版族系（失败时能一眼看出选错没选错）",
+      "发行版族系：$_fam" in _ekko)
+# 通用规则：任何预设都不得**无条件**调用 apt-get（必须先问 _os_family）。
+# ★ 先剥注释行 —— 注释里会引用 apt-get 做对比说明，直接查会误命中自己。
+_all_code = "\n".join(ln for ln in _all_scripts.splitlines()
+                      if not _re2.match(r"\s*#", ln))
+_apt_lines = [ln.strip() for ln in _all_code.splitlines()
+              if _re2.search(r"(^|\s)apt-get\s", ln)]
+# 只剩三种合法情形：_os_family 里探测「有没有 apt-get」、_pkg_install 里真正调用它、
+# 以及 echo 给用户看的文案里提到它（那是给人读的，不是调用）。
+_apt_bad = [ln for ln in _apt_lines
+            if "command -v apt-get" not in ln and ln != 'apt-get install -y "$@"'
+            and "echo " not in ln]
+check("★ 除 _os_family 探测、_pkg_install 内部与提示文案外，没有别处无条件调用 apt-get",
+      not _apt_bad, str(_apt_bad[:3]))
 
 
 # ══════════ 费用与免费额度 ══════════

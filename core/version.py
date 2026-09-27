@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,17 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.5.2",
+        "date": "2026-09-27",
+        "notes": [
+            "【修复】预装 ekko 在 CentOS 实例上必定失败：「NodeSource 源配置失败，无法安装 Node.js」。根因是脚本里写死了 Debian 那一套（deb.nodesource.com + apt-get），而目标镜像是 CentOS Stream 9 —— 它根本没有 apt-get。Debian 的源脚本能下载下来（HTTP 200），但在 CentOS 上会拒绝执行，于是报「源配置失败」，完全看不出真正原因是「发行版不对」",
+            "  修法：新增 _os_family() / _pkg_install() 两个共用助手，脚本按发行版选源与包管理器。不是只修 ekko 这一处 —— 别的预设将来要装包也用得上，免得各自再写一遍 apt。识别顺序：先看 /etc/os-release 的 ID/ID_LIKE，认不出来再按「哪个包管理器在」判，而不是直接放弃。ekko 现在还会打印识别到的族系，失败时一眼能看出是不是选错了",
+            "  实测（真实实例 + 两个容器）：centos 9 目标机 → rpm 族系 → NodeSource(RHEL) 配置成功 → dnf install nodejs 成功 → node=v24.21.0 npm=11.19.0；debian:12 容器 → deb；rockylinux:9 容器 → rpm",
+            "【测试】断言 811 → 819。含「生成脚本逐字节一致（8 种勾选组合）」「_os_family 在真实 debian/rocky 容器里分别返回 deb/rpm」，以及一条通用规则「任何预设都不得无条件调用 apt-get」—— 把这类问题从「修一个」变成「挡住一类」",
+            "【顺带】修掉两条自己写的断言：① 原来写死数 `_run_remote https` 的出现次数，ekko 改成传变量后计数掉了、断言反而误报 —— 改成数「真正的调用行」；② 又出现「断言被自己的注释误命中」，按既有纪律先剥注释行再查",
+        ],
+    },
     {
         "version": "1.5.1",
         "date": "2026-09-27",

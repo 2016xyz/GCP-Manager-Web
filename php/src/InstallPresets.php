@@ -170,20 +170,32 @@ SH,
                 'docs' => 'https://github.com/EKKOLearnAI/ekko-studio',
                 'script' => <<<'SH'
 export DEBIAN_FRONTEND=noninteractive
-# Ekko Studio 需要 Node.js。没有就用 NodeSource 的 LTS 源装。
+# Ekko Studio 需要 Node.js。没有就装。
+#
+# ★ 源必须按发行版选 —— 只写 deb.nodesource + apt-get 的话，在 CentOS 上
+#   第一步就失败，而报的是「源配置失败」，完全看不出真正原因是
+#   「这个发行版根本没有 apt-get」（实测目标镜像就是 CentOS Stream 9）。
 if ! command -v node >/dev/null 2>&1; then
+  _fam="$(_os_family)" || { echo "Node.js 安装失败：认不出发行版，且没有 apt-get / dnf / yum"; exit 1; }
+  echo "  发行版族系：$_fam"
+  if [ "$_fam" = deb ]; then
+    _ns="https://deb.nodesource.com/setup_lts.x"
+  else
+    _ns="https://rpm.nodesource.com/setup_lts.x"
+  fi
   # ★ 这两步必须显式判失败：以前把输出丢进 /dev/null 又不看返回码，
   #   装不上 Node 时会一路走到 npm，最后报一个跟根因无关的错。
-  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1 \
-    || { echo "NodeSource 源配置失败，无法安装 Node.js"; exit 1; }
-  apt-get install -y nodejs >/dev/null 2>&1 \
-    || { echo "nodejs 安装失败（apt-get 返回非 0）"; exit 1; }
+  _run_remote "$_ns" >/dev/null 2>&1 \
+    || { echo "NodeSource 源配置失败（$_ns），无法安装 Node.js"; exit 1; }
+  _pkg_install nodejs >/dev/null 2>&1 \
+    || { echo "nodejs 安装失败（$_fam 系包管理器返回非 0）"; exit 1; }
 fi
 # npm 全局包装完是可执行的 ekko-studio-web（常驻服务）
 # ★ 原来是 `exit 0` —— 安装失败却回报成功，是这一项最坑的地方，改成 exit 1。
 npm install -g ekko-studio >/dev/null 2>&1 \
   || { echo "ekko-studio 安装失败（npm 返回非 0），可手动重试： npm install -g ekko-studio"; exit 1; }
 echo "ekko-studio 已安装，启动命令： ekko-studio-web start"
+
 SH,
                 'verify' => 'command -v ekko-studio-web && npm ls -g --depth=0 2>/dev/null | grep ekko',
                 'note' => '「Ekko」存在多个同名项目：① EKKOLearnAI/ekko-studio（AI 工作台，本预设采用）；② Cracked5pider/Ekko（Windows 内存规避，与 Linux 服务无关）；③ laravelista/Ekko（PHP 库）。若所指不是 ①，则与预期不符。另外 ekko-studio-web start 是常驻进程，生产环境建议再配 systemd。',
@@ -297,6 +309,38 @@ SH,
             '  return $_rc',
             '}',
             '',
+            '# ── 发行版判断 ──────────────────────────────────────────────────',
+            '# 输出 deb / rpm。镜像里既有 Debian/Ubuntu 也有 CentOS Stream 9（实测目标机',
+            '# 就是 CentOS 9），所以凡涉及包管理器的地方都必须先问这里，不能假定 apt。',
+            '# ★ 这条是真实踩出来的：预设里只写了 apt-get，在 CentOS 上第一步就失败，',
+            '#   报的却是「源配置失败」，完全看不出真正原因是「这台机器没有 apt-get」。',
+            '_os_family() {',
+            '  _id=""; _like=""',
+            '  if [ -r /etc/os-release ]; then',
+            '    . /etc/os-release',
+            '    _id="${ID:-}"; _like="${ID_LIKE:-}"',
+            '  fi',
+            '  case "$_id $_like" in',
+            '    *debian*|*ubuntu*) echo deb; return 0 ;;',
+            '    *rhel*|*fedora*|*centos*) echo rpm; return 0 ;;',
+            '  esac',
+            '  # 认不出来就按「哪个包管理器在」判 —— 比直接放弃有用',
+            '  if command -v apt-get >/dev/null 2>&1; then echo deb; return 0; fi',
+            '  if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then echo rpm; return 0; fi',
+            '  return 1',
+            '}',
+            '',
+            '# 按发行版装包：_pkg_install <包名...>',
+            '_pkg_install() {',
+            '  _f="$(_os_family)" || return 1',
+            '  if [ "$_f" = deb ]; then',
+            '    apt-get install -y "$@"',
+            '  elif command -v dnf >/dev/null 2>&1; then',
+            '    dnf install -y "$@"',
+            '  else',
+            '    yum install -y "$@"',
+            '  fi',
+            '}',
             '_FAILED_ITEMS=""',
             '',
         ];
