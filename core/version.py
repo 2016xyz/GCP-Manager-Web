@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,22 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.3.6",
+        "date": "2026-09-27",
+        "notes": [
+            "【修复】每个页面都会产生一条 /favicon.ico 的 404：浏览器找不到 <link rel=icon> "
+            "就会默认去站点根取 /favicon.ico，而图标实际在 /static/favicon.ico。"
+            "已在 console.html 与 login.html 显式声明 link rel=icon / apple-touch-icon",
+            "【缓存分层】应用外壳 HTML 改用 no-cache + ETag 回源校验："
+            "console.html / login.html 是外壳，长缓存会让前端修复发布了用户还在跑旧代码"
+            "（实测踩过：整个 /static/ 给 expires 7d）。vendor/ 里的第三方库内容不可变，"
+            "仍走 30d immutable。Python 版本来就是 no-cache，本次让 PHP 版与之对齐",
+            "【运维记录】经 CDN 访问时 /ws/logs 返回 400、本地直连 101 —— 腾讯 EdgeOne "
+            "未透传 Upgrade 头（WebSocket 需在控制台开启，或等 HTTPS 修好后走 wss）。"
+            "不影响功能：前端会自动降级为轮询拉日志",
+        ],
+    },
     {
         "version": "1.3.5",
         "date": "2026-09-27",
