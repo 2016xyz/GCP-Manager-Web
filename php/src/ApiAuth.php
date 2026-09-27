@@ -131,6 +131,28 @@ final class ApiAuth
         Json::ok(Version::info());
     }
 
+    /**
+     * GET /api/update/check?force=1
+     *
+     * 去 GitHub 看有没有新版本。字段说明见 Update 类注释。
+     *
+     * ★ 为什么不放到 /api/version 里一起返回：
+     *   /api/version 是**匿名**可读的（登录页也要用），而这一步要出外网、
+     *   还受 GitHub 速率限制。混在一起等于给匿名用户一个刷外网的接口。
+     *   所以拆开，并且要求登录。
+     *
+     * ★ 检查结果 ok=false（比如连不上 GitHub）时**仍然返回 HTTP 200**：
+     *   这不是接口调用失败，是"检查这件事没成功"，把原因放在 reason/detail 里
+     *   让前端照常渲染。用 4xx/5xx 反而会让前端走通用错误分支，看不到细节。
+     */
+    public static function updateCheck(array $p): void
+    {
+        $force = (($_GET['force'] ?? '') === '1')
+              || (($_POST['force'] ?? '') === '1')
+              || !empty($p['force']);
+        Json::ok(Update::check($force));
+    }
+
     // ── 认证（需登录）──────────────────────────────────────────────────────
 
     /**

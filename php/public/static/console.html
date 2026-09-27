@@ -174,6 +174,17 @@ a{color:var(--brand);text-decoration:none}
 .about-ul{margin:0;padding-left:19px;font-size:12.5px;color:var(--ink-2);line-height:1.75}
 .about-ul li{margin-bottom:2px}
 
+/* 检查更新 */
+.upd-bar{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.upd-bar .hint{font-size:12px}
+/* 有新版时版本号旁边的小徽章 —— 用暖色，一眼能看见但不刺眼 */
+.badge.n{background:linear-gradient(180deg,#fef3c7,#fde68a);color:#8a5a00;border:1px solid #f2d27a}
+.upd-msg{margin-top:9px;padding:9px 11px;border-radius:8px;font-size:12.5px;line-height:1.7}
+.upd-msg.ok{background:var(--ok-bg,#f0fdf7);border:1px solid #b7e7d2;color:#116b4c}
+.upd-msg.warn{background:var(--warn-bg,#fffaf0);border:1px solid #f0dcae;color:#8a5a00}
+.upd-msg .hint{font-size:12px;margin-top:3px;color:inherit;opacity:.82}
+.upd-msg .about-ul{margin-top:6px}
+
 @media (max-width:1023px){
   .sb-link{justify-content:center;padding:8px 0}
   .sb-link .lb{display:none}
@@ -1902,6 +1913,7 @@ pre.log.big{max-height:520px}
           <h2>关于 <small>{{ ver.name_cn || 'GCP 批量管理控制台' }}</small></h2>
           <div class="kv">
             <b>版本</b><span><span class="badge b">{{ ver.version || '—' }}</span>
+              <span class="badge n" v-if="upd.ok && upd.has_update">有新版本 v{{ upd.latest }}</span>
               <span class="hint" v-if="ver.released">发布于 {{ ver.released }}</span></span>
             <b>仓库</b><span>
               <a class="repo-link" :href="ver.repo || '#'" target="_blank" rel="noopener noreferrer">
@@ -1910,6 +1922,49 @@ pre.log.big{max-height:520px}
               <a class="repo-link" :href="ver.issue_url || '#'" target="_blank" rel="noopener noreferrer">
                 {{ ver.issue_url || '—' }}</a></span>
           </div>
+          <div class="sep"></div>
+
+          <!-- 检查更新：去 GitHub 问一次有没有新版。
+               刻意只「检查」不「升级」—— 升级要动部署目录里的文件，
+               不是一个按钮该干的事；这里只回答有没有新版、怎么升。 -->
+          <h6 class="about-h">检查更新</h6>
+          <div class="upd-bar">
+            <button class="p" :disabled="upd.loading" @click="checkUpdate(false)">
+              {{ upd.loading ? '检查中…' : '检查更新' }}</button>
+            <button v-if="upd.checked && !upd.ok" :disabled="upd.loading"
+                    @click="checkUpdate(true)">重试</button>
+            <span class="hint" v-if="upd.checked && upd.ok && !upd.has_update">
+              已是最新版（{{ upd.at }} 检查{{ upd.cached ? '，来自缓存' : '' }}）</span>
+          </div>
+
+          <div class="upd-msg warn" v-if="upd.checked && !upd.ok">
+            <b>检查失败：</b>{{ upd.reason }}
+            <div class="hint" v-if="upd.hint">{{ upd.hint }}</div>
+            <div class="hint" v-if="upd.tried">
+              两条路都试过了 —— Releases：{{ upd.tried['releases/latest'] }}；Tags：{{ upd.tried.tags }}
+            </div>
+            <div class="hint" v-if="upd.stale_age_sec">
+              上次成功检查是 {{ Math.round(upd.stale_age_sec/60) }} 分钟前，当时最新为
+              v{{ upd.stale.latest }}。
+            </div>
+            <a class="repo-link" :href="upd.release_url || '#'" target="_blank"
+               rel="noopener noreferrer">去仓库 Releases 页看 →</a>
+          </div>
+
+          <div class="upd-msg ok" v-if="upd.ok && upd.has_update">
+            <b>发现新版本 v{{ upd.latest }}</b>（当前 v{{ ver.version }}）
+            <a class="repo-link" :href="upd.release_url || '#'" target="_blank"
+               rel="noopener noreferrer">查看发布说明 →</a>
+            <div class="hint" v-if="upd.notes_note">{{ upd.notes_note }}</div>
+            <div class="hint" v-if="upd.published_at">发布于 {{ upd.published_at }}</div>
+            <ul class="about-ul" v-if="(upd.behind||[]).length">
+              <li v-for="(e,i) in upd.behind" :key="i">
+                <b>v{{ e.version }}</b>（{{ e.date }}）{{ (e.notes||[])[0] }}</li>
+            </ul>
+            <div class="hint" style="margin-top:6px">
+              升级：在部署目录执行 <code>bash update.sh</code>，全程不触碰 data/ 账号数据。</div>
+          </div>
+
           <div class="sep"></div>
           <h6 class="about-h">v{{ ver.version || '—' }} 更新内容</h6>
           <ul class="about-ul">
@@ -2137,6 +2192,8 @@ const __APP_REF__ = createApp({
     userForm:{username:'', password:'', role:'operator', display_name:'', must_change:true},
     pwForm:{old_password:'', new_password:'', confirm:''},
     ver:{version:'', name:'', repo:'', repo_name:'', issue_url:'', changelog:[]},
+    // 检查更新：默认不主动去问（那是外网请求，用户点了才发）
+    upd:{loading:false, checked:false, ok:false, has_update:false, latest:'', at:''},
     inspect:{}, inspecting:false, inspectErr:'', inspectAt:0,
     inspectAccount:0, inspectRegion:'', inspectZone:'',
     inspectProjectId:'', inspectFailed:[], inspectOpen:{}, inspectLoaded:'',
@@ -2522,6 +2579,38 @@ const __APP_REF__ = createApp({
         const r = await this.api('/api/version');
         if(r && r.ok) this.ver = r;
       }catch(e){ /* 版本信息拿不到不影响使用，静默降级 */ }
+    },
+
+    /* ───────── 检查更新（走 GitHub，需登录）─────────
+       刻意**不在启动时自动检查**：这是个外网请求，而且 GitHub 未认证
+       限流只有 60 次/小时，每次打开控制台都问一遍很快就会用光。
+       用户点了才发；后端另有 1 小时缓存兜底。*/
+    async checkUpdate(force){
+      if(this.upd.loading) return;
+      this.upd = Object.assign({}, this.upd, {loading:true, checked:false});
+      try{
+        const r = await this.api('/api/update/check' + (force ? '?force=1' : ''));
+        const d = (r && typeof r === 'object') ? r : {};
+        const t = new Date();
+        const hhmm = String(t.getHours()).padStart(2,'0') + ':' +
+                     String(t.getMinutes()).padStart(2,'0');
+        this.upd = Object.assign({}, d, {
+          loading:false, checked:true,
+          ok: !!d.ok,
+          has_update: !!d.has_update,
+          latest: d.latest || '',
+          at: hhmm,
+        });
+        // 拿不到具体原因时给一句兜底，别让界面显示一片空白
+        if(!d.ok && !this.upd.reason){
+          this.upd.reason = '没能从 GitHub 取到版本信息（原因未知）';
+        }
+      }catch(e){
+        this.upd = Object.assign({}, this.upd, {
+          loading:false, checked:true, ok:false,
+          reason:'请求后端失败：' + (e && e.message ? e.message : e),
+        });
+      }
     },
 
     /* ───────── 安装预设 ───────── */

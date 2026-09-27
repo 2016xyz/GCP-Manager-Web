@@ -31,6 +31,7 @@ from core import catalog                                   # noqa: E402
 from core import version as ver                            # noqa: E402
 from core import install_presets as presets                # noqa: E402
 from core import gcp as gcp_mod                            # noqa: E402
+from core import update_check                              # noqa: E402
 from core import auth as auth_mod                          # noqa: E402
 from core.auth import (captcha_store, login_guard, PERMISSIONS, ROLE_ADMIN,  # noqa: E402
                        ROLE_LABELS, ROLES, ROLE_OPERATOR, ROLE_VIEWER,
@@ -126,8 +127,8 @@ bootstrap_admin()
 PUBLIC_PATHS = {
     "/login", "/api/auth/login", "/api/auth/captcha", "/api/auth/logout",
     "/api/auth/me", "/favicon.ico",
-    # 登录页要在未登录状态下显示版本号与仓库地址，故此接口匿名可读。
-    # 只回版本、仓库、更新日志，不含任何账号或环境信息。
+    # /api/version 匿名可读：只回版本、仓库、更新日志，不含账号或环境信息。
+    # （登录页已不再展示版本号，这个接口留给未登录时的兜底查询与前端探活。）
     "/api/version",
 }
 PUBLIC_PREFIXES = ("/static/",)
@@ -893,8 +894,24 @@ def favicon():
 
 @app.get("/api/version")
 def api_version():
-    """版本与仓库信息。刻意不要求登录 —— 登录页也要展示版本号。"""
+    """版本与仓库信息。刻意不要求登录 —— 只含版本/仓库/更新日志，无敏感信息。"""
     return {"ok": True, **ver.info()}
+
+
+@app.get("/api/update/check")
+def api_update_check(force: int = 0):
+    """去 GitHub 看有没有新版本。字段说明见 core/update_check.py。
+
+    ★ 为什么不塞进 /api/version：那个接口是匿名可读的，而这一步要出外网、
+      还受 GitHub 速率限制（未认证 60 次/小时）。混在一起等于给匿名用户
+      一个刷外网的接口。所以拆开，并要求登录。
+
+    ★ 检查本身失败（比如连不上 GitHub）时**仍返回 HTTP 200**，把原因放在
+      reason/detail 里让前端照常渲染 —— 这不是接口调用失败，而是"检查
+      这件事没成功"，用 4xx 会让前端走通用错误分支，反而看不到细节。
+    """
+    res = update_check.check(force=bool(force), st=store)
+    return res
 
 
 @app.get("/api/inspect/sections")

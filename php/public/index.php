@@ -127,6 +127,8 @@ $ROUTES = [
     ['POST',   '#^/api/auth/logout$#',           'public', [ApiAuth::class, 'logout']],
     ['GET',    '#^/api/auth/password_policy$#',  'view',   [ApiAuth::class, 'passwordPolicy']],
     ['GET',    '#^/api/version$#',               'public', [ApiAuth::class, 'version']],
+    // 检查更新要走 GitHub API（外网 + 有速率限制），放到登录后，别做成匿名接口给人刷
+    ['GET',    '#^/api/update/check$#',          'view',   [ApiAuth::class, 'updateCheck']],
     // ---- 认证（需登录）----
     ['GET',    '#^/api/auth/me$#',               'public', [ApiAuth::class, 'me']],
     ['POST',   '#^/api/auth/change_password$#',  'user',   [ApiAuth::class, 'changePassword']],

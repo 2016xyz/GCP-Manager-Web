@@ -3239,6 +3239,89 @@ else:
         check("★ PHP plan_preview 返回数组（假账号走异常分支也必须是数组）",
               _pj.get("is_array") is True and _pj.get("n") == 1, str(_planshape.stdout)[:200])
 
+    # ═══ 检查更新（走 GitHub）══════════════════════════════════════════════
+    # 起因：「关于」卡片原来只显示本地 changelog，没有任何东西去比对远端，
+    # 用户无从知道有没有新版。补一个走 GitHub API 的检查。
+    _updphp = open(f"{BASE_DIR}/php/src/Update.php", encoding="utf-8").read()
+    _updpy = open(f"{BASE_DIR}/core/update_check.py", encoding="utf-8").read()
+    _idxphp = open(f"{BASE_DIR}/php/public/index.php", encoding="utf-8").read()
+    _apppy = open(f"{BASE_DIR}/app.py", encoding="utf-8").read()
+
+    check("★ PHP 有 Update 类、Python 有 update_check 模块",
+          os.path.exists(f"{BASE_DIR}/php/src/Update.php")
+          and os.path.exists(f"{BASE_DIR}/core/update_check.py"))
+    check("★ 两版都注册了 /api/update/check",
+          "/api/update/check" in _idxphp and '"/api/update/check"' in _apppy)
+    check("★ 检查更新**要求登录**（不是匿名接口）",
+          "#^/api/update/check$#',          'view'" in _idxphp
+          and '"/api/update/check",' not in _apppy.split("PUBLIC_PATHS = {")[1].split("}")[0])
+    check("★ GitHub 要求 UA —— 两版都带了（缺了直接 403）",
+          "CURLOPT_USERAGENT" in _updphp and '"User-Agent": _UA' in _updpy)
+    check("★ 有缓存（GitHub 未认证限流 60 次/小时）",
+          "TTL = 3600" in _updphp and "TTL = 3600" in _updpy)
+    check("★ 两段式取数：Release 优先，404 时退回 tags",
+          "releases/latest" in _updphp and "/tags?per_page=100" in _updphp
+          and "releases/latest" in _updpy and "/tags?per_page=100" in _updpy)
+    check("★ 检查失败返回 HTTP 200 + reason/detail（不是把整个接口判失败）",
+          "'reason' => self::why($r)," in _updphp and "'detail' => self::why($r)," in _updphp
+          and '"reason": why,' in _updpy and '"detail": why,' in _updpy)
+    check("★ 不用 4xx/5xx 表达「检查没成功」（那样会走前端通用错误分支，看不到细节）",
+          "http_response_code(4" not in _updphp)
+
+    # ★ 版本比较：两版必须逐项一致 —— 这正是本次开发中真抓到过分歧的地方
+    _uc = __import__("core.update_check", fromlist=["newer"])
+    _cases = [("1.4.8", "1.4.7"), ("1.4.7", "1.4.8"), ("1.4.7", "1.4.7"), ("1.5.0", "1.4.99"),
+              ("1.4.10", "1.4.9"), ("v1.5.0", "1.4.7"), ("1.4.8-rc1", "1.4.8"), ("1.4.8", "1.4.8-rc1"),
+              ("1.5", "1.4.7"), ("", "1.4.7"), ("2.0.0", "1.99.99")]
+    _pyv = [_uc.newer(a, b) for a, b in _cases]
+    check("★ Python 版本比较：1.5.0 > 1.4.99 / 1.4.10 > 1.4.9（不能按字符串比）",
+          _pyv[3] is True and _pyv[4] is True)
+    check("★ Python 版本比较：带 v 前缀要能正确比对（tag 名天然带 v）",
+          _pyv[5] is True)
+    check("★ Python 版本比较：1.4.8-rc1 < 1.4.8（预发布版不大于正式版）",
+          _pyv[6] is False and _pyv[7] is True)
+    if shutil.which("php"):
+        _p = subprocess.run(["php", "-r",
+            f"require '{BASE_DIR}/php/src/Catalog.php'; require '{BASE_DIR}/php/src/Store.php';"
+            f" require '{BASE_DIR}/php/src/Version.php'; require '{BASE_DIR}/php/src/Update.php';"
+            f" $c = {json.dumps([list(x) for x in _cases])};"
+            " $o = []; foreach ($c as $x) { $o[] = Update::newer($x[0], $x[1]); } echo json_encode($o);"],
+            capture_output=True, text=True)
+        try:
+            _phpv = json.loads(_p.stdout.strip().splitlines()[-1])
+        except Exception:
+            _phpv = None
+        check("★ 两版的版本比较结果**逐项一致**（这条抓到过真分歧：PHP 漏了 norm）",
+              _phpv == _pyv, f"PHP={_phpv} Py={_pyv}")
+
+    # 前端
+    check("★ 关于卡片有「检查更新」按钮",
+          'class="upd-bar"' in _html and "checkUpdate(" in _html)
+    check("★ 有新版时版本号旁显示徽章",
+          'class="badge n"' in _html and "upd.ok && upd.has_update" in _html)
+    check("★ 检查失败时把两条路的失败原因都显示出来（便于定位）",
+          "upd.tried['releases/latest']" in _html and "upd.tried.tags" in _html)
+    check("★ 检查更新**不在**启动时自动跑（外网请求 + 限流，用户点了才发）",
+          "checkUpdate()" not in _html.replace("async checkUpdate(force){}", "").replace("async checkUpdate(force)", "")
+          or "this.checkUpdate(" not in _html)
+    check("★ 前端对返回做类型防御（失败/异常也要有文案，不留空白）",
+          "typeof r === 'object'" in _html and "没能从 GitHub 取到版本信息" in _html)
+    # 真实网络检查：拿不到网就不判失败（CI 可能无外网），但结构不对必须报
+    try:
+        _live = _uc.check(force=True, st=None)
+        if _live.get("ok"):
+            check("★ 【实跑】真去 GitHub 检查成功，且字段齐全",
+                  all(k in _live for k in ("current", "latest", "has_update", "source", "release_url"))
+                  and _live["source"] in ("releases", "tags"),
+                  str(_live)[:200])
+            check("★ 【实跑】current 与本项目版本号一致",
+                  _live["current"] == ver_mod.VERSION)
+        else:
+            check("★ 【实跑】连不上 GitHub 时如实返回 ok=false + reason（不假装成功）",
+                  bool(_live.get("reason")) and bool(_live.get("detail")), str(_live)[:200])
+    except Exception as _e:
+        check("★ 【实跑】检查更新不抛异常（任何情况都要有返回值）", False, str(_e)[:200])
+
     # ═══ 密码登录不得依赖 sshpass（用户实测 0/9 失败的原因）══════════════════
     # 起因：服务器没装 sshpass，9 个目标全部「需要密码认证但未安装 sshpass」。
     # 修法：优先 sshpass，没有则退回 OpenSSH 自带的 SSH_ASKPASS 通道（≥ 8.4），
