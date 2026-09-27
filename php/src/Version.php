@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.3.4';
+    public const VERSION = '1.3.5';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,18 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.3.5',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【安全修复·凭据泄漏】上传账号时前端把 proxy 参数拼进 URL query：uploadAccounts() 原写成 `const url = `/api/accounts/upload?proxy=${...}&proxy_type=${...}``。代理 URL 形如 socks5h://user:password@host:port —— 拼进 query 后，明文密码会被 **nginx 的 access_log、CDN（EdgeOne）日志、浏览器历史**完整记下。线上日志实测抓到过该条记录（URL 编码但可轻易还原）。已改为放进 FormData（请求体）',
+                    '【同处第二个 bug·静默丢弃】后端读的是 $_POST[\'proxy\']，而 $_POST **只装请求体**，query 参数根本进不去 —— 于是通过「上传 JSON 文件」导入账号时，代理被静默丢弃、账号存成「无代理 / HTTPS」。用户以为代理设上了其实没有，比直接报错更难排查。前端改走 FormData 后两边对上；后端同时加了护栏：URL 里出现 proxy 直接 400 并提示强制刷新，避免老缓存前端继续静默丢失配置',
+                    '影响面：Python 版前端是同一份 console.html，走同一个 upload 契约（FastAPI 侧用 Form(...) 取参，同样读不到 query），因此**两版的这个 bug 一并修好**',
+                    '★ 顺带修掉一处两版前端漂移：本次只改了 static/console.html，php/public/static/console.html 没同步 —— 已同步并确认 md5 一致（tests_e2e.py 早有「两版前端逐字节一致」断言，会拦住这类漂移）',
+                    '新增 3 条断言锁死：前端不得把 proxy/password/secret/token 等拼进 URL query；upload 的 proxy 必须走 FormData；upload 后端必须对 URL 里的 proxy 明确报错',
+                    '★ 提醒：此前已进入 nginx 与 CDN 日志的代理凭据应视为已泄漏，建议轮换代理密码；并清理 /www/wwwlogs 下的历史记录',
+                ],
+            ],
             [
                 'version' => '1.3.4',
                 'date'    => '2026-09-27',

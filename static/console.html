@@ -2765,8 +2765,14 @@ const __APP_REF__ = createApp({
       if(!this._files || !this._files.length) return this.toast('请先选择 JSON 文件','a');
       const fd = new FormData();
       this._files.forEach(f=>fd.append('file', f));
-      const url = `/api/accounts/upload?proxy=${encodeURIComponent(this.accForm.proxy||'')}&proxy_type=${encodeURIComponent(this.accForm.proxy_type||'HTTPS')}`;
-      const r = await fetch(url, {method:'POST', body:fd});
+      // ★ 代理参数必须放在 **请求体**（FormData）里，绝不能拼进 URL：
+      //   1) 代理 URL 形如 socks5h://user:password@host:port，拼进 query 会被
+      //      nginx access_log、CDN（EdgeOne）日志、浏览器历史完整记下 —— 明文凭据泄漏；
+      //   2) 后端读的是 $_POST['proxy']，而 $_POST 只装请求体，query 参数根本进不去，
+      //      于是代理被**静默丢弃**、账号存成「无代理 / HTTPS」，用户以为设上了其实没有。
+      fd.append('proxy', this.accForm.proxy || '');
+      fd.append('proxy_type', this.accForm.proxy_type || 'HTTPS');
+      const r = await fetch('/api/accounts/upload', {method:'POST', body:fd});
       const j = await r.json();
       if(j.ok){ this.toast('导入成功：'+j.email,'g'); this.loadAccounts(); }
       else this.fail(j);

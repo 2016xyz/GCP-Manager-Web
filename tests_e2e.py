@@ -2839,6 +2839,28 @@ else:
           and "string $url = self::PROXY_TEST_URL" in _tp,
           "PROXY_TEST_URL 被改成可外部传入")
 
+    # ── 代理凭据绝不能被拼进 URL ★（真实事故：明文进 nginx / CDN 访问日志）──────
+    # 事故：uploadAccounts() 原先写成
+    #     const url = `/api/accounts/upload?proxy=${...}&proxy_type=${...}`;
+    #   代理 URL 形如 socks5h://user:password@host:port —— 拼进 query 后
+    #   nginx access_log、CDN（EdgeOne）日志、浏览器历史都会完整记下明文密码。
+    #   线上日志实测抓到过：
+    #     POST /api/accounts/upload?proxy=socks5%3A%2F%2Fuser%3A***%40host%3A50101&proxy_type=SOCKS5H
+    #   同一处还藏着第二个 bug：后端读 $_POST['proxy']，而 $_POST 只装请求体，
+    #   query 参数根本进不去 → 代理被**静默丢弃**，账号存成「无代理 / HTTPS」，
+    #   用户以为代理设上了其实没有（比报错更难排查）。
+    #   修法：proxy/proxy_type 放进 FormData；后端加护栏，query 里出现 proxy 直接 400。
+    _leak = re.findall(r"[?&](proxy|proxy_type|password|passwd|secret|token|apikey)=\$\{", _html)
+    check("★ 前端不得把代理/凭据类参数拼进 URL query（会进 nginx 与 CDN 访问日志）",
+          not _leak, f"发现：{sorted({x[0] for x in _leak})}")
+    check("★ upload 的 proxy 必须走 FormData（请求体），不得回到 URL",
+          "fd.append('proxy', this.accForm.proxy" in _html
+          and "/api/accounts/upload?proxy=" not in _html,
+          "uploadAccounts 又把代理拼回 URL 了")
+    check("★ upload 后端对 URL 里的 proxy 必须明确报错（而不是静默丢弃）",
+          "isset($_GET['proxy'])" in _apigcp_code,
+          "_GET 护栏缺失：老前端提交时代理会被静默丢弃")
+
 
 print("\n" + "=" * 76)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

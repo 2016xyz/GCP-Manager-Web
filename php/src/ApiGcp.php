@@ -540,6 +540,16 @@ final class ApiGcp
      */
     public static function uploadAccount(array $p): void
     {
+        // ★ 护栏：代理参数只允许走**请求体**。老版前端把它拼在 query 里，
+        //   代理 URL 形如 socks5h://user:password@host:port，会被 nginx access_log、
+        //   CDN 日志、浏览器历史完整记下（明文凭据泄漏）。
+        //   这里**明确报错**而不是静默丢弃 —— 静默丢弃（原实现读 $_POST、
+        //   而 query 参数不进 $_POST）会让账号存成「无代理/HTTPS」，
+        //   用户以为代理设上了其实没有，是最难排查的一类故障。
+        if (isset($_GET['proxy']) || isset($_GET['proxy_type'])) {
+            Json::err('proxy/proxy_type 请放在请求体中提交（不要拼进 URL）：'
+                . '拼进 URL 会把代理凭据写进访问日志。前端已修复，请强制刷新页面（Ctrl+F5）', 400);
+        }
         $f = $_FILES['file'] ?? ($_FILES['json'] ?? null);
         if (!is_array($f) || !isset($f['tmp_name'])) {
             Json::err('没有收到文件（字段名应为 file）', 400);
