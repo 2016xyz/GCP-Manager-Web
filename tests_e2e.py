@@ -1498,19 +1498,40 @@ check("★ ekko 装 nodejs 走 _pkg_install（不再写死 apt-get）",
       and "apt-get install -y nodejs" not in _ekko)
 check("★ ekko 会打印识别到的发行版族系（失败时能一眼看出选错没选错）",
       "发行版族系：$_fam" in _ekko)
-# 通用规则：任何预设都不得**无条件**调用 apt-get（必须先问 _os_family）。
-# ★ 先剥注释行 —— 注释里会引用 apt-get 做对比说明，直接查会误命中自己。
-_all_code = "\n".join(ln for ln in _all_scripts.splitlines()
-                      if not _re2.match(r"\s*#", ln))
-_apt_lines = [ln.strip() for ln in _all_code.splitlines()
-              if _re2.search(r"(^|\s)apt-get\s", ln)]
-# 只剩三种合法情形：_os_family 里探测「有没有 apt-get」、_pkg_install 里真正调用它、
-# 以及 echo 给用户看的文案里提到它（那是给人读的，不是调用）。
-_apt_bad = [ln for ln in _apt_lines
-            if "command -v apt-get" not in ln and ln != 'apt-get install -y "$@"'
-            and "echo " not in ln]
-check("★ 除 _os_family 探测、_pkg_install 内部与提示文案外，没有别处无条件调用 apt-get",
-      not _apt_bad, str(_apt_bad[:3]))
+# 通用规则：**预设正文**里不得直接调用 apt-get（必须先问 _os_family）。
+#
+# ★ 判据要划清边界：apt-get 在公共助手（_os_family 探测、_pkg_install /
+#   _install_build_tools 内部）里出现是**正确用法** —— 职责就是封装发行版差异。
+#   真正要挡的是「预设正文里又写死一遍 apt-get」，那才是本次 bug 的形态。
+#   所以这里只检查 _FAILED_ITEMS 之后的正文段。
+_body = _all_scripts.split('_FAILED_ITEMS=""', 1)[-1]
+_body_code = "\n".join(ln for ln in _body.splitlines() if not _re2.match(r"\s*#", ln))
+_apt_bare = [ln.strip() for ln in _body_code.splitlines()
+             if _re2.search(r"(^|\s)apt-get\s", ln) and "echo " not in ln]
+check("★ 预设正文里没有直接写死 apt-get（发行版差异都收敛到公共助手里）",
+      not _apt_bare, str(_apt_bare[:3]))
+
+# ═══ 原生模块需要编译工具链（ekko 的第二层失败）══════════════════════════
+# 第一层修好（能装 Node 了）之后才暴露出来：ekko-studio 依赖 node-pty（原生模块），
+# npm 会走 node-gyp 现场编译，需要 make / g++ / python3 —— 精简镜像里没有，
+# 报错是 `gyp ERR! stack Error: not found: make`，
+# 而旧脚本把 npm 输出丢进 /dev/null，用户只看到「npm 返回非 0」。
+check("★ 生成脚本里有 _install_build_tools()（node-gyp 需要 make/g++/python3）",
+      "_install_build_tools() {" in _all_scripts)
+_tools_line = [ln for ln in _all_scripts.splitlines() if "_install_build_tools() {" in ln]
+check("★ 编译工具链按发行版给不同包名（deb 用 build-essential，rpm 用 gcc-c++）",
+      "apt-get install -y build-essential python3" in _all_scripts
+      and "dnf install -y gcc-c++ make python3" in _all_scripts
+      and "yum install -y gcc-c++ make python3" in _all_scripts)
+check("★ ekko 在 npm 装之前先装编译工具链",
+      _ekko.find("_install_build_tools") != -1
+      and _ekko.find("_install_build_tools") < _ekko.find("npm install -g ekko-studio"))
+check("★ ekko 的 npm 失败时**打出尾部输出**（不再把线索吞进 /dev/null）",
+      'if npm install -g ekko-studio >"$_npm_log" 2>&1; then' in _ekko
+      and "tail -15 \"$_npm_log\"" in _ekko
+      and "npm install -g ekko-studio >/dev/null" not in _ekko)
+check("★ ekko 的临时日志文件在成功与失败两条路上都会删掉",
+      _ekko.count('rm -f "$_npm_log"') >= 2)
 
 
 # ══════════ 费用与免费额度 ══════════

@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.5.2';
+    public const VERSION = '1.5.3';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,17 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.5.3',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【修复】ekko 预装的第二层失败：修好 Node 源之后才暴露出来 —— ekko-studio 依赖 node-pty（原生模块），npm 装它时会走 node-gyp「现场编译」，需要 make / g++ / python3，而精简镜像里这三个都没有。真实报错藏在几百行 npm 输出里：`gyp ERR! stack Error: not found: make`',
+                    '  修法：新增 _install_build_tools() 助手（deb 用 build-essential python3，rpm 用 gcc-c++ make python3），ekko 在 npm 之前先装工具链。实测目标实例：工具链装好后 npm 安装成功，/usr/bin/ekko-studio-web 在位，npm ls -g 里能看到 ekko-studio@0.7.24',
+                    '【修复·根因】顺手修掉一个「哑失败」：ekko 原来把 npm 的输出整段丢进 /dev/null，失败时只回一句「npm 返回非 0」—— 排查线索全被吞掉，用户根本无从下手。现在失败时打出 npm 输出的最后 15 行。这次能定位到「缺 make」正是靠这个改动：不改的话，下一层失败还是只看到一个没有信息量的「返回非 0」',
+                    '【测试】断言 819 → 824。除了源码特征，还加了顺序断言（_install_build_tools 必须出现在 npm 之前）和「不得再出现 npm ... >/dev/null」',
+                    '【这条链的教训】这个预设有三层问题，一层挡着一层：① 写死 apt-get（CentOS 上第一步就挂）→ ② 缺编译工具链（Node 装好了但 npm 编译失败）→ ③ 把错误输出吞掉（前两层都难定位）。第③点是放大器：它让前两层都变成「看不出为什么的失败」。所以修完第一层之后，务必**再跑一遍**——否则只会在下一个平台上再收到一份同样模糊的报错',
+                ],
+            ],
             [
                 'version' => '1.5.2',
                 'date'    => '2026-09-27',

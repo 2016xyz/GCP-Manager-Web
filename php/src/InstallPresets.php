@@ -190,10 +190,26 @@ if ! command -v node >/dev/null 2>&1; then
   _pkg_install nodejs >/dev/null 2>&1 \
     || { echo "nodejs 安装失败（$_fam 系包管理器返回非 0）"; exit 1; }
 fi
+# ★ ekko-studio 依赖 node-pty（原生模块），npm 装它时会走 node-gyp「现场编译」，
+#   需要 make / g++ / python3。精简镜像里这三个都没有，实测报的是
+#     gyp ERR! stack Error: not found: make
+#   而旧脚本把 npm 输出丢进 /dev/null，用户只看到一句「npm 返回非 0」，
+#   完全猜不到真正原因是缺编译器。
+_install_build_tools >/dev/null 2>&1 \
+  || { echo "编译工具链安装失败，无法编译 node-pty（ekko-studio 的依赖）"; exit 1; }
 # npm 全局包装完是可执行的 ekko-studio-web（常驻服务）
 # ★ 原来是 `exit 0` —— 安装失败却回报成功，是这一项最坑的地方，改成 exit 1。
-npm install -g ekko-studio >/dev/null 2>&1 \
-  || { echo "ekko-studio 安装失败（npm 返回非 0），可手动重试： npm install -g ekko-studio"; exit 1; }
+# ★ 失败时把 npm 的尾部输出打出来：只说「返回非 0」等于把排查线索吞掉。
+_npm_log="$(mktemp)"
+if npm install -g ekko-studio >"$_npm_log" 2>&1; then
+  rm -f "$_npm_log"
+else
+  echo "ekko-studio 安装失败（npm 返回非 0）。最后 15 行输出："
+  tail -15 "$_npm_log" | sed 's/^/    /'
+  echo "  可手动重试： npm install -g ekko-studio"
+  rm -f "$_npm_log"
+  exit 1
+fi
 echo "ekko-studio 已安装，启动命令： ekko-studio-web start"
 
 SH,
@@ -339,6 +355,20 @@ SH,
             '    dnf install -y "$@"',
             '  else',
             '    yum install -y "$@"',
+            '  fi',
+            '}',
+            '',
+            '# 装编译原生模块所需的工具链 —— node-gyp 要 make / g++ / python3。',
+            '# 精简镜像里这三个通常都没有，而 npm 的报错是 `gyp ERR! not found: make`，',
+            '# 藏在几百行 npm 输出里，不看输出根本猜不到。',
+            '_install_build_tools() {',
+            '  _f="$(_os_family)" || return 1',
+            '  if [ "$_f" = deb ]; then',
+            '    apt-get install -y build-essential python3',
+            '  elif command -v dnf >/dev/null 2>&1; then',
+            '    dnf install -y gcc-c++ make python3',
+            '  else',
+            '    yum install -y gcc-c++ make python3',
             '  fi',
             '}',
             '_FAILED_ITEMS=""',
