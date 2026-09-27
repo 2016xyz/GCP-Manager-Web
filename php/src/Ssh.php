@@ -67,12 +67,99 @@ final class Ssh
         if ($ssh === '') {
             return $cached = ['ok' => false, 'tool' => 'ssh', 'reason' => '系统未安装 ssh 客户端'];
         }
-        $sshpass = self::which('sshpass');
-        if ($sshpass === '') {
-            return $cached = ['ok' => false, 'tool' => 'sshpass',
-                              'reason' => '未安装 sshpass（密码登录需要它；请 apt install sshpass 或 yum install sshpass）'];
+        // 密码认证有两条路：sshpass，或 OpenSSH 自带的 SSH_ASKPASS 通道。
+        // 有任一条即可，不再强制要求装 sshpass（见 self::wrapPasswordAuth 的说明）。
+        if (self::which('sshpass') !== '') {
+            return $cached = ['ok' => true, 'tool' => 'ssh',
+                              'reason' => '', 'password_auth' => 'sshpass'];
         }
-        return $cached = ['ok' => true, 'tool' => 'ssh', 'reason' => ''];
+        if (self::askpassSupported()) {
+            return $cached = ['ok' => true, 'tool' => 'ssh',
+                              'reason' => '', 'password_auth' => 'askpass'];
+        }
+        return $cached = ['ok' => false, 'tool' => 'password_auth',
+                          'reason' => '密码登录需要 sshpass，或 OpenSSH ≥ 8.4'
+                                      . '（本机 ssh 版本不支持 SSH_ASKPASS_REQUIRE）。'
+                                      . '装一个即可：yum install sshpass / apt install sshpass'];
+    }
+
+    /**
+     * 本机 ssh 是否支持 SSH_ASKPASS_REQUIRE（OpenSSH ≥ 8.4）。
+     *
+     * 支持的话，**密码认证可以完全不装 sshpass** —— 让 ssh 自己去调一个
+     * 只负责 echo 密码的小脚本。这样部署面更小，也不会因为目标机器缺包而整个功能不可用。
+     */
+    private static function askpassSupported(): bool
+    {
+        static $cached = null;
+        if ($cached !== null) {
+            return $cached;
+        }
+        $ssh = self::which('ssh');
+        if ($ssh === '') {
+            return $cached = false;
+        }
+        // ssh -V 把版本写到 stderr，用既有的 procRun（数组形式，不经 shell）
+        $r = self::procRun([$ssh, '-V'], [], null, 10);
+        $s = trim(($r['out'] ?? '') . ' ' . ($r['err'] ?? ''));
+        if (!preg_match('/OpenSSH_(\d+)\.(\d+)/', $s, $m)) {
+            return $cached = false;   // 版本都认不出来就别冒险
+        }
+        $maj = (int) $m[1];
+        $min = (int) $m[2];
+        return $cached = ($maj > 8 || ($maj === 8 && $min >= 4));
+    }
+
+    /**
+     * 把「用密码登录」翻译成一组可执行的 argv + 环境变量。
+     *
+     * 两条实现，优先 sshpass（成熟、行为可预期），没有则退回 OpenSSH 原生通道：
+     *
+     *   ① sshpass -e：密码从 SSHPASS 环境变量读，不进 argv（ps 里看不到）
+     *   ② SSH_ASKPASS + SSH_ASKPASS_REQUIRE=force：ssh 自己 exec 一个脚本取密码。
+     *      `force` 的含义是「**即使有终端也走 askpass**」，所以不需要 setsid 去
+     *      摘掉控制终端 —— 不用 setsid 还有额外好处：进程树只有 ssh 一层，
+     *      超时终止时 proc_terminate 打的就是 ssh 本身，不会留下孤儿进程。
+     *      密码同样走环境变量（GCP_ASKPASS_PW），不进 argv，也不落到磁盘上。
+     *
+     * 两条路的安全姿态一样（都靠环境变量 + 本进程可见性），所以优先选依赖更少的那条
+     * 是纯赚。实测两条在真实实例上都能登录成功。
+     *
+     * @param ?string $tmpFile 出参：需要清理的临时脚本路径（无则 null）
+     * @return array{argv:array,env:array}|null null 表示两条路都不可用
+     */
+    private static function wrapPasswordAuth(array $sshArgv, string $password, ?string &$tmpFile): ?array
+    {
+        $tmpFile = null;
+        if (self::which('sshpass') !== '') {
+            array_unshift($sshArgv, 'sshpass', '-e');
+            return ['argv' => $sshArgv, 'env' => ['SSHPASS' => $password]];
+        }
+        if (!self::askpassSupported()) {
+            return null;
+        }
+        $f = @tempnam(sys_get_temp_dir(), 'gcp-askpass-');
+        if ($f === false) {
+            return null;
+        }
+        // 只 echo 环境变量，脚本本身不含密码
+        $body = "#!/bin/sh\nprintf '%s\\n' \"\$GCP_ASKPASS_PW\"\n";
+        if (@file_put_contents($f, $body) === false) {
+            @unlink($f);
+            return null;
+        }
+        @chmod($f, 0700);
+        $tmpFile = $f;
+        return [
+            'argv' => $sshArgv,
+            'env'  => [
+                'SSH_ASKPASS' => $f,
+                // force = 即使有终端也用 askpass（无需 setsid 摘终端）
+                'SSH_ASKPASS_REQUIRE' => 'force',
+                'DISPLAY' => ((string) getenv('DISPLAY')) !== '' ? (string) getenv('DISPLAY') : ':0',
+                'GCP_ASKPASS_PW' => $password,
+            ],
+        ];
     }
 
     /** 在 PATH 里找可执行文件（不经过 shell） */
@@ -450,22 +537,31 @@ BASH;
     }
 
     /**
-     * 执行一条 ssh 命（argv 已含 ssh 及其参数）。密码走 sshpass -e（环境变量）。
+     * 执行一条 ssh 命（argv 已含 ssh 及其参数）。密码走 sshpass -e 或 SSH_ASKPASS。
      */
     private static function execSsh(array $sshArgv, string $password, ?string $stdinFile,
                                     int $totalTimeout, $logCb, $stopCb, array $opts): array
     {
         $env = [];
         $argv = $sshArgv;
+        $tmpAskpass = null;
         if ($password !== '') {
-            // sshpass 从 SSHPASS 环境变量读密码，密码不进 argv
-            if (!self::hasBinary('sshpass')) {
-                return ['ok' => false, 'output' => '需要密码认证但未安装 sshpass（apt/yum install sshpass）'];
+            $wrap = self::wrapPasswordAuth($sshArgv, $password, $tmpAskpass);
+            if ($wrap === null) {
+                $a = self::available();
+                return ['ok' => false, 'output' => $a['reason']];
             }
-            array_unshift($argv, 'sshpass', '-e');
-            $env['SSHPASS'] = $password;
+            $argv = $wrap['argv'];
+            $env = $wrap['env'];
         }
-        $r = self::procRun($argv, $env, $stdinFile, $totalTimeout, $opts['idle_timeout'] ?? null, $logCb, $stopCb);
+        try {
+            $r = self::procRun($argv, $env, $stdinFile, $totalTimeout, $opts['idle_timeout'] ?? null, $logCb, $stopCb);
+        } finally {
+            // 无论成败都要清掉临时 askpass 脚本（里面没有密码，但也不该留在 /tmp）
+            if ($tmpAskpass !== null && is_string($tmpAskpass)) {
+                @unlink($tmpAskpass);
+            }
+        }
         $out = $r['out'];
         if ($r['err'] !== '') {
             $out .= ($out !== '' ? "\n" : '') . $r['err'];

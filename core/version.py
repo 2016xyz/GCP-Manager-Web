@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.4.6"
+VERSION = "1.4.7"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,26 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.4.7",
+        "date": "2026-09-27",
+        "notes": [
+            "【修复】预装/命令执行全部失败：「需要密码认证但未安装 sshpass」。"
+            "起因是 PHP 版的密码登录**硬前置**了 sshpass 这个系统包 —— 服务器上没装，"
+            "于是 9 个目标一个都跑不成，整个功能不可用",
+            "  改为两条路：有 sshpass 就用 sshpass（成熟、行为可预期）；"
+            "没有则退回 OpenSSH 自带的 SSH_ASKPASS 通道（≥ 8.4），**零系统依赖**。"
+            "两条路都在真实实例上实测登录成功过，不是照文档推断的",
+            "  细节：用 SSH_ASKPASS_REQUIRE=force —— 它的含义是「即使有终端也走 askpass」，"
+            "所以不需要 setsid 去摘控制终端；不用 setsid 还顺带解决一个隐患：进程树只剩 ssh 一层，"
+            "超时终止时打的就是 ssh 本身，不会留下孤儿进程。密码仍只走环境变量，"
+            "既不进 argv（ps 看不到），也不写进临时脚本本体，脚本用完在 finally 里删掉",
+            "  同时把「不可用」时的提示改准确：原来只说「装 sshpass」，"
+            "现在会说明有两条路、以及本机 ssh 版本是否够新",
+            "【测试】断言 773 → 784。关键几条是**实跑**：造一个只有 ssh、没有 sshpass 的 PATH，"
+            "断言 available() 仍然 ok 且自动走 askpass；再断言连 ssh 都没有时如实报错、不假装可用",
+        ],
+    },
     {
         "version": "1.4.6",
         "date": "2026-09-27",

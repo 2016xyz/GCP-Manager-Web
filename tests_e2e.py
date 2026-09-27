@@ -15,6 +15,7 @@
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -3237,6 +3238,60 @@ else:
             pass
         check("★ PHP plan_preview 返回数组（假账号走异常分支也必须是数组）",
               _pj.get("is_array") is True and _pj.get("n") == 1, str(_planshape.stdout)[:200])
+
+    # ═══ 密码登录不得依赖 sshpass（用户实测 0/9 失败的原因）══════════════════
+    # 起因：服务器没装 sshpass，9 个目标全部「需要密码认证但未安装 sshpass」。
+    # 修法：优先 sshpass，没有则退回 OpenSSH 自带的 SSH_ASKPASS 通道（≥ 8.4），
+    #       零系统依赖。
+    _sshphp = open(f"{BASE_DIR}/php/src/Ssh.php", encoding="utf-8").read()
+    check("★ 不再有「未安装 sshpass」直接判死的老分支",
+          "未安装 sshpass" not in _sshphp)
+    check("★ Ssh::available() 不再把 sshpass 当硬前置",
+          "if (self::which('sshpass') !== '')" in _sshphp
+          and "'password_auth' => 'askpass'" in _sshphp)
+    check("★ 有 askpassSupported() 且按 OpenSSH ≥ 8.4 判定",
+          "function askpassSupported" in _sshphp and "$min >= 4" in _sshphp)
+    check("★ 有 wrapPasswordAuth() 且 sshpass 优先、askpass 兜底",
+          "function wrapPasswordAuth" in _sshphp
+          and _sshphp.find("which('sshpass')") < _sshphp.find("askpassSupported()"))
+    # ★ 先剥注释行再查（注释里会提到 setsid 以示对比，直接 in 会误命中自己）
+    _sshcode = "\n".join(l for l in _sshphp.splitlines()
+                         if not re.match(r"\s*(//|\*|/\*)", l))
+    check("★ askpass 走 SSH_ASKPASS_REQUIRE=force（有终端也能生效，故无需 setsid）",
+          "SSH_ASKPASS_REQUIRE" in _sshcode and "'force'" in _sshcode
+          and "setsid" not in _sshcode)
+    check("★ 临时 askpass 脚本用完即删（finally 里 unlink）",
+          "finally {" in _sshphp and "@unlink($tmpAskpass)" in _sshphp)
+    check("★ 密码只走环境变量，不写进临时脚本本体",
+          '$GCP_ASKPASS_PW' in _sshphp and "printf '%s\\\\n'" in _sshphp)
+    # 用两条 PATH 实跑，验证「没有 sshpass 时仍然可用」—— 这条才是真断言
+    _phpprog = shutil.which("php") or "/usr/bin/php"
+    if os.path.exists(_phpprog) and shutil.which("ssh"):
+        _nosp = "/tmp/_nospass_bin"
+        os.makedirs(_nosp, exist_ok=True)
+        _l = f"{_nosp}/ssh"
+        if os.path.islink(_l) or os.path.exists(_l):
+            os.unlink(_l)
+        os.symlink(shutil.which("ssh"), _l)
+        _r = subprocess.run([_phpprog, "tools/check_askpass.php"],
+                            cwd=BASE_DIR, capture_output=True, text=True,
+                            env={**os.environ, "PATH": _nosp})
+        check("★ 【实跑】没有 sshpass 时 available() 仍为 ok 且走 askpass",
+              '"ok":true' in _r.stdout.replace(" ", "") and "askpass" in _r.stdout,
+              _r.stdout[-200:])
+        _r2 = subprocess.run([_phpprog, "tools/check_askpass.php"],
+                             cwd=BASE_DIR, capture_output=True, text=True)
+        check("★ 【实跑】有 sshpass 时优先用 sshpass（不退化成 askpass）",
+              "sshpass" in _r2.stdout, _r2.stdout[-200:])
+        _r3 = subprocess.run([_phpprog, "tools/check_askpass.php"],
+                             cwd=BASE_DIR, capture_output=True, text=True,
+                             env={**os.environ, "PATH": "/tmp/_no_such_bin_"})
+        check("★ 【实跑】连 ssh 都没有时如实报「未安装 ssh 客户端」（不假装可用）",
+              "系统未安装 ssh 客户端" in _r3.stdout, _r3.stdout[-200:])
+    # Python 侧本来就用 paramiko，不受此限；确认它确实没依赖 sshpass
+    check("★ Python 侧不依赖 sshpass（paramiko）",
+          "sshpass" not in open(f"{BASE_DIR}/core/ssh.py", encoding="utf-8").read()
+          if os.path.exists(f"{BASE_DIR}/core/ssh.py") else True)
 
 
 print("\n" + "=" * 76)
