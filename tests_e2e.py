@@ -1811,16 +1811,26 @@ check("★ 启动时并行加载版本信息", "this.loadVersion()" in _ct3)
 
 # 登录页
 _lh3 = client.get("/login").text
-check("★ 登录页页脚有版本与仓库",
-      'class="wow-login-footer"' in _lh3 and 'id="verText"' in _lh3
-      and 'id="repoLink"' in _lh3)
-check("★ 登录页主动拉取 /api/version", "loadVersion()" in _lh3
-      and "fetch('/api/version')" in _lh3)
-check("★ 登录页链接同样带 rel=noopener noreferrer",
-      'rel="noopener noreferrer"' in _lh3)
+# ★ 2026-09-27 反转：登录页**不再**展示版本号与仓库地址。
+#   理由：那是发给所有「未登录访客」的内容，把源码出处与版本号挂在门外没有收益，
+#   反而给出「这个部署跑的是哪个版本、有没有已知 CVE」的免费情报。
+#   版本/仓库/更新说明移到登录后的「个人设置 → 关于」卡片，那里才有必要。
+check("★ 登录页不再有版本/仓库页脚（未登录访客看不到源码出处与版本号）",
+      "wow-login-footer" not in _lh3 and "verText" not in _lh3
+      and "repoLink" not in _lh3)
+check("★ 登录页不再拉取 /api/version（少一次匿名 API 调用）",
+      "loadVersion" not in _lh3 and "fetch('/api/version')" not in _lh3)
+check("★ 登录页源码注释里不写仓库地址（注释也会随 HTML 发出去）",
+      "github.com" not in _lh3 and "2016xyz" not in _lh3)
 _lcs = client.get("/static/login.css").text
-check("★ 登录页页脚样式已定义且尊重减少动效",
-      ".wow-login-footer" in _lcs and "prefers-reduced-motion" in _lcs)
+check("★ 登录页 CSS 里也清掉了页脚规则（不留死样式）",
+      ".wow-login-footer" not in _lcs and ".wow-login-repo" not in _lcs)
+check("★ 登录页 CSS 其余规则完好（删页脚没误伤）",
+      ".wow-login-card" in _lcs and ".captcha-img" in _lcs
+      and "prefers-reduced-motion" in _lcs)
+# 登录后的「关于」卡片保留版本信息 —— 那里才该有
+check("★ 版本信息在登录后的「个人设置 → 关于」里仍然可查",
+      "关于 <small>" in _ct3 and "ver.version" in _ct3)
 
 # ── 按钮排序：分组与分隔线 ──────────────────────────────────────────
 check("★ 定义了按钮分隔线样式", ".br{width:1px;height:22px" in _ct3)
