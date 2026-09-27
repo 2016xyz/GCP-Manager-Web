@@ -3170,6 +3170,47 @@ else:
     check("★ 前端费用列有 null 保护（used_usd 可能为 null）",
           "i.cost.used_usd===null" in _html or "used_usd===null" in _html)
 
+    # ═══ 配额报错要说人话（用户实测撞到过）═══════════════════════════════
+    # 原文：Quota 'CPUS_ALL_REGIONS' exceeded. Limit: 12.0 globally.
+    # 这句话没说错，但用户看不出是自己的配额满了、还是工具坏了，也不知道能干什么。
+    _gcpmod = __import__("core.gcp", fromlist=["explain_quota_error"])
+    check("★ Python 有 explain_quota_error 配额错误翻译器",
+          hasattr(_gcpmod, "explain_quota_error"))
+    check("★ PHP 有 Gcp::explain_quota_error",
+          "public static function explain_quota_error(" in _gcpphp)
+    check("★ PHP 把配额说明接进了错误抛出路径（不是写了不用）",
+          "self::explain_quota_error($msg)" in _gcpphp)
+    _taskmod = open(f"{BASE_DIR}/core/tasks.py", encoding="utf-8").read()
+    check("★ Python 把配额说明接进了创建失败路径",
+          "gcp_mod.explain_quota_error(" in _taskmod)
+
+    _qmsg = "Quota 'CPUS_ALL_REGIONS' exceeded. Limit: 12.0 globally."
+    _pyq = _gcpmod.explain_quota_error(_qmsg)
+    check("★ Python 配额译文含「不是本工具的问题」+ 配额名 + 上限",
+          _pyq and "不是本工具的问题" in _pyq and "CPUS_ALL_REGIONS" in _pyq
+          and "12.0" in _pyq and "全局" in _pyq)
+    check("★ Python 配额译文给出可行动项（删实例/申请提额/换账号）",
+          _pyq and "删掉几台不用的实例" in _pyq and "申请提高该配额" in _pyq
+          and "换一个配额有余量的账号" in _pyq)
+    check("★ Python 非配额错误不误报（返回 None）",
+          _gcpmod.explain_quota_error("Permission 'compute.instances.create' denied") is None)
+    if os.path.exists("/usr/bin/php") or os.path.exists("/usr/local/bin/php"):
+        _pq = subprocess.run(["php", "-r",
+            f"require '{BASE_DIR}/php/src/Catalog.php'; require '{BASE_DIR}/php/src/Gcp.php';"
+            f" echo json_encode([Gcp::explain_quota_error({json.dumps(_qmsg)}),"
+            " Gcp::explain_quota_error('Permission denied'),"
+            " Gcp::explain_quota_error(\"Quota 'CPUS' exceeded. Limit: 32.0 in region asia-northeast1.\")]);"],
+            capture_output=True, text=True)
+        try:
+            _pj = json.loads(_pq.stdout.strip().splitlines()[-1])
+        except Exception:
+            _pj = [None, None, None]
+        check("★ PHP 配额译文与 Python **逐字节一致**（两版对同一错误说同样的话）",
+              _pj[0] == _pyq, "两版译文不一致")
+        check("★ PHP 非配额错误返回 null（不误报）", _pj[1] is None)
+        check("★ 区域配额说「区域 asia-northeast1」而不是「全局」",
+              _pj[2] and "区域 asia-northeast1" in _pj[2] and "全局" not in _pj[2])
+
     # 两版 plan_preview 的**形状**必须一致（键集合相同，且都返回数组）
     _pyplan = _ipmod  # noqa: F841  （仅确保模块已加载）
     _plankeys_py = {"account", "project_id", "existing_instances", "region_usage",

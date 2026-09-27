@@ -20,6 +20,56 @@ DEFAULT_NETWORK = "global/networks/default"
 DEFAULT_SUBNET = "regions/{region}/subnetworks/default"
 
 
+def explain_quota_error(msg):
+    """把 GCP 的配额报错翻译成**可行动**的说明。不是配额错就返回 None。
+
+    实测原文（用户真的撞到过）：
+      Quota 'CPUS_ALL_REGIONS' exceeded. Limit: 12.0 globally.
+      Quota 'CPUS' exceeded. Limit: 32.0 in region asia-northeast1.
+
+    这句话本身没说错，但对用户没有半点可操作性：看不出是自己的配额满了、
+    还是 GCP 故障、还是本工具有 bug，也看不出下一步该干什么。
+    于是补一句「是什么 + 为什么重试没用 + 可以怎么办」。
+
+    ★ 为什么不做「创建前预检配额」：查过了，Compute 的 regions 接口返回 113 条
+      配额指标，**里面没有 CPUS_ALL_REGIONS**（它只在 Cloud Quotas API 里，
+      那要额外启用服务）。拿一个查不到的配额去做预检，只会给出虚假的
+      「配额充足」—— 比不预检更糟。所以选择把错误说清楚，而不是假装能预判。
+    """
+    m = re.search(
+        r"Quota '([A-Za-z0-9_]+)' exceeded\.\s*Limit:\s*([0-9.]+)\s*"
+        r"(globally|in region\s+([a-z0-9-]+))?",
+        msg or "", re.I)
+    if m:
+        quota, limit = m.group(1), m.group(2)
+        where = (m.group(3) or "").lower()
+        region = m.group(4) or ""
+        scope = "区域 %s" % region if region else ("全局" if where == "globally" else "")
+    elif "quota" not in (msg or "").lower():
+        return None
+    else:
+        quota, limit, scope = "", "", ""
+
+    out = ["── 这是 GCP 的配额上限，不是本工具的问题 ──",
+           "配额项：%s%s%s" % (quota or "（未标明）",
+                              "（%s）" % scope if scope else "",
+                              "，上限 %s" % limit if limit else ""),
+           "这个上限由 GCP 账号自身决定，**重试、换区都不会成功** —— 配额已满时",
+           "再建只会立刻失败，还白等一轮超时。",
+           "",
+           "可以怎么办（任选其一）："]
+    if "cpu" in quota.lower():
+        out += ["  1. 删掉几台不用的实例释放 CPU —— 最快的办法；",
+                "  2. 用更小 CPU 的机型（例如 e2-micro 只占 0.25 vCPU），同样的钱能开更多台；",
+                "  3. 到 GCP 控制台「IAM 与管理 → 配额」申请提高该配额（免费，通常几小时到一天）；",
+                "  4. 换一个配额有余量的账号（本工具支持多账号，创建时勾选即可）。"]
+    else:
+        out += ["  1. 到 GCP 控制台「IAM 与管理 → 配额」查看该配额与当前用量；",
+                "  2. 释放已占用该配额的资源，或申请提高上限；",
+                "  3. 换一个配额有余量的账号。"]
+    return "\n".join(out)
+
+
 def _network_short_name(network):
     """
     从各种 VPC 写法里取出短名。

@@ -1538,8 +1538,67 @@ final class Gcp
         if (is_array($errors) && $errors) {
             $first = $errors[0];
             $msg = is_array($first) ? (string) ($first['message'] ?? json_encode($first)) : (string) $first;
-            throw new RuntimeException('操作失败：' . $msg);
+            $hint = self::explain_quota_error($msg);
+            throw new RuntimeException('操作失败：' . $msg . ($hint !== null ? "\n\n" . $hint : ''));
         }
+    }
+
+    /**
+     * 把 GCP 的配额报错翻译成**可行动**的说明。
+     *
+     * 实测原文（用户真的撞到过）：
+     *   Quota 'CPUS_ALL_REGIONS' exceeded. Limit: 12.0 globally.
+     *   Quota 'CPUS' exceeded. Limit: 32.0 in region asia-northeast1.
+     *
+     * 这句话本身没说错，但对用户没有半点可操作性：看不出是自己的配额满了、
+     * 还是 GCP 故障、还是本工具有 bug，也看不出下一步该干什么。
+     * 于是这里补一句「是什么 + 为什么重试没用 + 可以怎么办」。
+     *
+     * ★ 为什么不做「创建前预检配额」：查过了，Compute 的 regions 接口返回 113 条
+     *   配额指标，**里面没有 CPUS_ALL_REGIONS**（它只在 Cloud Quotas API 里，
+     *   那要额外启用服务）。拿一个查不到的配额去做预检，只会给出虚假的
+     *   「配额充足」—— 比不预检更糟。所以这里选择把错误说清楚，而不是假装能预判。
+     *
+     * @return string|null 命中配额错误时返回说明，否则 null
+     */
+    public static function explain_quota_error(string $msg): ?string
+    {
+        $scope = '';
+        $quota = '';
+        $limit = '';
+        if (preg_match(
+            "/Quota '([A-Za-z0-9_]+)' exceeded\.\s*Limit:\s*([0-9.]+)\s*(globally|in region\s+([a-z0-9-]+))?/i",
+            $msg, $m
+        )) {
+            $quota = (string) $m[1];
+            $limit = (string) $m[2];
+            $where = strtolower((string) ($m[3] ?? ''));
+            $region = (string) ($m[4] ?? '');
+            $scope = $region !== '' ? "区域 {$region}" : ($where === 'globally' ? '全局' : '');
+        } elseif (stripos($msg, 'quotaExceeded') === false && stripos($msg, 'QUOTA_EXCEEDED') === false) {
+            return null;   // 不是配额问题，别乱加话
+        }
+
+        $isCpu = stripos($quota, 'CPU') !== false;
+        $lines = [];
+        $lines[] = '── 这是 GCP 的配额上限，不是本工具的问题 ──';
+        $lines[] = sprintf('配额项：%s%s%s', $quota !== '' ? $quota : '（未标明）',
+            $scope !== '' ? "（{$scope}）" : '', $limit !== '' ? "，上限 {$limit}" : '');
+        $lines[] = '这个上限由 GCP 账号自身决定，**重试、换区都不会成功** —— 配额已满时';
+        $lines[] = '再建只会立刻失败，还白等一轮超时。';
+        $lines[] = '';
+        $lines[] = '可以怎么办（任选其一）：';
+        if ($isCpu) {
+            $lines[] = '  1. 删掉几台不用的实例释放 CPU —— 最快的办法；';
+            $lines[] = '  2. 用更小 CPU 的机型（例如 e2-micro 只占 0.25 vCPU），同样的钱能开更多台；';
+            $lines[] = '  3. 到 GCP 控制台「IAM 与管理 → 配额」申请提高该配额（免费，通常几小时到一天）；';
+            $lines[] = '  4. 换一个配额有余量的账号（本工具支持多账号，创建时勾选即可）。';
+        } else {
+            $lines[] = '  1. 到 GCP 控制台「IAM 与管理 → 配额」查看该配额与当前用量；';
+            $lines[] = '  2. 释放已占用该配额的资源，或申请提高上限；';
+            $lines[] = '  3. 换一个配额有余量的账号。';
+        }
+        return implode("\n", $lines);
     }
 
     // ==================================================================

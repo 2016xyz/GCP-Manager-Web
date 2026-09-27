@@ -20,6 +20,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import catalog
+from . import gcp as gcp_mod
 from . import ssh as ssh_mod
 from .gcp import GCPService, build_instance_spec
 
@@ -382,7 +383,10 @@ class TaskManager:
                             results.append(fut.result())
                         except Exception as exc:
                             acc = futs[fut]
-                            results.append({"account": acc["email"], "ok": False, "error": str(exc)})
+                            _e = str(exc)
+                            _q = gcp_mod.explain_quota_error(_e)
+                            results.append({"account": acc["email"], "ok": False,
+                                            "error": _e + ("\n\n" + _q if _q else "")})
 
             total_ok = sum(r.get("created", 0) for r in results)
             total_fail = sum(r.get("failed", 0) for r in results)
@@ -519,7 +523,11 @@ class TaskManager:
                     release(r2)
                     time.sleep(3)
             if not res:
-                return {"ok": False, "name": name, "error": last_err or "创建失败"}
+                # 配额类错误补一段可行动说明（原文对用户没有可操作性）
+                _e = last_err or "创建失败"
+                _q = gcp_mod.explain_quota_error(_e)
+                return {"ok": False, "name": name,
+                        "error": _e + ("\n\n" + _q if _q else "")}
 
             ip = res.get("ip", "")
             zone = res.get("zone", "")
