@@ -587,6 +587,17 @@ pre.log.big{max-height:520px}
 }
 @media print{.sidebar,.topbar,.toasts{display:none}.main{margin:0}}
 
+/* ══════════ 命令执行页的快捷命令 ══════════ */
+.qc-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.qc{display:inline-flex;flex-direction:column;gap:2px;padding:7px 11px;border:1.5px solid var(--line);
+  border-radius:var(--r-s);background:#fff;cursor:pointer;text-align:left;font:inherit;
+  transition:border-color .15s,background .15s}
+.qc:hover{border-color:var(--brand);background:#f7faff}
+.qc .nm{font-size:12px;font-weight:700;color:var(--ink)}
+.qc .ds{font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+.qc-tip{font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.7}
+.qc-tip code{font-family:var(--mono);background:#f1f5f9;padding:1px 4px;border-radius:4px;font-size:11px}
+
 /* ══════════ 安装预设选择卡 ══════════ */
 .pk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:8px}
 .pk{display:flex;flex-direction:column;gap:3px;padding:9px 11px;border:1.5px solid var(--line);
@@ -1632,6 +1643,22 @@ pre.log.big{max-height:520px}
           <label class="f" style="margin-top:11px">命令
             <textarea v-model="execForm.command" placeholder="例如：uname -a && df -h && docker ps"></textarea>
           </label>
+          <!-- 快捷命令：ekko-studio-web 是常驻服务，控制它要「绑 0.0.0.0 + 后台启动」。
+               做成可点的，免得每次手打 —— 尤其容易漏掉 BIND_HOST，
+               漏了它服务只绑回环，外部就访问不到（CLI 本身没有 --host 参数）。 -->
+          <div class="qc-grid">
+            <button class="qc" v-for="q in quickCmds" :key="q.k" type="button"
+                    :title="q.tip" @click="useQuick(q)">
+              <span class="nm">{{ q.nm }}</span>
+              <span class="ds">{{ q.ds }}</span>
+            </button>
+          </div>
+          <div class="qc-tip">
+            点一下即<b>填入下方命令框</b>，确认后再点「▶ 执行」；只想对部分机器操作就选「仅勾选实例」。<br>
+            <b>ekko-studio-web 监听 8648</b>，用 <code>BIND_HOST=0.0.0.0</code> 保证对外可访问
+            （实测不设时默认也是 0.0.0.0，显式写上更不易出错）。
+            云厂商的<b>安全组 / 防火墙需放行 8648</b>，否则本机通了、外部仍访问不到。
+          </div>
           <div class="grid g3" style="margin-top:9px">
             <label class="f">并发数<input type="number" min="1" max="50" v-model.number="execForm.concurrency"></label>
             <label class="f">空闲超时 (s)<input type="number" min="10" v-model.number="execForm.idle_timeout"></label>
@@ -2095,6 +2122,31 @@ const INSPECT_DEEP  = ['project','services','billing','serviceAccounts',
                        'machineTypes','images','extras'];
 const INSPECT_ALL   = INSPECT_QUICK.concat(INSPECT_DEEP);
 
+/* 命令执行页的「快捷命令」。
+   ★ 常量必须经 computed 暴露给模板 —— 直接写模块级 const，模板里是 undefined，
+     会在渲染期抛错并把整个 #app 清空成白屏（见文件末尾那条兜底注释）。
+
+   这些命令都在**真实实例上逐条跑过**，不是照文档抄的：
+     · ekko-studio-web 默认就绑 0.0.0.0（实测 ss 显示 0.0.0.0:8648，公网 IP 访问 HTTP 200），
+       但显式写 BIND_HOST=0.0.0.0 更稳 —— CLI 本身**没有 --host 参数**，只能靠这个环境变量；
+       漏了它服务只绑回环，外部就访问不到。
+     · ★ 裸 `ekko-studio-web restart` 在服务**没在跑**时会直接报 not running 而**不拉起**，
+       所以「重启」用 stop + start 组合，两种起点都能拉起来（实测均通过）。 */
+const QUICK_CMDS = [
+  { k:'ekko-start', nm:'启动 ekko（对外可访问）', ds:'0.0.0.0:8648',
+    tip:'以 BIND_HOST=0.0.0.0 启动 ekko-studio-web，监听 8648。已在运行时它会提示 already running，不会影响正在跑的服务。',
+    cmd:'BIND_HOST=0.0.0.0 ekko-studio-web start --port 8648 --no-open' },
+  { k:'ekko-restart', nm:'重启 ekko', ds:'运行中 / 已停止都能拉起',
+    tip:'先 stop 再 start。不用 ekko-studio-web restart，因为它在服务没运行时只会报 not running、不会把服务拉起来。',
+    cmd:'ekko-studio-web stop >/dev/null 2>&1; sleep 2; BIND_HOST=0.0.0.0 ekko-studio-web start --port 8648 --no-open' },
+  { k:'ekko-stop', nm:'停止 ekko', ds:'停掉常驻服务',
+    tip:'停止 ekko-studio-web 常驻服务，并释放 8648 端口。',
+    cmd:'ekko-studio-web stop' },
+  { k:'ekko-status', nm:'查看 ekko 状态', ds:'PID 与监听地址',
+    tip:'显示 ekko-studio-web 运行状态，并列出 8648 的监听地址 —— 用来确认它是否已对外可访问。',
+    cmd:'ekko-studio-web status; echo; ss -lntp 2>/dev/null | grep 8648 || echo "(8648 未监听)"' },
+];
+
 /* 各分区表格列定义。
    key    取值字段
    label  表头
@@ -2234,6 +2286,8 @@ const __APP_REF__ = createApp({
        undefined，取下标即抛 "Cannot read properties of undefined"，
        且因为发生在渲染期，会把整个 #app 清空成白屏。 */
     inspectCols(){ return INSPECT_COLS; },
+    /* 快捷命令也必须经 computed 暴露，理由同上（模板作用域看不到模块级 const） */
+    quickCmds(){ return QUICK_CMDS; },
     /* summary 节的统计口径，模板直接用 */
     inspectSummary(){
       const s = this.inspect.summary;
@@ -3137,6 +3191,14 @@ const __APP_REF__ = createApp({
     },
 
     /* ───────── 命令执行 ───────── */
+    /* 命令执行页：点快捷命令 → 只**填入**命令框，不直接执行。
+       故意不做成一键执行：停止/重启是对所有勾选实例生效的操作，误触代价太大，
+       填入后让用户确认一眼再点「▶ 执行」更稳妥。 */
+    useQuick(q){
+      this.execForm.command = q.cmd;
+      this.toast('已填入「' + q.nm + '」，确认后点「▶ 执行」', 'g');
+    },
+
     async runCommand(){
       if(!this.execForm.command.trim()) return this.toast('请输入命令','a');
       const targets = this.execForm.scope==='selected' ? [...this.checkedInst] : null;

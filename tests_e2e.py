@@ -1730,6 +1730,66 @@ check("★ 创建流程的预装参数是空数组（不把命令执行页的勾
       re.search(r"installs:\s*\[\]", _cb) is not None
       and re.search(r"installs:\s*this\.installPicked", _cb) is None,
       "buildPayload 里仍在发 this.installPicked")
+
+# ═══ 命令执行页的「快捷命令」（v1.5.4）═══════════════════════════════════
+# 需求：ekko-studio-web 要 0.0.0.0 启动，并把启动/重启/停止写进命令执行页。
+# 这些命令都**在真实实例上逐条跑过**，断言锁的是实测结论，不是文档抄来的写法。
+_qc = _ct4[_ct4.find("const QUICK_CMDS"):] if "const QUICK_CMDS" in _ct4 else ""
+_qc = _qc[: _qc.find("\n];")] if _qc else ""
+_qt_cmds = re.findall(r"cmd:'((?:[^'\\]|\\.)*)'", _qc)
+
+# ★ 最重要的一条：模块级常量必须经 computed 暴露。
+#   直接写模块级 const，模板里取到 undefined → 渲染期抛错 → **整个 #app 被清空成白屏**。
+#   这个坑在本文件末尾有专门的兜底注释，前面已经栽过一次。
+check("★ 快捷命令常量 QUICK_CMDS 存在", "const QUICK_CMDS" in _ct4)
+check("★ ★ quickCmds 经 computed 暴露（否则模板取到 undefined → #app 白屏）",
+      re.search(r"quickCmds\(\)\s*\{\s*return QUICK_CMDS;?\s*\}", _ct4) is not None,
+      "模块级 const 没经 computed 暴露，模板会白屏")
+check("★ 快捷命令按钮渲染在命令框之后（同一个卡片内）",
+      'v-for="q in quickCmds"' in _ct4
+
+      and _ct4.find("execForm.command") < _ct4.find('v-for="q in quickCmds"'))
+
+check("★ 快捷命令共 4 条（启动 / 重启 / 停止 / 状态）", len(_qt_cmds) == 4,
+      f"实际 {len(_qt_cmds)} 条：{_qt_cmds}")
+
+# ★ 启动/重启必须显式绑 0.0.0.0 —— CLI 没有 --host 参数，只能靠 BIND_HOST。
+#   漏了它（默认虽也是 0.0.0.0，但依赖内部默认值）服务可能只绑回环，外部访问不到。
+_qt_start = [c for c in _qt_cmds if " ekko-studio-web start " in c]
+check("★ 启动命令用 BIND_HOST=0.0.0.0 绑对外地址（ekko 没有 --host 参数）",
+      len(_qt_start) >= 1 and all("BIND_HOST=0.0.0.0" in c for c in _qt_start),
+      str(_qt_start))
+check("★ 启动命令带 --port 8648 与 --no-open（服务器上没有浏览器可开）",
+      all("--port 8648" in c and "--no-open" in c for c in _qt_start))
+
+# ★ 裸 `ekko-studio-web restart` 在服务**没在跑**时只报 not running、不会拉起，
+#   所以「重启」必须是 stop + start 的组合（实测两种起点都能拉起来）。
+_qt_restart = [c for c in _qt_cmds if "stop" in c and "start" in c]
+check("★ 重启命令用 stop + start 组合（裸 restart 在服务未运行时拉不起来）",
+      len(_qt_restart) == 1
+      and "ekko-studio-web stop" in _qt_restart[0]
+      and "ekko-studio-web start" in _qt_restart[0]
+      and "BIND_HOST=0.0.0.0" in _qt_restart[0],
+      str(_qt_restart))
+check("★ ★ 没有任何一条实际命令使用裸 `ekko-studio-web restart`",
+      not any(re.search(r"ekko-studio-web\s+restart", c) for c in _qt_cmds),
+      "实测该写法在服务停止时会失败")
+check("★ 停止命令是 ekko-studio-web stop", "ekko-studio-web stop" in _qt_cmds)
+check("★ 状态命令同时看 PID 与 8648 监听（能确认是否真的对外可访问）",
+      any("ekko-studio-web status" in c and "8648" in c for c in _qt_cmds))
+
+# ★ 点快捷命令只**填入**命令框，不直接执行 —— 停止/重启是对所有勾选实例生效的，
+#   误触代价大。所以 useQuick 里不得出现 runCommand。
+_qt_uq = _ct4[_ct4.find("useQuick(q){"):] if "useQuick(q){" in _ct4 else ""
+_qt_uq = _qt_uq[: _qt_uq.find("\n    },")] if _qt_uq else ""
+check("★ 点快捷命令只填入命令框（不自动执行，避免误触停服务）",
+      "execForm.command = q.cmd" in _qt_uq and "runCommand" not in _qt_uq,
+      _qt_uq[:120])
+
+check("★ 快捷命令有样式，且类名不与既有 .pk 预设卡撞车",
+      ".qc-grid{" in _ct4 and ".qc:hover{" in _ct4 and ".pk-grid{" in _ct4)
+check("★ 提示里写明需要放行安全组 / 防火墙（否则本机通了外部仍不通）",
+      "安全组" in _ct4)
 check("★ 命令执行页的「一键预装」才发 installs: this.installPicked",
       re.search(r"post\('/api/execute/install',\s*\{[\s\S]{0,200}?installs:\s*this\.installPicked",
                 _ct4) is not None)
