@@ -99,15 +99,41 @@ final class Ssh
         if ($ssh === '') {
             return $cached = false;
         }
+        // ★ proc_open 被禁用时**不探测** —— 探测本身就要起进程。
+        //   宝塔默认禁用 proc_open（见 Tasks.php 的同款判断），此时真正的 SSH
+        //   由计划任务的 CLI 进程执行，那里 proc_open 是可用的。
+        //
+        //   探测不了就**假定支持**，理由是两种猜法的代价不对称：
+        //     · 假定支持 → 万一本机 ssh 太老，认证会失败并给出可理解的报错，
+        //       而用户按提示装个 sshpass 就好；
+        //     · 假定不支持 → 功能直接不可用，且用户看到的是"未安装 sshpass"，
+        //       完全查不到真正原因。
+        //   宁可失败在明处，也不要静默地不可用。
+        if (!self::canSpawn()) {
+            return $cached = true;
+        }
         // ssh -V 把版本写到 stderr，用既有的 procRun（数组形式，不经 shell）
         $r = self::procRun([$ssh, '-V'], [], null, 10);
         $s = trim(($r['out'] ?? '') . ' ' . ($r['err'] ?? ''));
         if (!preg_match('/OpenSSH_(\d+)\.(\d+)/', $s, $m)) {
-            return $cached = false;   // 版本都认不出来就别冒险
+            return $cached = true;   // 版本认不出来也别把功能判死，同上
         }
         $maj = (int) $m[1];
         $min = (int) $m[2];
         return $cached = ($maj > 8 || ($maj === 8 && $min >= 4));
+    }
+
+    /**
+     * 本机 PHP 能不能起子进程（proc_open 是否可用）。
+     *
+     * 宝塔默认把 proc_open 写进 disable_functions。这里必须先判断：
+     * 直接调用一个被禁用的函数，PHP 抛的是 **Error 而不是 Exception**，
+     * 一旦有调用方没接住，整个接口就是 500 —— 这正是一次真实事故的成因
+     * （Ssh::available() 被 /api/status 调用，探测版本时打崩了状态接口）。
+     */
+    private static function canSpawn(): bool
+    {
+        return function_exists('proc_open');
     }
 
     /**
@@ -601,6 +627,15 @@ BASH;
             $env[$k] = $v;
         }
 
+        $proc = null;
+        if (!self::canSpawn()) {
+            // ★ 不能直接调 proc_open：被 disable_functions 禁掉时抛的是 **Error**
+            //   而不是 Exception，调用方接不住就是整个接口 500。
+            //   这里降级成一条普通错误结果，让上层照常走"失败"分支。
+            return ['code' => -1, 'out' => '', 'err' => '本机 PHP 禁用了 proc_open，'
+                    . '无法起子进程；SSH 相关操作请交由计划任务（CLI）执行',
+                    'timedOut' => false, 'reapedSignal' => false];
+        }
         $proc = @proc_open($argv, $descriptors, $pipes, null, $env);
         if (!is_resource($proc)) {
             return ['code' => -1, 'out' => '', 'err' => '无法启动子进程', 'timedOut' => false, 'reapedSignal' => false];

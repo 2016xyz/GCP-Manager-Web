@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.5.0';
+    public const VERSION = '1.5.1';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,16 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.5.1',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【修复·自省】v1.5.0 引入的回归：/api/status 返回 500。上一版给密码登录加 askpass 兜底时，新写的「探测本机 ssh 版本」会去起子进程，而宝塔默认把 proc_open 写进 disable_functions —— PHP 调用被禁用的函数抛的是 **Error 而不是 Exception**，Ssh::available() 又是 /api/status 的调用点，于是一探测就把状态接口打崩。日志原文：`unhandled: Error: Call to undefined function proc_open() @ Ssh.php:604`',
+                    '  修法两层：① procRun() 在调 proc_open **之前**先判 function_exists，被禁用时降级成一条普通错误结果，而不是抛 Error；② 探测 ssh 版本前先判能不能起进程，不能起就不探测。顺带修正探测失败时的取值方向：原来「认不出版本」当成不支持，现在改成**假定支持** —— 两种猜法的代价不对称：猜错成「不支持」会让功能静默不可用，且报错会把矛头指向错误的方向（说你缺 sshpass）；猜错成「支持」只是认证失败并给出可理解的提示。宁可失败在明处',
+                    '【修复】CSS 类名撞车：新版徽章用了 .badge.n，而审计日志「操作」列早就用了 class 为 badge n 的写法（样式表里另有 .badge.n{...} 规则）—— 复用同名把审计那列一起染成暖黄。已改名为 .badge.upd。这条是浏览器实测徽章「凭空出现」才挖出来的',
+                    '【测试】断言 803 → 811。关键两条是**真造出禁用环境**来跑：`php -d disable_functions=proc_open` 下调 execSsh 必须返回结构化失败、Ssh::available() 必须仍能正常返回 —— 只查源码文本证明不了不会崩',
+                ],
+            ],
             [
                 'version' => '1.5.0',
                 'date'    => '2026-09-27',

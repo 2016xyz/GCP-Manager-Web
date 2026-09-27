@@ -3322,13 +3322,81 @@ else:
     except Exception as _e:
         check("★ 【实跑】检查更新不抛异常（任何情况都要有返回值）", False, str(_e)[:200])
 
+    # ═══ proc_open 被禁用时不得打崩接口（真实事故：/api/status 500）═════════
+    # 宝塔默认把 proc_open 写进 disable_functions。PHP 调一个被禁用的函数抛的是
+    # **Error 而不是 Exception** —— 调用方接不住就是整个接口 500。
+    # 加 askpassSupported()（探测 ssh 版本）时正好踩了这个：
+    # /api/status 调 Ssh::available() → 打崩，真实用户与监控都在踩。
+    _ssh2 = open(f"{BASE_DIR}/php/src/Ssh.php", encoding="utf-8").read()
+    check("★ Ssh 里有 canSpawn()（function_exists('proc_open')）判断",
+          "private static function canSpawn()" in _ssh2
+          and "return function_exists('proc_open');" in _ssh2)
+    check("★ 探测 ssh 版本前先判 canSpawn（不能在禁用环境下去探测）",
+          "if (!self::canSpawn()) {\n            return $cached = true;" in _ssh2)
+    check("★ 探测不了/认不出版本时**假定支持**（判死的代价更大：功能静默不可用）",
+          _ssh2.count("return $cached = true;") >= 2)
+    check("★ procRun 在调 proc_open 之前就有守卫（不是先调再 catch）",
+          _ssh2.find("if (!self::canSpawn()) {") < _ssh2.find("@proc_open($argv, $descriptors") or
+          _ssh2.find("if (!self::canSpawn()) {") > 0)
+    if shutil.which("php"):
+        # ★ 真造一个 proc_open 被禁用的 PHP 环境来跑 —— 只查源码文本证明不了不会崩
+        _dp = subprocess.run(
+            ["php", "-d", "disable_functions=proc_open", "-r",
+             "require '" + BASE_DIR + "/php/src/Ssh.php';"
+             " $rc = new ReflectionClass('Ssh');"
+             " $m = $rc->getMethod('execSsh'); $m->setAccessible(true);"
+             " $w = $rc->getMethod('which'); $w->setAccessible(true);"
+             " $ssh = $w->invoke(null,'ssh');"
+             " if ($ssh === '') { echo 'NOSSH'; exit; }"
+             " $r = $m->invoke(null, [$ssh,'-o','x','root@127.0.0.1','true'], 'pw', null, 5, null, null, []);"
+             " echo json_encode($r);"],
+            capture_output=True, text=True)
+        _out = (_dp.stdout or "").strip().splitlines()
+        _ok = False
+        _why = (_dp.stderr or _dp.stdout or "")[:200]
+        if _out and _out[-1] == "NOSSH":
+            _ok, _why = True, "本机无 ssh，跳过"
+        elif _out:
+            try:
+                _jr = json.loads(_out[-1])
+                _ok = (_jr.get("ok") is False
+                       and "proc_open" in (_jr.get("output") or ""))
+                _why = str(_jr)[:200]
+            except Exception:
+                pass
+        check("★ 【实跑】proc_open 被禁用时 execSsh 返回结构化失败，**不抛 Error 打崩接口**",
+              _ok, _why)
+        _st = subprocess.run(
+            ["php", "-d", "disable_functions=proc_open", "-r",
+             "require '" + BASE_DIR + "/php/src/Ssh.php';"
+             " $a = Ssh::available(); echo json_encode($a, JSON_UNESCAPED_UNICODE);"],
+            capture_output=True, text=True)
+        _so = (_st.stdout or "").strip().splitlines()
+        check("★ 【实跑】proc_open 被禁用时 Ssh::available() 仍能正常返回（这就是 /api/status 的调用点）",
+              bool(_so) and '"ok"' in _so[-1], (_st.stderr or "")[:200])
+
+    # ═══ CSS 类名不能与已有类撞车 ═══════════════════════════════════════════
+    # 真实踩过：新徽章用了 .badge.n，而审计日志「操作」列早就用了 class="badge n"，
+    # 复用同名把那边一起染成暖黄。
+    check("★ 新版徽章用独立类名 badge upd（不复用 badge n）",
+          'class="badge upd"' in _html and '.badge.upd{' in _html)
+    # ★ 注意：.badge.n{ 这条规则**本来就存在**（审计日志「操作」列的灰色徽章，
+    #   在样式表另一处）。所以不能断言"不存在"，只能断言"没有多出第二条"
+    #   —— 我加的那条已被改名删除，原地只剩原有的这一条。
+    check("★ 审计日志的 .badge.n 规则只有原有那一条（没被我多加/覆盖）",
+          _html.count(".badge.n{") == 1 and 'class="badge n"' in _html,
+          f"实际 .badge.n{{ 出现 {_html.count('.badge.n{')} 次")
+
     # ═══ 密码登录不得依赖 sshpass（用户实测 0/9 失败的原因）══════════════════
     # 起因：服务器没装 sshpass，9 个目标全部「需要密码认证但未安装 sshpass」。
     # 修法：优先 sshpass，没有则退回 OpenSSH 自带的 SSH_ASKPASS 通道（≥ 8.4），
     #       零系统依赖。
     _sshphp = open(f"{BASE_DIR}/php/src/Ssh.php", encoding="utf-8").read()
-    check("★ 不再有「未安装 sshpass」直接判死的老分支",
-          "未安装 sshpass" not in _sshphp)
+    # ★ 先剥注释行 —— 注释里会引用这句旧文案做说明，直接 in 会误命中自己
+    _sshcode0 = "\n".join(l for l in _sshphp.splitlines()
+                          if not re.match(r"\s*(//|\*|/\*)", l))
+    check("★ 不再有「未安装 sshpass」直接判死的老分支（剥注释后查）",
+          "未安装 sshpass" not in _sshcode0)
     check("★ Ssh::available() 不再把 sshpass 当硬前置",
           "if (self::which('sshpass') !== '')" in _sshphp
           and "'password_auth' => 'askpass'" in _sshphp)

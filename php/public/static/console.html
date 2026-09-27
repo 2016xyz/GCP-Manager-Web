@@ -177,8 +177,10 @@ a{color:var(--brand);text-decoration:none}
 /* 检查更新 */
 .upd-bar{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .upd-bar .hint{font-size:12px}
-/* 有新版时版本号旁边的小徽章 —— 用暖色，一眼能看见但不刺眼 */
-.badge.n{background:linear-gradient(180deg,#fef3c7,#fde68a);color:#8a5a00;border:1px solid #f2d27a}
+/* 有新版时版本号旁边的小徽章 —— 用暖色，一眼能看见但不刺眼。
+   ★ 类名不能叫 `n`：审计日志的「操作」列早就用了 class="badge n"，
+     复用同名会把那边的操作类型徽章一起染成暖黄（真实踩过）。 */
+.badge.upd{background:linear-gradient(180deg,#fef3c7,#fde68a);color:#8a5a00;border:1px solid #f2d27a}
 .upd-msg{margin-top:9px;padding:9px 11px;border-radius:8px;font-size:12.5px;line-height:1.7}
 .upd-msg.ok{background:var(--ok-bg,#f0fdf7);border:1px solid #b7e7d2;color:#116b4c}
 .upd-msg.warn{background:var(--warn-bg,#fffaf0);border:1px solid #f0dcae;color:#8a5a00}
@@ -1913,7 +1915,7 @@ pre.log.big{max-height:520px}
           <h2>关于 <small>{{ ver.name_cn || 'GCP 批量管理控制台' }}</small></h2>
           <div class="kv">
             <b>版本</b><span><span class="badge b">{{ ver.version || '—' }}</span>
-              <span class="badge n" v-if="upd.ok && upd.has_update">有新版本 v{{ upd.latest }}</span>
+              <span class="badge upd" v-if="upd.ok && upd.has_update">有新版本 v{{ upd.latest }}</span>
               <span class="hint" v-if="ver.released">发布于 {{ ver.released }}</span></span>
             <b>仓库</b><span>
               <a class="repo-link" :href="ver.repo || '#'" target="_blank" rel="noopener noreferrer">
