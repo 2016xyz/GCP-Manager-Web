@@ -84,7 +84,18 @@ function serveStatic(string $rel): void
     $etag = '"' . substr(sha1_file($abs) ?: (string) filesize($abs), 0, 20) . '"';
     header('Content-Type: ' . $mime($abs));
     header('ETag: ' . $etag);
-    header('Cache-Control: public, max-age=' . (preg_match('/\.(ico|woff2?|ttf)$/', $abs) ? 604800 : 3600));
+    // ★ 分层缓存，别一刀切：
+    //   · HTML 是**应用外壳**（console.html / login.html），改动必须立刻到用户手上 ——
+    //     设成 no-cache：浏览器每次都带 If-None-Match 回源，内容没变则 304（很便宜），
+    //     变了就立即生效。实测踩过：外壳给了长缓存，前端修复发布了用户还在跑旧代码。
+    //   · 字体/图标内容不可变，可长缓存。
+    //   · 其余静态资源给 1 小时。
+    if (preg_match('/\.html?$/i', $abs)) {
+        header('Cache-Control: no-cache, must-revalidate');
+    } else {
+        header('Cache-Control: public, max-age='
+            . (preg_match('/\.(ico|woff2?|ttf)$/', $abs) ? 604800 : 3600));
+    }
     if (($_SERVER['HTTP_IF_NONE_MATCH'] ?? '') === $etag) {
         http_response_code(304);
         exit;
