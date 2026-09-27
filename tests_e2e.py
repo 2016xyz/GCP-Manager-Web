@@ -3069,6 +3069,8 @@ else:
                   and "Array.isArray" not in l]
     check("★ 不再有对接口返回值的无保护 .forEach/.map/.filter/.length",
           not _unguarded, f"仍有：{_unguarded}")
+    check("★ 预览脚本也判 typeof 字符串（r.script.split 同样会炸整块预览）",
+          "typeof r.script !== 'string'" in _html)
 
     # 两版 plan_preview 的**形状**必须一致（键集合相同，且都返回数组）
     _pyplan = _ipmod  # noqa: F841  （仅确保模块已加载）

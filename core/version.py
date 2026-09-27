@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,17 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.4.3",
+        "date": "2026-09-27",
+        "notes": [
+            "【加固·前端】命令执行页的「预览将执行的脚本」也加了类型判断：r.script 不是字符串时"
+            "不再让 .split 抛 TypeError 把整块预览搞没，而是直接把原始响应打出来。"
+            "与 v1.4.2 修的 dry-run plan 是同一类问题 —— 后端契约一漂移，前端只报一句"
+            "「渲染错误」，看不出是接口问题",
+            "【测试】断言增至 739 条",
+        ],
+    },
     {
         "version": "1.4.2",
         "date": "2026-09-27",

@@ -3064,6 +3064,16 @@ const __APP_REF__ = createApp({
       const r = await this.api('/api/install_presets?keys='
         + encodeURIComponent(this.installPicked.join(',')));
       if(r && r.ok && r.script){
+        // ★ 同 dry-run 的 plan 一样，别信 r.script 一定是字符串：
+        //   非字符串时 .split 会抛 TypeError，整个预览卡片渲染不出来，
+        //   而错误提示只说"渲染错误"，看不出是接口违约。
+        if(typeof r.script !== 'string'){
+          this.installPreview = '⚠ 服务端返回的 script 不是字符串（接口契约违约）\n'
+            + '实收：' + Object.prototype.toString.call(r.script) + '\n\n'
+            + '原始响应：\n' + JSON.stringify(r, null, 2);
+          console.warn('[接口契约] /api/install_presets 的 script 期望字符串，实收', r.script);
+          return;
+        }
         const lines = r.script.split('\n');
         this.installPreview = lines.slice(0, 40).join('\n')
           + (lines.length > 40 ? `\n\n…（共 ${lines.length} 行，此处只预览前 40 行）` : '');

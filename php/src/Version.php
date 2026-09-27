@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.4.2';
+    public const VERSION = '1.4.3';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,14 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.4.3',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【加固·前端】命令执行页的「预览将执行的脚本」也加了类型判断：r.script 不是字符串时不再让 .split 抛 TypeError 把整块预览搞没，而是直接把原始响应打出来。与 v1.4.2 修的 dry-run plan 是同一类问题 —— 后端契约一漂移，前端只报一句「渲染错误」，看不出是接口问题',
+                    '【测试】断言增至 739 条',
+                ],
+            ],
             [
                 'version' => '1.4.2',
                 'date'    => '2026-09-27',
