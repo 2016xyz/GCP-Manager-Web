@@ -930,6 +930,19 @@ final class ApiGcp
 
         $all = [];
         $errors = [];
+        // ★★ 本地库记录必须参与合并（2026-09-27 补）：
+        //   PHP 版原先直接把 GCP 的原始行塞进响应，本地库一个字都没用上。后果是
+        //   实例列表三列全空 —— Root 密码显示"无记录"、费用整列空、镜像取错字段。
+        //   Python 版一直有这一步（core/tasks.py 的 list_all_instances），照着补齐：
+        //     · has_password / note / installs  ← 只存在本地（GCP 不可能有）
+        //     · disk_type / image_key          ← 运行中实例从 GCP 拿不到，只有本地存了
+        //     · cost                           ← 需要机型 + 磁盘类型，两者都依赖上面两项
+        $vms = [];
+        foreach (Store::getAllVms() as $v) {
+            $vms[(string) $v['name']] = $v;
+        }
+        $now = microtime(true);
+
         foreach (Store::getAccounts() as $a) {
             $aid = (string) $a['id'];
             if ($ids !== [] && !in_array($aid, $ids, true)) {
@@ -941,13 +954,75 @@ final class ApiGcp
             }
             try {
                 foreach (self::client($a)->list_instances() as $inst) {
-                    $all[] = $inst;
+                    $all[] = self::enrichInstanceRow($inst, $a, $vms[(string) ($inst['name'] ?? '')] ?? [], $now);
                 }
             } catch (Throwable $e) {
                 $errors[] = ['account_id' => $aid, 'email' => $a['email'], 'error' => $e->getMessage()];
             }
         }
         Json::ok(['instances' => $all, 'errors' => $errors]);
+    }
+
+    /**
+     * 把 GCP 实时行与本地库记录合并成前端实例列表要的形状。
+     *
+     * 取值优先级遵循 Python 的约定：**本地创建时记下的规格优先**，GCP 实时数据兜底。
+     * 理由：运行中的实例在 GCP 侧拿不到 diskType / sourceImage（initializeParams 为空），
+     * 而这两项恰恰决定了「磁盘类型」和「费用」能不能算出来。
+     */
+    public static function enrichInstanceRow(array $inst, array $acc, array $vm, float $now): array
+    {
+        $inst['account_email'] = (string) ($acc['email'] ?? '');
+        $inst['account_id']    = (string) ($acc['id'] ?? '');
+        // 账号备注：邮箱很长时界面上优先展示它
+        $inst['account_label'] = (string) ($acc['label'] ?? '');
+
+        // 只回 has_password，不回密码本身
+        $inst['has_password'] = !empty($vm['password']);
+        $inst['note']     = (string) ($vm['note'] ?? '');
+        $inst['installs'] = array_values(array_filter(
+            array_map('trim', explode(',', (string) ($vm['installs'] ?? ''))),
+            static fn($x) => $x !== ''
+        ));
+
+        // 本地记录优先，GCP 兜底
+        $machineType = (string) ($vm['machine_type'] ?? '') !== ''
+            ? (string) $vm['machine_type'] : (string) ($inst['machine_type'] ?? '');
+        $diskType = (string) ($vm['disk_type'] ?? '') !== ''
+            ? (string) $vm['disk_type'] : (string) ($inst['disk_type'] ?? '');
+        $diskSize = (int) ($vm['disk_size_gb'] ?? 0) ?: (int) ($inst['disk_size_gb'] ?? 0);
+        $inst['machine_type'] = $machineType;
+        $inst['disk_type']    = $diskType;
+        $inst['disk_size_gb'] = $diskSize;
+
+        // 创建时间：本地记录优先（创建时从 GCP 抓的），老记录就用 GCP 的 creation_timestamp
+        $createdTs = (float) ($vm['created_at'] ?? 0) ?: (float) ($inst['created_ts'] ?? 0);
+        $inst['created_ts'] = $createdTs;
+        // 前端 fmtHours / 已用费用都读这个键（Python 侧同样补了）
+        if (!empty($createdTs)) {
+            $inst['created_at'] = $createdTs;
+        }
+
+        // 费用估算（参考价，非账单）
+        $inst['cost'] = Cost::instance_cost(
+            $machineType,
+            $diskType,
+            $diskSize,
+            (string) ($inst['region'] ?? $inst['zone'] ?? ''),
+            $createdTs ?: null,
+            $now,
+            !empty($inst['preemptible']),
+            !empty($inst['spot']),
+            (string) ($inst['status'] ?? 'RUNNING')
+        );
+
+        $inst['spec'] = [
+            'machine_type' => $machineType,
+            'image_key'    => (string) ($vm['image_key'] ?? ''),
+            'disk_type'    => $diskType,
+            'disk_size_gb' => $diskSize,
+        ];
+        return $inst;
     }
 
     /** PATCH /api/instances/note  body: {name, note} → {ok, name, note} */

@@ -797,6 +797,28 @@ final class Gcp
     }
 
     /**
+     * 取 URL / 路径的最后一段（GCP 的 xxxUrl 字段都是 selfLink）。
+     *
+     * ★★ 2026-09-27 血案：全仓曾用 `Gcp::short_name($s)` 表达这个意思。
+     *    **`strrpos` 找不到时返回 `false`，`(int) false === 0`，于是变成 `substr($s, 1)`
+     *    —— 静默吃掉第一个字符。** GCP 的 selfLink 大多含 '/'，所以平时看不出问题；
+     *    一旦某个字段是裸值（实例名、`PERSISTENT`、账号 id 之类），就会被悄悄改坏：
+     *      · `disks[0].type` = "PERSISTENT" → 界面显示 "ERSISTENT"
+     *      · 磁盘 selfLink 的 basename 是磁盘名 → 被当成"镜像"显示
+     *    这类 bug 不会报错、不会抛异常，只是界面上的字错了 —— 最难发现的一种。
+     *    统一走这里，别再手写。
+     */
+    public static function short_name(?string $s): string
+    {
+        $s = trim((string) $s);
+        if ($s === '') {
+            return '';
+        }
+        $p = strrpos($s, '/');
+        return $p === false ? $s : substr($s, $p + 1);
+    }
+
+    /**
      * 从各种 VPC 写法里取出短名。
      * 接受 'jxihegwg' / 'global/networks/jxihegwg' / 'projects/p/global/networks/...' 等。
      */
@@ -807,7 +829,7 @@ final class Gcp
             return '';
         }
         if (strpos($s, '/') !== false) {
-            $s = substr($s, (int) strrpos($s, '/') + 1);
+            $s = Gcp::short_name($s);
         }
         return $s;
     }
@@ -833,7 +855,7 @@ final class Gcp
         }
 
         $mtUrl = (string) ($inst['machineType'] ?? '');
-        $mt = $mtUrl !== '' ? substr($mtUrl, (int) strrpos($mtUrl, '/') + 1) : '';
+        $mt = Gcp::short_name($mtUrl);
         $zname = ltrim((string) $zone, '/');
         if (strncmp($zname, 'zones/', 6) === 0) {
             $zname = substr($zname, 6);
@@ -845,31 +867,53 @@ final class Gcp
             }
         }
 
-        // 引导盘：类型 / 容量 / 来源镜像
+        // 引导盘：类型 / 容量 / 来源镜像 / 模式
+        //
+        // ★★ 2026-09-27 实测修正（用真实 GCP 响应核对过）：
+        //   运行中实例的 disks[0] 长这样（已跑过一段时间的机器 initializeParams 就没了）：
+        //     {"type":"PERSISTENT","mode":"READ_WRITE",
+        //      "source":".../zones/X/disks/vm-1-76864-1-4505",
+        //      "boot":true,"licenses":[".../centos-cloud/global/licenses/centos-stream-9"],
+        //      "diskSizeGb":"30"}
+        //   于是原来那两处「兜底」全都取错了字段：
+        //     · disks[0].type 是**磁盘模式**（PERSISTENT / SCRATCH），不是磁盘类型。
+        //       拿它当 disk_type 显示，界面写的就是 "PERSISTENT"（还被 strrpos 吃掉首字母）——
+        //       而真正的 pd-standard / pd-balanced 在 initializeParams.diskType 里，
+        //       运行中实例拿不到。正确做法是留空，由本地库记录兜底，而不是拿模式冒充类型。
+        //     · disks[0].source 是**源磁盘的 selfLink**，basename 就是磁盘名
+        //       （≈ 实例名）。拿它当"镜像"显示，用户看到的是一串实例名。
+        //       真正的镜像线索在 licenses[] 里（centos-stream-9 之类）。
         $diskType = '';
         $diskSize = 0;
         $imageSrc = '';
+        $diskMode = '';
+        $licenses = [];
         $disks = $inst['disks'] ?? [];
         if (is_array($disks) && isset($disks[0]) && is_array($disks[0])) {
             $boot = $disks[0];
             $diskSize = (int) ($boot['diskSizeGb'] ?? 0);
+            $diskMode = strtoupper((string) ($boot['type'] ?? ''));   // PERSISTENT / SCRATCH
+            $licenses = is_array($boot['licenses'] ?? null) ? $boot['licenses'] : [];
             $params = $boot['initializeParams'] ?? null;
             if (is_array($params)) {
-                $dt = (string) ($params['diskType'] ?? '');
-                $diskType = $dt !== '' ? substr($dt, (int) strrpos($dt, '/') + 1) : '';
+                $diskType = Gcp::short_name((string) ($params['diskType'] ?? ''));
                 $imageSrc = (string) ($params['sourceImage'] ?? '');
                 if (!$diskSize) {
                     $diskSize = (int) ($params['diskSizeGb'] ?? 0);
                 }
             }
-            // 已运行实例的 initializeParams 常为空，退而从 type / source 取
-            if ($diskType === '') {
-                $t = (string) ($boot['type'] ?? '');
-                $diskType = $t !== '' ? substr($t, (int) strrpos($t, '/') + 1) : '';
-            }
-            if ($imageSrc === '') {
-                $imageSrc = (string) ($boot['source'] ?? '');
-            }
+            // 磁盘类型不再退回磁盘模式：拿不到就留空（上层用本地记录兜底）
+        }
+
+        // 镜像：sourceImage → licenses 推断 → 留空。
+        // 绝不退回 disks[0].source（那是磁盘，不是镜像）。
+        $imageFrom = '';
+        if ($imageSrc !== '') {
+            $imageFrom = 'sourceImage';
+        } elseif ($licenses !== []) {
+            // licenses 形如 .../projects/centos-cloud/global/licenses/centos-stream-9
+            $imageSrc = (string) $licenses[0];
+            $imageFrom = 'license';
         }
 
         // 抢占式 / Spot：GCP 用两个不同字段表达，两个都要看
@@ -902,8 +946,14 @@ final class Gcp
             'machine_type' => $mt,
             'disk_type' => $diskType,
             'disk_size_gb' => $diskSize,
-            'image' => $imageSrc !== '' ? substr($imageSrc, (int) strrpos($imageSrc, '/') + 1) : '',
+            // 磁盘模式（PERSISTENT / SCRATCH）—— 以前被误当成 disk_type 显示
+            'disk_mode' => $diskMode,
+            'image' => Gcp::short_name($imageSrc),
             'image_source' => $imageSrc,
+            // 镜像这个值是怎么来的：sourceImage（准）/ license（从 licenses 推断）
+            // / ''（拿不到）。界面据此决定要不要标「推断」。
+            'image_from' => $imageFrom,
+            'licenses' => array_map(static fn($l) => Gcp::short_name((string) $l), $licenses),
             'created' => $rawCreated,
             'created_ts' => $createdTs,
             'preemptible' => $preemptible,

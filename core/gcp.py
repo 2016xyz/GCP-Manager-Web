@@ -512,24 +512,46 @@ def parse_instance(inst, zone, project_id="", account_email=""):
     mt = (inst.machine_type or "").rsplit("/", 1)[-1]
     zname = (zone or "").lstrip("zones/")
 
-    # 引导盘：类型 / 容量 / 来源镜像
+    # 引导盘：类型 / 容量 / 来源镜像 / 模式
+    #
+    # ★★ 2026-09-27 实测修正（拿真实 GCP 响应核对过）：运行中实例的 disks[0] 是
+    #   {"type":"PERSISTENT","mode":"READ_WRITE",
+    #    "source":".../zones/X/disks/vm-1-76864-1-4505","boot":true,
+    #    "licenses":[".../centos-cloud/global/licenses/centos-stream-9"],
+    #    "diskSizeGb":"30"}
+    #   （已跑过一段时间的机器 initializeParams 就没了）于是原来那两处「兜底」都取错了字段：
+    #     · disks[0].type 是**磁盘模式**（PERSISTENT / SCRATCH），不是磁盘类型。
+    #       真正的 pd-standard / pd-balanced 在 initializeParams.disk_type 里，
+    #       运行中实例拿不到 —— 正确做法是留空，由本地库记录兜底，而不是拿模式冒充类型。
+    #     · disks[0].source 是**源磁盘的 selfLink**，basename 就是磁盘名（≈ 实例名）。
+    #       拿它当"镜像"显示，用户看到的是一串实例名。
+    #       真正的镜像线索在 licenses[] 里（centos-stream-9 之类）。
     disk_type = ""
     disk_size = 0
     image_src = ""
+    disk_mode = ""
+    licenses = []
     if inst.disks:
         boot = inst.disks[0]
         disk_size = int(boot.disk_size_gb or 0)
+        disk_mode = (getattr(boot, "type_", "") or "").upper()
+        licenses = [str(x) for x in (getattr(boot, "licenses", None) or [])]
         params = getattr(boot, "initialize_params", None)
         if params is not None:
             disk_type = (params.disk_type or "").rsplit("/", 1)[-1]
             image_src = params.source_image or ""
             if not disk_size:
                 disk_size = int(params.disk_size_gb or 0)
-        # 已运行实例的 initialize_params 常为空，退而从 source / type_ 取
-        if not disk_type:
-            disk_type = (getattr(boot, "type_", "") or "").rsplit("/", 1)[-1]
-        if not image_src:
-            image_src = boot.source or ""
+        # 磁盘类型不再退回磁盘模式：拿不到就留空（上层用本地记录兜底）
+
+    # 镜像：sourceImage → licenses 推断 → 留空。
+    # 绝不退回 disks[0].source（那是磁盘，不是镜像）。
+    image_from = ""
+    if image_src:
+        image_from = "sourceImage"
+    elif licenses:
+        image_src = licenses[0]
+        image_from = "license"
 
     # 抢占式 / Spot：GCP 用两个不同字段表达，两个都要看
     sched = inst.scheduling
@@ -560,8 +582,13 @@ def parse_instance(inst, zone, project_id="", account_email=""):
         "machine_type": mt,
         "disk_type": disk_type,
         "disk_size_gb": disk_size,
+        # 磁盘模式（PERSISTENT / SCRATCH）—— 以前被误当成 disk_type 显示
+        "disk_mode": disk_mode,
         "image": image_src.rsplit("/", 1)[-1] if image_src else "",
         "image_source": image_src,
+        # 镜像这个值是怎么来的：sourceImage（准）/ license（从 licenses 推断）/ ''（拿不到）
+        "image_from": image_from,
+        "licenses": [str(x).rsplit("/", 1)[-1] for x in licenses],
         "created": raw_created,
         "created_ts": created_ts,
         "preemptible": preemptible,

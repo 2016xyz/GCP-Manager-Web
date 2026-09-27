@@ -3072,6 +3072,94 @@ else:
     check("★ 预览脚本也判 typeof 字符串（r.script.split 同样会炸整块预览）",
           "typeof r.script !== 'string'" in _html)
 
+    # ═══ 实例列表三列全空（镜像 / Root 密码 / 费用）═══════════════════════
+    # 现象：实例列表「镜像」列显示的是一串实例名、「Root 密码」写"无记录"、费用整列空白。
+    # 三个根因各自独立，凑在一起看起来像"前端没渲染"，实际全在后端。
+    _gcp_code = "\n".join(l for l in _gcpphp.splitlines() if not l.strip().startswith(("//", "*", "/*")))
+
+    # ① strrpos 返回 false → (int)false+1 = 1 → substr($s,1) 静默吃掉首字母
+    check("★ 全仓不再有 `substr($x, (int) strrpos($x,'/') + 1)`（strrpos 无匹配时返回 false，会吃首字母）",
+          not re.search(r"substr\(\$\w+,\s*\(int\)\s*strrpos\(\$\w+,\s*'/'\)\s*\+\s*1\)", _gcp_code),
+          "又出现手写的 URL basename —— 一律走 Gcp::short_name")
+    check("★ PHP 有 Gcp::short_name 安全助手（无 '/' 时原样返回）",
+          "public static function short_name(" in _gcpphp)
+    if os.path.exists("/usr/bin/php") or os.path.exists("/usr/local/bin/php"):
+        _sn = subprocess.run(["php", "-r",
+            f"require '{BASE_DIR}/php/src/Catalog.php'; require '{BASE_DIR}/php/src/Gcp.php';"
+            " echo json_encode([Gcp::short_name('PERSISTENT'), Gcp::short_name('vm-a'),"
+            " Gcp::short_name('https://x/y/pd-standard'), Gcp::short_name('')]);"],
+            capture_output=True, text=True)
+        check("★ short_name 实测：裸值不吃首字母、URL 取末段、空串回空",
+              _sn.stdout.strip() == '["PERSISTENT","vm-a","pd-standard",""]',
+              f"实收 {_sn.stdout.strip()[:120]}")
+
+    # ② disks[0].type 是**磁盘模式**（PERSISTENT/SCRATCH），不是磁盘类型
+    check("★ parse_instance 不再拿 disks[0].type 当磁盘类型（那是 mode，不是 type）",
+          "disk_mode" in _gcp_code and not re.search(
+              r"\$diskType\s*=\s*Gcp::short_name\(\(string\)\s*\(\$boot\['type'\]", _gcp_code),
+          "又把磁盘模式当磁盘类型了")
+    check("★ 磁盘模式单独出 disk_mode 字段（展示在磁盘列，不再冒充类型）",
+          "'disk_mode' => $diskMode" in _gcp_code)
+
+    # ③ disks[0].source 是**源磁盘 selfLink**，basename ≈ 实例名，不是镜像
+    check("★ parse_instance 不再拿 disks[0].source 当镜像（那是磁盘，不是镜像）",
+          not re.search(r"\$imageSrc\s*=\s*\(string\)\s*\(\$boot\['source'\]", _gcp_code),
+          "又把磁盘当镜像了")
+    check("★ 镜像退回 licenses[] 推断，并标注来源 image_from",
+          "'license'" in _gcp_code and "'image_from'" in _gcp_code)
+
+    # ④ 两版用同一份真实 GCP 片段解析，结果必须一致
+    _real_disk = {"type": "PERSISTENT", "mode": "READ_WRITE",
+                  "source": "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/vm-1-76864-1-4505",
+                  "boot": True, "diskSizeGb": "30",
+                  "licenses": ["https://www.googleapis.com/compute/v1/projects/centos-cloud/global/licenses/centos-stream-9"]}
+    _real_inst = {"name": "vm-1-76864-1-4505", "status": "RUNNING",
+                  "machineType": "https://www.googleapis.com/compute/v1/projects/p/zones/z/machineTypes/e2-highcpu-4",
+                  "creationTimestamp": "2026-09-27T01:00:00.000-07:00",
+                  "scheduling": {"preemptible": True, "provisioningModel": "SPOT"},
+                  "networkInterfaces": [{"networkIP": "10.0.0.5", "accessConfigs": [{"natIP": "35.216.107.20"}]}],
+                  "disks": [_real_disk]}
+    if os.path.exists("/usr/bin/php") or os.path.exists("/usr/local/bin/php"):
+        _pr = subprocess.run(["php", "-r",
+            f"require '{BASE_DIR}/php/src/Catalog.php'; require '{BASE_DIR}/php/src/Gcp.php';"
+            " $r = Gcp::parse_instance(json_decode($argv[1], true), 'zones/z', 'p', 'a@b.c');"
+            " echo json_encode(['image'=>$r['image'],'image_from'=>$r['image_from'],"
+            " 'disk_type'=>$r['disk_type'],'disk_mode'=>$r['disk_mode'],"
+            " 'disk_size_gb'=>$r['disk_size_gb'],'machine_type'=>$r['machine_type']]);",
+            json.dumps(_real_inst)], capture_output=True, text=True, cwd=BASE_DIR)
+        try:
+            _pj = json.loads(_pr.stdout.strip().splitlines()[-1])
+        except Exception:
+            _pj = {}
+        check("★ PHP 解析真实 GCP 片段：镜像取自 licenses（不再是磁盘/实例名）",
+              _pj.get("image") == "centos-stream-9" and _pj.get("image_from") == "license",
+              f"实收 {_pj}")
+        check("★ PHP 解析真实 GCP 片段：磁盘类型留空而不是 PERSISTENT/ERSISTENT",
+              _pj.get("disk_type") == "" and _pj.get("disk_mode") == "PERSISTENT",
+              f"实收 {_pj}")
+
+    # ⑤ instances() 必须合并本地库（Root 密码 / 备注 / 预装 / 费用全靠它）
+    check("★ PHP instances() 会用本地库记录富化（不是把 GCP 原始行直接返回）",
+          "enrichInstanceRow(" in _apigcp_code
+          and "Store::getAllVms()" in _apigcp_code,
+          "instances() 没合并本地库 —— Root 密码/费用/磁盘类型会全空")
+    check("★ PHP 实例列表算费用（Cost::instance_cost）—— 此前整个费用列是空的",
+          "Cost::instance_cost(" in _apigcp_code)
+    for _k in ("has_password", "note", "installs", "account_label", "cost", "spec", "created_ts"):
+        check(f"★ PHP 富化行含 {_k}（与 Python 的 list_all_instances 齐平）",
+              f"'{_k}'" in _apigcp_code)
+    check("★ 富化行绝不把密码原文放进响应（只回 has_password）",
+          not re.search(r"\$inst\['(password|root_password)'\]\s*=", _apigcp_code),
+          "把密码原文写进响应了")
+
+    # ⑥ 前端：镜像推断标注 + 磁盘模式分开显示
+    check("★ 前端标出「推断」镜像（image_from==='license'），不当成精确值",
+          "i.image_from==='license'" in _html)
+    check("★ 前端磁盘列把 disk_type 与 disk_mode 分开显示",
+          "i.disk_mode" in _html and "类型未知" in _html)
+    check("★ 前端费用列有 null 保护（used_usd 可能为 null）",
+          "i.cost.used_usd===null" in _html or "used_usd===null" in _html)
+
     # 两版 plan_preview 的**形状**必须一致（键集合相同，且都返回数组）
     _pyplan = _ipmod  # noqa: F841  （仅确保模块已加载）
     _plankeys_py = {"account", "project_id", "existing_instances", "region_usage",

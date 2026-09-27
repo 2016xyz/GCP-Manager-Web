@@ -165,7 +165,7 @@ final class Inspect
                     $cfg = $s['config'] ?? [];
                     $name = (string) ($s['name'] ?? '');
                     $out[] = [
-                        'name' => $name !== '' ? substr($name, (int) strrpos($name, '/') + 1) : '',
+                        'name' => Gcp::short_name($name),
                         'title' => (string) ($cfg['title'] ?? ''),
                         'state' => (string) ($s['state'] ?? ''),
                     ];
@@ -191,7 +191,7 @@ final class Inspect
             return [
                 'billingEnabled' => (bool) ($d['billingEnabled'] ?? false),
                 'billingAccountName' => $acct,
-                'billingAccountId' => $acct !== '' ? substr($acct, (int) strrpos($acct, '/') + 1) : '',
+                'billingAccountId' => Gcp::short_name($acct),
                 'name' => (string) ($d['name'] ?? ''),
             ];
         });
@@ -259,7 +259,7 @@ final class Inspect
                 $out[] = [
                     'name' => $name,
                     'status' => (string) ($z['status'] ?? ''),
-                    'region' => $rurl !== '' ? substr($rurl, (int) strrpos($rurl, '/') + 1) : '',
+                    'region' => Gcp::short_name($rurl),
                     // Zone 资源没有 availableMachineTypes 字段，只有 availableCpuPlatforms
                     'cpuPlatforms' => array_map('strval', is_array($z['availableCpuPlatforms'] ?? null) ? $z['availableCpuPlatforms'] : []),
                 ];
@@ -290,7 +290,7 @@ final class Inspect
                 foreach (($m['accelerators'] ?? []) as $a) {
                     $gtype = (string) ($a['guestAcceleratorType'] ?? '');
                     $acc[] = [
-                        'type' => $gtype !== '' ? substr($gtype, (int) strrpos($gtype, '/') + 1) : '',
+                        'type' => Gcp::short_name($gtype),
                         'count' => $a['guestAcceleratorCount'] ?? null,
                     ];
                 }
@@ -398,7 +398,7 @@ final class Inspect
             $d = $this->get(self::COMPUTE_API . '/projects/' . $this->proj() . '/aggregated/subnetworks', ['maxResults' => 500], 60);
             $out = [];
             foreach (self::agg_iter($d) as [$key, $items]) {
-                $rg = $key !== '' ? substr($key, (int) strrpos($key, '/') + 1) : '';
+                $rg = Gcp::short_name($key);
                 if ($region !== '' && $rg !== $region) {
                     continue;
                 }
@@ -410,7 +410,7 @@ final class Inspect
                     $out[] = [
                         'name' => (string) ($s['name'] ?? ''),
                         'region' => $rg,
-                        'network' => $net !== '' ? substr($net, (int) strrpos($net, '/') + 1) : '',
+                        'network' => Gcp::short_name($net),
                         'ipCidrRange' => (string) ($s['ipCidrRange'] ?? ''),
                         'gatewayAddress' => (string) ($s['gatewayAddress'] ?? ''),
                         'privateIpGoogleAccess' => (bool) ($s['privateIpGoogleAccess'] ?? false),
@@ -449,7 +449,7 @@ final class Inspect
                 $logCfg = $f['logConfig'] ?? null;
                 $out[] = [
                     'name' => (string) ($f['name'] ?? ''),
-                    'network' => $net !== '' ? substr($net, (int) strrpos($net, '/') + 1) : '',
+                    'network' => Gcp::short_name($net),
                     'direction' => (string) (($f['direction'] ?? '') ?: 'INGRESS'),
                     'priority' => $f['priority'] ?? null,
                     'disabled' => (bool) ($f['disabled'] ?? false),
@@ -488,7 +488,7 @@ final class Inspect
             $d = $this->get(self::COMPUTE_API . '/projects/' . $this->proj() . '/aggregated/disks', ['maxResults' => 500], 60);
             $out = [];
             foreach (self::agg_iter($d) as [$key, $items]) {
-                $zone = $key !== '' ? substr($key, (int) strrpos($key, '/') + 1) : '';
+                $zone = Gcp::short_name($key);
                 foreach ($items as $disk) {
                     if (!is_array($disk)) {
                         continue;
@@ -503,10 +503,10 @@ final class Inspect
                         'name' => (string) ($disk['name'] ?? ''),
                         'zone' => $zone,
                         'sizeGb' => $disk['sizeGb'] ?? null,
-                        'type' => $type !== '' ? substr($type, (int) strrpos($type, '/') + 1) : '',
+                        'type' => Gcp::short_name($type),
                         'status' => (string) ($disk['status'] ?? ''),
                         'users' => $users,
-                        'sourceImage' => $src !== '' ? substr($src, (int) strrpos($src, '/') + 1) : '',
+                        'sourceImage' => Gcp::short_name($src),
                         'creationTimestamp' => (string) ($disk['creationTimestamp'] ?? ''),
                         'physicalBlockSizeBytes' => $disk['physicalBlockSizeBytes'] ?? null,
                     ];
@@ -541,7 +541,7 @@ final class Inspect
                     'diskSizeGb' => $s['diskSizeGb'] ?? null,
                     'storageBytes' => $bytes,
                     'storageBytesGb' => round(((float) ($bytes ?? 0)) / (1024 ** 3), 3),
-                    'sourceDisk' => $src !== '' ? substr($src, (int) strrpos($src, '/') + 1) : '',
+                    'sourceDisk' => Gcp::short_name($src),
                     'sourceDiskId' => $s['sourceDiskId'] ?? null,
                     'creationTimestamp' => (string) ($s['creationTimestamp'] ?? ''),
                 ];
@@ -561,7 +561,7 @@ final class Inspect
             try {
                 $d = $this->get(self::COMPUTE_API . '/projects/' . $this->proj() . '/aggregated/addresses', ['maxResults' => 500], 60);
                 foreach (self::agg_iter($d) as [$key, $items]) {
-                    $region = $key !== '' ? substr($key, (int) strrpos($key, '/') + 1) : '';
+                    $region = Gcp::short_name($key);
                     foreach ($items as $a) {
                         if (!is_array($a)) {
                             continue;
@@ -640,7 +640,7 @@ final class Inspect
             $insts = [];
             $d = $this->get(self::COMPUTE_API . '/projects/' . $this->proj() . '/aggregated/instances', ['maxResults' => 500], 60);
             foreach (self::agg_iter($d) as [$key, $items]) {
-                $zone = $key !== '' ? substr($key, (int) strrpos($key, '/') + 1) : '';
+                $zone = Gcp::short_name($key);
                 foreach ($items as $i) {
                     if (!is_array($i)) {
                         continue;
@@ -659,7 +659,7 @@ final class Inspect
                         'name' => (string) ($i['name'] ?? ''),
                         'zone' => $zone,
                         'status' => (string) ($i['status'] ?? ''),
-                        'machineType' => $mt !== '' ? substr($mt, (int) strrpos($mt, '/') + 1) : '',
+                        'machineType' => Gcp::short_name($mt),
                         'ip' => $ip, 'privateIp' => $pip,
                         'cpuPlatform' => (string) ($i['cpuPlatform'] ?? ''),
                         'creationTimestamp' => (string) ($i['creationTimestamp'] ?? ''),
@@ -736,7 +736,7 @@ final class Inspect
                     if ($scope !== null) {
                         $d = $this->get(self::COMPUTE_API . '/projects/' . $this->proj() . '/aggregated/' . $path, ['maxResults' => 500], 60);
                         foreach (self::agg_iter($d) as [$key, $items]) {
-                            $prefix = $key !== '' ? substr($key, (int) strrpos($key, '/') + 1) . '/' : '';
+                            $prefix = $key !== '' ? Gcp::short_name($key) . '/' : '';
                             foreach ($items as $it) {
                                 if (is_array($it) && isset($it['name'])) {
                                     $names[] = $prefix . $it['name'];

@@ -1285,11 +1285,21 @@ pre.log.big{max-height:520px}
                     <span class="badge" v-if="i.spot">Spot</span>
                     <span class="badge" v-else-if="i.preemptible">抢占</span></td>
                   <td data-l="镜像">
-                    <div class="mono">{{ i.image || (i.spec&&i.spec.image_key) || '-' }}</div>
-                    <div class="hint">{{ i.spec&&i.spec.image_key && i.image && i.spec.image_key!==i.image ? i.spec.image_key : '' }}</div>
+                    <!-- 取值优先级：GCP 实际镜像 → 本地记录的 image_key → '-'。
+                         image_from==='license' 表示这个镜像名是从 GCP 的 licenses[]
+                         推断的（运行中实例拿不到 sourceImage），标出来免得当成精确值。 -->
+                    <div class="mono">{{ i.image || (i.spec&&i.spec.image_key) || '-' }}
+                      <span class="badge" v-if="i.image && i.image_from==='license'"
+                            title="运行中实例的 GCP 响应里没有 sourceImage，这是从 licenses[] 推断的">推断</span>
+                    </div>
+                    <div class="hint">{{ i.spec&&i.spec.image_key && i.image && i.spec.image_key!==i.image ? '本地记录：'+i.spec.image_key : '' }}</div>
                   </td>
                   <td data-l="磁盘" class="mono">{{ i.disk_size_gb ? i.disk_size_gb+' GB' : '-' }}
-                    <span class="hint">{{ i.disk_type || '' }}</span></td>
+                    <!-- disk_type 只有本地记录有（GCP 运行中实例拿不到 diskType），
+                         disk_mode 是 GCP 的 PERSISTENT/SCRATCH —— 两者以前被混为一谈，
+                         界面上"磁盘类型"显示的其实是模式。 -->
+                    <span class="hint">{{ i.disk_type || '类型未知' }}</span>
+                    <span class="hint" v-if="i.disk_mode">{{ i.disk_mode }}</span></td>
                   <td data-l="Root密码">
                     <template v-if="i.has_password">
                       <div class="pwd-cell">

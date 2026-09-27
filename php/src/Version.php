@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.4.3';
+    public const VERSION = '1.4.4';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,18 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.4.4',
+                'date'    => '2026-09-27',
+                'notes'   => [
+                    '【修复·PHP 版】实例列表三列全空 —— 镜像 / Root 密码 / 费用。三个根因各自独立，凑在一起看起来像「前端没渲染」，实际全在后端：',
+                    '  · **镜像列显示的是一串实例名**：GCP 运行中实例的 disks[0] 里没有 initializeParams，    原代码退回取 disks[0].source —— 那是**源磁盘的 selfLink**，basename 就是磁盘名（≈ 实例名）。真正的镜像线索在 licenses[]（centos-cloud/.../licenses/centos-stream-9）。    现在改为 sourceImage → licenses 推断 → 留空，并加 image_from 标注来源，前端对推断值打「推断」角标，不当成精确值',
+                    '  · **磁盘类型显示 ERSISTENT**：两处错叠加。其一 disks[0].type 是**磁盘模式**（PERSISTENT / SCRATCH），不是磁盘类型（pd-standard 之类在 initializeParams.diskType，运行中实例拿不到）；其二全仓 21 处用 `substr($s, (int) strrpos($s,\'/\') + 1)` 取 URL 末段 —— **`strrpos` 找不到时返回 `false`，`(int)false+1 = 1`，于是变成 `substr($s,1)` 静默吃掉首字母**。两版一致的写法是 `rsplit(\'/\',1)[-1]`（Python）或加守卫；PHP 现在统一走新的 `Gcp::short_name()`，磁盘类型改为「本地记录优先、拿不到就留空」，模式单列 disk_mode',
+                    '  · **Root 密码整列「无记录」、费用整列空白**：PHP 的 instances() 把 GCP 原始行直接返回，**本地库一个字都没用上**。而 has_password / note / installs 只存在本地，disk_type / image_key 运行中实例也从 GCP 拿不到 —— 费用又依赖机型与磁盘类型，于是连锁全空。现在按 Python 的约定合并（本地创建时记下的规格优先、GCP 实时数据兜底），费用走早就移植好却一直没接上的 Cost::instance_cost',
+                    '【说明】修的是「拿错字段」和「没合并本地库」，不是「GCP 没返回」。GCP 侧的 disks[0] 本来就长这样（已用真实响应逐字段核对）：{"type":"PERSISTENT","source":".../disks/vm-xxx","licenses":[".../centos-stream-9"],"diskSizeGb":"30"}',
+                    '【测试】断言 739 → 761。含一条用**真实 GCP 响应片段**喂进两版解析器、要求输出逐字节一致的契约断言；以及直接调 Gcp::short_name(\'PERSISTENT\') 断言不被吃首字母（源码文本断言会随重构失效，行为断言不会）',
+                ],
+            ],
             [
                 'version' => '1.4.3',
                 'date'    => '2026-09-27',
