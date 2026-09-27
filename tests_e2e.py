@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -1399,8 +1400,13 @@ for _k in _ip.INSTALL_PRESETS:
     _one = _ip.build_script([_k])
     check(f"★ 预设 {_k} 的脚本带 </dev/null stdin 兜底（无人值守不会挂死）",
           "</dev/null" in _one)
-check("★ 单项失败不阻断后续项（各自子 shell + 记录退出码）",
-      _script.count("结束，退出码") == len(_ip.INSTALL_PRESETS))
+check("★ 单项失败不阻断后续项（各自子 shell + 记录退出码 + 结尾汇总）",
+      # 文案在 v1.4.1 改成「结束：成功 / 结束：失败（退出码 N）」——
+      # 原来统一写「结束，退出码 N」，而那个 N 只是**块内最后一条命令**的退出码，
+      # 装失败了照样是 0（实测 docker 那项就是），属于假绿。现在按成功/失败分开写。
+      _script.count("结束：成功") == len(_ip.INSTALL_PRESETS)
+      and _script.count("结束：失败（退出码") == len(_ip.INSTALL_PRESETS)
+      and "以下安装项未成功" in _script)
 check("★ 3x-ui 用官方非交互机制（XUI_NONINTERACTIVE）",
       "XUI_NONINTERACTIVE" in _script and "XUI_DB_TYPE" in _script)
 check("★ 验证命令按勾选项拼接", "docker --version" in _ip.verify_command(["docker"]))
@@ -2984,6 +2990,53 @@ else:
           "确认执行预装" in _html2 and "确认执行" in _html2)
     check("★ 预装按钮在无选择时禁用（避免空提交）",
           re.search(r'installPicked\.length\s*\|\|\s*installing', _exec_part) is not None)
+
+    # ── 预装脚本本身的两个真 bug（2026-09-27 真实 SSH 实测发现）────────────
+    # 这两个都是"跑起来才发现"的问题：单测只查 bash -n 语法，两者都查不出。
+    _allkeys = list(_ipmod.PRESET_ORDER)
+    _full = _ipmod.build_script(_allkeys)
+
+    # bug①：用 sh 执行下载来的官方脚本 —— Debian/Ubuntu 的 /bin/sh 是 dash，
+    #   官方脚本普遍用 bash 专有语法。实测 Hermes 官方 install.sh 在 dash 下报
+    #   `Syntax error: Bad for loop variable` 并中止，日志里只留一行看不出所以然。
+    check("★ _run_remote 用 bash 执行下载来的脚本（dash 跑不了官方脚本的 bash 语法）",
+          'bash "$_f" "$@" </dev/null' in _full
+          and 'if command -v bash >/dev/null 2>&1; then' in _full,
+          "仍然只用 sh 执行远端脚本 —— 官方安装脚本会在 dash 下中止")
+
+    # bug②：每项的退出码取的是**块内最后一条命令**。
+    #   实测 docker 那一项 apt 已报 "not enough free space" 装失败了，
+    #   但末尾是 `systemctl ... || true`，状态照样 0，日志打「退出码 0」。
+    #   这种"绿灯"比直接报错更坑 —— 用户以为装好了。
+    _set_e = [l for l in _full.splitlines() if l.strip() == "set -e"]
+    check("★ 每项 subshell 内都有 set -e（否则退出码只是最后一条命令的，会假绿）",
+          len(_set_e) == len(_allkeys), f"set -e 行数 {len(_set_e)} != 预设数 {len(_allkeys)}")
+    check("★ 结尾按失败项列表给汇总，并 exit 1（让任务真的判失败）",
+          "以下安装项未成功" in _full and re.search(r"^\s*exit 1\s*$", _full, re.M) is not None)
+    check("★ 预设里不得再有吞状态的裸 `|| true`（原有 4 处）",
+          not re.search(r"_run_remote[^\n]*\|\|\s*true", _full),
+          "又有 _run_remote 的失败被 || true 吞掉了")
+    check("★ ekko 安装失败必须 exit 1（原来写的是 exit 0，装失败却回报成功）",
+          "ekko-studio 安装失败（npm 返回非 0）" in _full and "exit 0; }" not in _full)
+    check("★ _run_remote 里清临时文件用的是 $_f（原来写成字面量 _f，文件永远删不掉）",
+          'rm -f "_f"' not in _full and 'rm -f "$_f"' in _full)
+
+    # ── 两版生成的脚本必须**逐字节一致**（前端只发 installs，脚本由各自后端生成）──
+    # 否则同一个勾选在两版上跑的东西不一样，而界面看不出区别 —— 最难发现的一类分裂。
+    if os.path.exists("/usr/bin/php") or os.path.exists("/usr/local/bin/php"):
+        _php_cmp = ("require '%s/php/src/InstallPresets.php'; "
+                    "echo InstallPresets::build_script(json_decode($argv[1], true));") % BASE_DIR
+        _mism = []
+        for _ks in ([], ["docker"], ["hermes"], ["ekko"], ["3x-ui"], ["nps"],
+                    ["docker", "hermes"], _allkeys):
+            _pr = subprocess.run(["php", "-r", _php_cmp, json.dumps(_ks)],
+                                 capture_output=True, text=True)
+            if _pr.stdout != _ipmod.build_script(_ks):
+                _mism.append(_ks)
+        check("★ 两版生成的预装脚本逐字节一致（含空选择与全选）",
+              not _mism, f"不一致的组合：{_mism}")
+    else:
+        check("★ 两版生成的预装脚本逐字节一致（本机无 php，跳过）", True, "")
 
 
 print("\n" + "=" * 76)

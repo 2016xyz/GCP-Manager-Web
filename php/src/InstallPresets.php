@@ -33,7 +33,6 @@ final class InstallPresets
                 'version' => 'Engine 29.x / Compose 5.x（脚本始终装最新）',
                 'docs' => 'https://docs.docker.com/engine/install/ubuntu/',
                 'script' => <<<'SH'
-
 # Docker 官方便利脚本（官网推荐，自动配 apt 源并装 docker-ce + compose 插件）。
 # 重复执行会升级到最新版，不报错。
 export DEBIAN_FRONTEND=noninteractive
@@ -50,7 +49,6 @@ SH,
                 'version' => 'v3.8.5',
                 'docs' => 'https://github.com/MHSanaei/3x-ui',
                 'script' => <<<'SH'
-
 # ── 关于「v2-ui」──────────────────────────────────────────────────
 # 原项目 github.com/sprov/v2-ui 的仓库现已 404（删除/改名），官方一键脚本
 # https://raw.githubusercontent.com/sprov/v2-ui/master/install.sh 同样 404
@@ -71,7 +69,11 @@ export XUI_DB_TYPE="sqlite"
 export XUI_WEB_BASE_PATH="$XUI_PATH"
 # 走 _run_remote：脚本落到文件再执行，stdin 接 /dev/null，
 # 万一上游新增了未守卫的 read，会读到 EOF 立刻返回而不是把任务挂死。
-_run_remote https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh || true
+# ★ 不用 `|| true` 吞掉状态：那样下面的凭据回显照样会打印，
+#   用户看到"用户名/密码"就以为装好了，实际面板根本没起来。
+#   先把状态存住，跑完诊断再交出去（set -e 下 `cmd || x` 是安全的写法）。
+_rc_xui=0
+_run_remote https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh || _rc_xui=$?
 # 官方脚本会把最终凭据写到 /etc/x-ui/install-result.env（mode 600），
 # 直接读回来打印 —— 这是权威值，比我猜的变量名可靠。
 if [ -f /etc/x-ui/install-result.env ]; then
@@ -81,6 +83,8 @@ if [ -f /etc/x-ui/install-result.env ]; then
 else
   echo "3x-ui 用户名: admin   密码: $XUI_PASS   面板路径: /$XUI_PATH（未读到 install-result.env）"
 fi
+# 装没装成以 _run_remote 的返回码为准；上面那段只是回显，不代表成功。
+[ "$_rc_xui" -eq 0 ] || { echo "3x-ui 安装脚本返回非 0（$_rc_xui），面板可能未起效"; exit "$_rc_xui"; }
 SH,
                 'verify' => 'systemctl is-active x-ui 2>/dev/null; x-ui status 2>/dev/null | head -5',
                 'note' => '原 v2-ui 已确认不可用（仓库 404，官方脚本同样 404）。改用 3x-ui。其官方脚本在 stdin 非终端时自动进入非交互模式，本预设通过 XUI_USERNAME/XUI_PASSWORD/XUI_WEB_BASE_PATH 固定凭据，真实值可从 /etc/x-ui/install-result.env 读回。装完请登录面板确认并检查防火墙是否只放行必要端口。',
@@ -92,7 +96,6 @@ SH,
                 'version' => 'v0.34.7（2026-09-14）',
                 'docs' => 'https://github.com/2016xyz/sysuahb',
                 'script' => <<<'SH'
-
 export DEBIAN_FRONTEND=noninteractive
 # ── 为什么用这个源而不是 ehang-io/nps ─────────────────────────────
 # 原版 ehang-io/nps 最后一次发版是 2021-04（v0.26.10），已停更 4 年多。
@@ -110,8 +113,11 @@ export DEBIAN_FRONTEND=noninteractive
 # </dev/null 只是再加一道保险。脚本需 root（会自己检查 id -u），
 # 我们本来就是 root 身份执行。
 NPS_VER="v0.34.7"
+# ★ 同 3x-ui：别用 `|| true` 吞状态。下面那段诊断是"查结果并回显"，
+#   即使安装失败也会走 else 分支打印"未能确认"，看着像正常输出。
+_rc_nps=0
 _run_remote "https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh" \
-  nps "${NPS_VER}" || true
+  nps "${NPS_VER}" || _rc_nps=$?
 
 # ── 发现安装结果并回显 ───────────────────────────────────────────
 # 随机名没法预先知道，靠固定标记文件 /etc/<name>/conf/sysuahb.conf 反查。
@@ -132,6 +138,8 @@ else
   echo "未能确认 NPS 安装结果：未找到 /etc/sys????/conf/sysuahb.conf"
   echo "可手动重试： curl -fsSL https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh | sh -s nps ${NPS_VER}"
 fi
+# 是否成功以安装脚本的返回码为准，上面只是结果回显。
+[ "$_rc_nps" -eq 0 ] || { echo "NPS 安装脚本返回非 0（$_rc_nps）"; exit "$_rc_nps"; }
 SH,
                 'verify' => 'd=$(ls -d /etc/sys???? 2>/dev/null | head -1); if [ -n "$d" ]; then n=$(basename "$d"); echo "进程名: $n"; command -v "$n" >/dev/null 2>&1 && "$n" status 2>/dev/null | head -4; grep -E \'web_port|web_username\' "$d/conf/sysuahb.conf" 2>/dev/null; else echo \'未找到 sysuahb 安装目录\'; fi',
                 'note' => '基于 djylb/nps v0.34.7（2016xyz/sysuahb），替代 2021 年起停更的 ehang-io/nps。每次安装生成随机进程名（sys+4 位字母），服务名/路径随之变化，用 /etc/sys????/conf/sysuahb.conf 反查。已在 Debian 12 容器内实测：安装成功、随机名生成、面板 / 返回 302 → /login/index。面板默认端口 8081、账号 admin/123（容器实测），公网部署必须改密并限制端口；重复执行安装脚本会自动清理旧的随机名安装再重装。',
@@ -143,12 +151,13 @@ SH,
                 'version' => '滚动最新（官方安装脚本）',
                 'docs' => 'https://hermes-agent.nousresearch.com/docs',
                 'script' => <<<'SH'
-
 export DEBIAN_FRONTEND=noninteractive
 # 官方安装脚本，Linux/macOS/WSL2/Termux 通用。
 # --skip-setup 跳过交互式配置向导 —— 无人值守场景必须加，否则会卡在向导上。
 # 装完再手动跑 `hermes setup --portal` 做模型与工具网关的 OAuth 配置。
-_run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup || true
+# ★ 这里不再加 `|| true`：官方脚本失败就是本项失败。早前吞掉状态后，
+#   日志照样显示这一项"完成"，用户以为装好了、其实一条命令都没装上。
+_run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup
 SH,
                 'verify' => 'command -v hermes && hermes --version 2>/dev/null | head -2',
                 'note' => '安装脚本默认最新版；需要登录态的功能（模型、工具网关）要再跑 hermes setup --portal。',
@@ -160,15 +169,20 @@ SH,
                 'version' => '0.7.24',
                 'docs' => 'https://github.com/EKKOLearnAI/ekko-studio',
                 'script' => <<<'SH'
-
 export DEBIAN_FRONTEND=noninteractive
 # Ekko Studio 需要 Node.js。没有就用 NodeSource 的 LTS 源装。
 if ! command -v node >/dev/null 2>&1; then
-  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1
-  apt-get install -y nodejs >/dev/null 2>&1
+  # ★ 这两步必须显式判失败：以前把输出丢进 /dev/null 又不看返回码，
+  #   装不上 Node 时会一路走到 npm，最后报一个跟根因无关的错。
+  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1 \
+    || { echo "NodeSource 源配置失败，无法安装 Node.js"; exit 1; }
+  apt-get install -y nodejs >/dev/null 2>&1 \
+    || { echo "nodejs 安装失败（apt-get 返回非 0）"; exit 1; }
 fi
 # npm 全局包装完是可执行的 ekko-studio-web（常驻服务）
-npm install -g ekko-studio >/dev/null 2>&1 || { echo "ekko-studio 安装失败"; exit 0; }
+# ★ 原来是 `exit 0` —— 安装失败却回报成功，是这一项最坑的地方，改成 exit 1。
+npm install -g ekko-studio >/dev/null 2>&1 \
+  || { echo "ekko-studio 安装失败（npm 返回非 0），可手动重试： npm install -g ekko-studio"; exit 1; }
 echo "ekko-studio 已安装，启动命令： ekko-studio-web start"
 SH,
                 'verify' => 'command -v ekko-studio-web && npm ls -g --depth=0 2>/dev/null | grep ekko',
@@ -258,6 +272,13 @@ SH,
             '# 而如果写成 `curl ... | sh -s args`（不加重定向），脚本里的 read',
             '# 会从同一个流里消费后续脚本内容，行为同样不可预期。',
             '# 所以统一走这个函数：脚本走文件，stdin 走 /dev/null。',
+            '#',
+            '# ★ 用 bash 而不是 sh 执行下载来的脚本（2026-09-27 实测修正）：',
+            '#   Debian/Ubuntu 的 /bin/sh 是 dash，多数官方安装脚本都用了 bash 专有',
+            '#   语法（`for ((i=0;i<n;i++))` 之类）。实测 Hermes 官方 install.sh 在',
+            '#   dash 下直接报 `Syntax error: Bad for loop variable` 并中止，',
+            '#   而日志里只留一行看不出所以然 —— 用户会以为脚本本身坏了。',
+            '#   在容器里复现过一次才定位到这里。',
             '_run_remote() {',
             '  _u="$1"; shift',
             '  _f="$(mktemp)" || return 1',
@@ -266,11 +287,17 @@ SH,
             '    rm -f "$_f" 2>/dev/null',
             '    return 1',
             '  fi',
-            '  sh "$_f" "$@" </dev/null',
+            '  if command -v bash >/dev/null 2>&1; then',
+            '    bash "$_f" "$@" </dev/null',
+            '  else',
+            '    sh "$_f" "$@" </dev/null',
+            '  fi',
             '  _rc=$?',
             '  rm -f "$_f" 2>/dev/null',
             '  return $_rc',
             '}',
+            '',
+            '_FAILED_ITEMS=""',
             '',
         ];
         foreach ($keys as $k) {
@@ -279,12 +306,30 @@ SH,
             $parts[] = '# 依据：' . ($p['docs'] ?? '-')
                 . (!empty($p['version']) ? '  版本：' . $p['version'] : '');
             $parts[] = '(';
+            // ★ set -e 让这一项的退出码**真的代表成败**。不加的话，块里最后一条
+            //   命令的退出码就是全部结论 —— 实测 docker 那一项 apt 已报
+            //   "not enough free space" 装失败了，但末尾是 `systemctl ... || true`，
+            //   状态照样是 0，日志打「退出码 0」，看的人以为装好了。
+            $parts[] = 'set -e';
             $parts[] = trim($p['script']);
             $parts[] = ')';
-            $parts[] = 'echo "===== [' . $k . '] 结束，退出码 $? ====="';
+            $parts[] = '_rc=$?';
+            $parts[] = 'if [ "$_rc" -eq 0 ]; then';
+            $parts[] = '  echo "===== [' . $k . '] 结束：成功 ====="';
+            $parts[] = 'else';
+            $parts[] = '  echo "===== [' . $k . '] 结束：失败（退出码 $_rc）====="';
+            $parts[] = '  _FAILED_ITEMS="$_FAILED_ITEMS ' . $k . '"';
+            $parts[] = 'fi';
             $parts[] = '';
         }
-        $parts[] = 'echo ""; echo "全部安装项已执行完毕"';
+        $parts[] = 'echo ""';
+        $parts[] = 'if [ -n "$_FAILED_ITEMS" ]; then';
+        $parts[] = '  echo "⚠ 以下安装项未成功：$_FAILED_ITEMS"';
+        $parts[] = '  echo "  （各项独立执行，前面的失败不影响后面；请向上查看对应项的输出定位原因）"';
+        $parts[] = '  exit 1';
+        $parts[] = 'else';
+        $parts[] = '  echo "全部安装项已执行完毕（全部成功）"';
+        $parts[] = 'fi';
         return implode("\n", $parts);
     }
 

@@ -71,7 +71,11 @@ export XUI_DB_TYPE="sqlite"
 export XUI_WEB_BASE_PATH="$XUI_PATH"
 # 走 _run_remote：脚本落到文件再执行，stdin 接 /dev/null，
 # 万一上游新增了未守卫的 read，会读到 EOF 立刻返回而不是把任务挂死。
-_run_remote https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh || true
+# ★ 不用 `|| true` 吞掉状态：那样下面的凭据回显照样会打印，
+#   用户看到"用户名/密码"就以为装好了，实际面板根本没起来。
+#   先把状态存住，跑完诊断再交出去（set -e 下 `cmd || x` 是安全的写法）。
+_rc_xui=0
+_run_remote https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh || _rc_xui=$?
 # 官方脚本会把最终凭据写到 /etc/x-ui/install-result.env（mode 600），
 # 直接读回来打印 —— 这是权威值，比我猜的变量名可靠。
 if [ -f /etc/x-ui/install-result.env ]; then
@@ -81,6 +85,8 @@ if [ -f /etc/x-ui/install-result.env ]; then
 else
   echo "3x-ui 用户名: admin   密码: $XUI_PASS   面板路径: /$XUI_PATH（未读到 install-result.env）"
 fi
+# 装没装成以 _run_remote 的返回码为准；上面那段只是回显，不代表成功。
+[ "$_rc_xui" -eq 0 ] || { echo "3x-ui 安装脚本返回非 0（$_rc_xui），面板可能未起效"; exit "$_rc_xui"; }
 """,
         "verify": "systemctl is-active x-ui 2>/dev/null; x-ui status 2>/dev/null | head -5",
         "note": ("原 v2-ui 已确认不可用（仓库 404，官方脚本同样 404）。改用 3x-ui。"
@@ -114,8 +120,11 @@ export DEBIAN_FRONTEND=noninteractive
 # </dev/null 只是再加一道保险。脚本需 root（会自己检查 id -u），
 # 我们本来就是 root 身份执行。
 NPS_VER="v0.34.7"
+# ★ 同 3x-ui：别用 `|| true` 吞状态。下面那段诊断是"查结果并回显"，
+#   即使安装失败也会走 else 分支打印"未能确认"，看着像正常输出。
+_rc_nps=0
 _run_remote "https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh" \
-  nps "${NPS_VER}" || true
+  nps "${NPS_VER}" || _rc_nps=$?
 
 # ── 发现安装结果并回显 ───────────────────────────────────────────
 # 随机名没法预先知道，靠固定标记文件 /etc/<name>/conf/sysuahb.conf 反查。
@@ -136,6 +145,8 @@ else
   echo "未能确认 NPS 安装结果：未找到 /etc/sys????/conf/sysuahb.conf"
   echo "可手动重试： curl -fsSL https://raw.githubusercontent.com/2016xyz/sysuahb/${NPS_VER}/install.sh | sh -s nps ${NPS_VER}"
 fi
+# 是否成功以安装脚本的返回码为准，上面只是结果回显。
+[ "$_rc_nps" -eq 0 ] || { echo "NPS 安装脚本返回非 0（$_rc_nps）"; exit "$_rc_nps"; }
 """,
         "verify": ("d=$(ls -d /etc/sys???? 2>/dev/null | head -1); "
                    "if [ -n \"$d\" ]; then n=$(basename \"$d\"); echo \"进程名: $n\"; "
@@ -161,7 +172,9 @@ export DEBIAN_FRONTEND=noninteractive
 # 官方安装脚本，Linux/macOS/WSL2/Termux 通用。
 # --skip-setup 跳过交互式配置向导 —— 无人值守场景必须加，否则会卡在向导上。
 # 装完再手动跑 `hermes setup --portal` 做模型与工具网关的 OAuth 配置。
-_run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup || true
+# ★ 这里不再加 `|| true`：官方脚本失败就是本项失败。早前吞掉状态后，
+#   日志照样显示这一项"完成"，用户以为装好了、其实一条命令都没装上。
+_run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup
 """,
         "verify": "command -v hermes && hermes --version 2>/dev/null | head -2",
         "note": "安装脚本默认最新版；需要登录态的功能（模型、工具网关）要再跑 hermes setup --portal。",
@@ -177,11 +190,17 @@ _run_remote https://hermes-agent.nousresearch.com/install.sh --skip-setup || tru
 export DEBIAN_FRONTEND=noninteractive
 # Ekko Studio 需要 Node.js。没有就用 NodeSource 的 LTS 源装。
 if ! command -v node >/dev/null 2>&1; then
-  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1
-  apt-get install -y nodejs >/dev/null 2>&1
+  # ★ 这两步必须显式判失败：以前把输出丢进 /dev/null 又不看返回码，
+  #   装不上 Node 时会一路走到 npm，最后报一个跟根因无关的错。
+  _run_remote https://deb.nodesource.com/setup_lts.x >/dev/null 2>&1 \
+    || { echo "NodeSource 源配置失败，无法安装 Node.js"; exit 1; }
+  apt-get install -y nodejs >/dev/null 2>&1 \
+    || { echo "nodejs 安装失败（apt-get 返回非 0）"; exit 1; }
 fi
 # npm 全局包装完是可执行的 ekko-studio-web（常驻服务）
-npm install -g ekko-studio >/dev/null 2>&1 || { echo "ekko-studio 安装失败"; exit 0; }
+# ★ 原来是 `exit 0` —— 安装失败却回报成功，是这一项最坑的地方，改成 exit 1。
+npm install -g ekko-studio >/dev/null 2>&1 \
+  || { echo "ekko-studio 安装失败（npm 返回非 0），可手动重试： npm install -g ekko-studio"; exit 1; }
 echo "ekko-studio 已安装，启动命令： ekko-studio-web start"
 """,
         "verify": "command -v ekko-studio-web && npm ls -g --depth=0 2>/dev/null | grep ekko",
@@ -253,19 +272,32 @@ def build_script(keys):
              "# 而如果写成 `curl ... | sh -s args`（不加重定向），脚本里的 read",
              "# 会从同一个流里消费后续脚本内容，行为同样不可预期。",
              "# 所以统一走这个函数：脚本走文件，stdin 走 /dev/null。",
+             "#",
+             "# ★ 用 bash 而不是 sh 执行下载来的脚本（2026-09-27 实测修正）：",
+             "#   Debian/Ubuntu 的 /bin/sh 是 dash，多数官方安装脚本都用了 bash 专有",
+             "#   语法（`for ((i=0;i<n;i++))` 之类）。实测 Hermes 官方 install.sh 在",
+             "#   dash 下直接报 `Syntax error: Bad for loop variable` 并中止，",
+             "#   而日志里只留一行看不出所以然 —— 用户会以为脚本本身坏了。",
+             "#   在容器里复现过一次才定位到这里。",
              "_run_remote() {",
              "  _u=\"$1\"; shift",
              "  _f=\"$(mktemp)\" || return 1",
              "  if ! curl -fsSL --retry 3 --connect-timeout 20 \"$_u\" -o \"$_f\"; then",
              "    echo \"  下载失败：$_u\"",
-             "    rm -f \"_f\" 2>/dev/null",
+             "    rm -f \"$_f\" 2>/dev/null",
              "    return 1",
              "  fi",
-             "  sh \"$_f\" \"$@\" </dev/null",
+             "  if command -v bash >/dev/null 2>&1; then",
+             "    bash \"$_f\" \"$@\" </dev/null",
+             "  else",
+             "    sh \"$_f\" \"$@\" </dev/null",
+             "  fi",
              "  _rc=$?",
-             "  rm -f \"_f\" 2>/dev/null",
+             "  rm -f \"$_f\" 2>/dev/null",
              "  return $_rc",
              "}",
+             "",
+             "_FAILED_ITEMS=\"\"",
              ""]
     for k in keys:
         p = INSTALL_PRESETS[k]
@@ -273,12 +305,33 @@ def build_script(keys):
             f'echo ""; echo "===== [{k}] {p["label"]} 开始 ====="',
             f'# 依据：{p.get("docs") or "-"}' + (f'  版本：{p["version"]}' if p.get("version") else ""),
             "(",
+            # ★ set -e 让这一项的退出码**真的代表成败**。
+            #   不加的话，块里最后一条命令的退出码就是全部结论 ——
+            #   实测 docker 那一项 apt 已报 "not enough free space" 装失败了，
+            #   但因为末尾是 `systemctl ... || true`，状态照样是 0，
+            #   日志打「退出码 0」，看的人以为装好了。这种"绿灯"比报错更坑。
+            "set -e",
             p["script"].strip(),
             ")",
-            f'echo "===== [{k}] 结束，退出码 $? ====="',
+            "_rc=$?",
+            f'if [ "$_rc" -eq 0 ]; then',
+            f'  echo "===== [{k}] 结束：成功 ====="',
+            "else",
+            f'  echo "===== [{k}] 结束：失败（退出码 $_rc）====="',
+            f'  _FAILED_ITEMS="$_FAILED_ITEMS {k}"',
+            "fi",
             "",
         ]
-    parts += ['echo ""; echo "全部安装项已执行完毕"']
+    parts += [
+        'echo ""',
+        'if [ -n "$_FAILED_ITEMS" ]; then',
+        '  echo "⚠ 以下安装项未成功：$_FAILED_ITEMS"',
+        '  echo "  （各项独立执行，前面的失败不影响后面；请向上查看对应项的输出定位原因）"',
+        '  exit 1',
+        'else',
+        '  echo "全部安装项已执行完毕（全部成功）"',
+        'fi',
+    ]
     return "\n".join(parts)
 
 

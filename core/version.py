@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,32 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.4.1",
+        "date": "2026-09-27",
+        "notes": [
+            "【修复·真 bug】预装脚本用 `sh` 执行下载来的官方安装脚本 —— Debian/Ubuntu 的 "
+            "/bin/sh 是 dash，而官方脚本普遍用 bash 专有语法。真实 SSH 实测：Hermes 官方 "
+            "install.sh 在 dash 下当场报 `Syntax error: Bad for loop variable` 并中止，"
+            "日志里只留这一行，用户只会以为脚本本身坏了。`_run_remote` 改为优先用 bash",
+            "【修复·真 bug】每项的「退出码」其实只是**块内最后一条命令**的退出码。"
+            "实测 docker 那一项 apt 已报 `not enough free space` 装失败了，但末尾是 "
+            "`systemctl ... || true`，状态照样 0，日志打「退出码 0」——这种假绿比报错更坑，"
+            "用户以为装好了。修法：每项 subshell 内加 set -e，按成功/失败分开打印，"
+            "结尾汇总未成功的项并 exit 1，让任务真的判失败",
+            "【修复】4 处 `_run_remote ... || true` 吞掉了安装失败（3x-ui / nps / hermes 及 "
+            "ekko 的 Node 安装步骤）。现在把状态存下来，跑完诊断回显再交出去 —— "
+            "回显不代表成功，返回码才算",
+            "【修复】ekko 预设 `npm install` 失败时写的是 `exit 0` —— 装失败却回报成功。改 exit 1。",
+            "【修复】`_run_remote` 里清临时文件用的是字面量 `_f` 而不是 `$_f`，"
+            "临时文件永远删不掉（每次预装都在 /tmp 留一份下载的安装脚本）",
+            "【测试】新增 8 条断言（729 通过 / 0 失败），含一条**两版脚本逐字节一致**的契约断言："
+            "前端只发 installs，脚本由各自后端生成，若两版生成结果不同，界面看不出区别 —— "
+            "最难发现的一类分裂。这条断言在 8 个 key 组合上逐一比对 Python 与 PHP 的输出",
+            "★ 这轮两个 bug 都是「单测查不出」的：`bash -n` 只查语法，既查不出用了 sh 还是 bash，"
+            "也查不出退出码语义。是在 docker 容器里起真实 SSH 目标跑完整脚本才暴露的",
+        ],
+    },
     {
         "version": "1.4.0",
         "date": "2026-09-27",
