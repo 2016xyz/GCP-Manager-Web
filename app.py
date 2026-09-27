@@ -422,6 +422,22 @@ class ExecuteRequest(BaseModel):
     idle_timeout: int | None = 120
 
 
+class InstallRequest(BaseModel):
+    """在**已有实例**上执行预装脚本（原先是创建实例时的一次性动作）。
+
+    SSH 凭据由服务端从库里取，与 /api/execute 同一条路径 —— 前端不接触
+    root 密码，也就不存在「密码下发到浏览器」的问题。
+    """
+    installs: list[str] | None = None
+    targets: list[str] | None = None
+    all: bool | None = None
+    concurrency: int | None = 10
+    # 预装要跑 apt / 下载安装包，比普通命令慢得多，默认给到 30 分钟 / 5 分钟空闲
+    command_timeout: int | None = 1800
+    idle_timeout: int | None = 300
+    verify: bool | None = True
+
+
 class ActionRequest(BaseModel):
     action: str
     targets: list[str]
@@ -1437,10 +1453,21 @@ def api_instances(request: Request, account_ids: str = "", sync: bool = True):
 
 
 @app.get("/api/install_presets")
-def api_install_presets(request: Request):
-    """创建后可自动安装的预设清单（docker / 3x-ui / nps / hermes / ekko）"""
+def api_install_presets(request: Request, keys: str = ""):
+    """创建后可自动安装的预设清单（docker / 3x-ui / nps / hermes / ekko）
+
+    带 `?keys=docker,3x-ui` 时**额外**返回拼好的脚本，供前端「预览将执行的脚本」。
+    预览走的和真正执行时**同一个 build_script**，所以看到的必然就是要跑的，
+    不会出现「预览一套、执行另一套」。
+    """
     require(request, "view")
-    return {"ok": True, "presets": presets.preset_payload()}
+    out = {"ok": True, "presets": presets.preset_payload()}
+    if (keys or "").strip():
+        picked = presets.normalize(keys)
+        if picked:
+            out["picked"] = picked
+            out["script"] = presets.build_script(picked)
+    return out
 
 
 @app.patch("/api/instances/note")
@@ -1570,6 +1597,42 @@ def api_execute(req: ExecuteRequest, request: Request):
     users_store.audit(user["username"], client_ip(request), "execute_command",
                       detail=(req.command or "")[:200])
     return tm.submit_execute(body(req))
+
+
+@app.post("/api/execute/install")
+def api_execute_install(req: InstallRequest, request: Request):
+    """在已有实例上执行预装脚本。
+
+    与「创建实例时勾选预装」的区别：那条路径只在创建流程里跑一次，
+    实例建好之后就再也装不了了。这里把同一批预设搬到「命令执行」页，
+    对**任意已存在的实例**随时可跑。
+
+    SSH 密码**自动从库里取**（与 /api/execute 完全同一条路径），
+    前端不需要、也拿不到 root 密码。
+    """
+    user = require(request, "operate")
+
+    # ★ 用 normalize 而不是直接信任入参：它会过滤掉不存在的 key、去重、
+    #   并按 PRESET_ORDER 排序（保证 apt 源与依赖的安装顺序稳定）。
+    installs = presets.normalize(req.installs)
+    if not installs:
+        raise HTTPException(400, "请至少选择一个预装项（installs 为空或全是不认识的 key）")
+
+    script = presets.build_script(installs)
+    if req.verify:
+        v = presets.verify_command(installs)
+        if v:
+            script = script + "\n\n# ── 安装结果自检 ──\n" + v
+
+    payload = body(req)
+    payload["command"] = script
+    payload["installs"] = installs
+
+    users_store.audit(user["username"], client_ip(request), "install_presets",
+                      target=",".join((req.targets or [])[:10]),
+                      detail="预装：" + ",".join(installs)
+                             + ("（全部实例）" if req.all else ""))
+    return tm.submit_execute(payload, kind="install")
 
 
 @app.post("/api/instance_action")

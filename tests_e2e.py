@@ -1641,11 +1641,29 @@ check("★ 账号接口不再外发原始 proxy 字段", _na and "proxy" not in 
 # ══════════ 前端 ══════════
 _ct4 = client.get("/static/console.html").text
 check("★ 创建页有机器备注输入", 'v-model.trim="instNote"' in _ct4)
-check("★ 创建页安装预设为多选（checkbox 绑定数组）",
-      'v-model="installPicked"' in _ct4 and "installPresets" in _ct4)
+# v1.4.0：预装选择器已从「创建实例」页搬到「命令执行」页。
+# 这条断言原来查的是"创建页有 installPicked" —— 搬家后它会**因为错误的原因**继续通过
+# （命令执行页也有 installPicked），属于典型的「测试还绿着但语义已经不对」。
+# 现在按真实语义查：选择器必须存在（在命令执行页），且创建页不得再有。
+_exec_i = _ct4.find("tab==='exec'")
+_exec_seg = _ct4[_exec_i:_exec_i + 9000] if _exec_i > 0 else ""
+_create_seg = _ct4[:_ct4.find("<!-- 右栏 -->")] if "<!-- 右栏 -->" in _ct4 else _ct4
+check("★ 预装选择器在「命令执行」页（v1.4.0 从创建页搬过来的）",
+      'v-model="installPicked"' in _exec_seg and "installPresets" in _ct4)
+check("★ 创建页已不再渲染预装选择器（真的搬走，不是两处各留一份）",
+      'v-model="installPicked"' not in _create_seg)
 check("★ 安装卡带选中态样式", 'class="pk"' in _ct4 and ".pk.on{" in _ct4)
-check("★ 提交创建时带上备注与安装项",
-      "note: this.instNote" in _ct4 and "installs: this.installPicked" in _ct4)
+check("★ 提交创建时带上备注", "note: this.instNote" in _ct4)
+# 创建体（buildPayload）里必须发 installs: []，且**不得**再出现
+# installs: this.installPicked —— 后者现在是命令执行页的勾选状态。
+_cb = _ct4.split("buildPayload")[1].split("submitCreate")[0] if "buildPayload" in _ct4 else ""
+check("★ 创建流程的预装参数是空数组（不把命令执行页的勾选串进新建机器）",
+      re.search(r"installs:\s*\[\]", _cb) is not None
+      and re.search(r"installs:\s*this\.installPicked", _cb) is None,
+      "buildPayload 里仍在发 this.installPicked")
+check("★ 命令执行页的「一键预装」才发 installs: this.installPicked",
+      re.search(r"post\('/api/execute/install',\s*\{[\s\S]{0,200}?installs:\s*this\.installPicked",
+                _ct4) is not None)
 
 check("★ 实例表含所在地列", "公网 IP / 所在地" in _ct4 and "i.location" in _ct4)
 check("★ 实例表含镜像名称列", "{{ i.image ||" in _ct4)
@@ -2860,6 +2878,112 @@ else:
     check("★ upload 后端对 URL 里的 proxy 必须明确报错（而不是静默丢弃）",
           "isset($_GET['proxy'])" in _apigcp_code,
           "_GET 护栏缺失：老前端提交时代理会被静默丢弃")
+
+    # ── 预装搬到「命令执行」页 ★ ─────────────────────────────────────────────
+    # 背景：预装原先只能在「创建实例」时勾选，实例建好之后就**再也装不了**；
+    #       而且某个安装项卡住会拖住整个创建流程。现在搬成
+    #       POST /api/execute/install，对任意已存在的实例随时可跑。
+    # 关键点：SSH 密码由服务端从 vm_passwords 自动取（与 /api/execute 同一条
+    #       路径），前端不接触 root 密码 —— 所以本接口**不需要**二次验证登录密码，
+    #       这一点与 /api/instances/password（出示明文密码给用户看）刻意不同。
+    _ipmod = _ip
+    appmod.store.save_vm("vm-inst-1", "9.9.9.11", "RootPw!x", 1, "us-central1-a",
+                         "e2-micro", "ubuntu-2204-lts", "pd-standard", 30)
+    _r = client.post("/api/execute/install",
+                     json={"installs": ["docker"], "targets": ["vm-inst-1"], "all": False,
+                           "concurrency": 2, "command_timeout": 60, "idle_timeout": 20})
+    _j = _r.json()
+    check("★ POST /api/execute/install 能入队（预装已可在已有实例上执行）",
+          _r.status_code == 200 and _j.get("ok") is True and _j.get("task_id"),
+          f"HTTP {_r.status_code} {_r.text[:160]}")
+    _itid = _j.get("task_id", "")
+    _trow = appmod.store.get_task(_itid) if _itid else None
+    check("★ 预装任务归类为 kind=install（与手输命令 execute 区分开）",
+          bool(_trow) and _trow.get("kind") == "install",
+          f"kind={( _trow or {}).get('kind')}")
+    _pl = (_trow or {}).get("payload") or {}
+    check("★ 任务里存的命令就是 build_script 的产物（预览与执行同一份脚本）",
+          (_pl.get("command") or "").startswith(_ipmod.build_script(["docker"])),
+          "payload.command 不是 build_script 的输出 —— 预览与实际执行的脚本会分叉")
+    check("★ 任务 payload 里记了 installs 列表（便于事后查这台机器装了什么）",
+          _pl.get("installs") == ["docker"], f"installs={_pl.get('installs')}")
+    check("★ 预装任务 id 用 inst- 前缀（便于在任务列表一眼分辨）",
+          _itid.startswith("inst-"), f"task_id={_itid}")
+
+    # 入参校验：不能静默接受垃圾
+    check("★ installs 为空 → 400（而不是默默跑个空脚本）",
+          client.post("/api/execute/install", json={"installs": []}).status_code == 400)
+    check("★ installs 全是不认识的 key → 400（不能在拼不出脚本时还入队）",
+          client.post("/api/execute/install",
+                      json={"installs": ["not-a-real-preset"]}).status_code == 400)
+    check("★ 缺 installs 字段 → 400（不给默认值蒙混过关）",
+          client.post("/api/execute/install", json={}).status_code == 400)
+    check("★ installs 类型错误 → 422（Pydantic 挡住，不进 handler）",
+          client.post("/api/execute/install", json={"installs": "docker"}).status_code == 422)
+
+    # 脚本预览
+    _r2 = client.get("/api/install_presets?keys=docker")
+    _j2 = _r2.json()
+    check("★ GET /api/install_presets?keys= 回预览脚本，且与 build_script 逐字节一致",
+          _r2.status_code == 200 and _j2.get("script") == _ipmod.build_script(["docker"]),
+          "预览脚本与真正执行的脚本不一致 —— 会出现「预览一套、执行另一套」")
+    check("★ 不带 keys 时不回 script 字段（保持原契约不变）",
+          "script" not in client.get("/api/install_presets").json())
+    check("★ 预览也会过滤无效 key（只回认识的）",
+          client.get("/api/install_presets?keys=docker,bogus").json().get("picked") == ["docker"])
+
+    # ── PHP 版必须同步（两版共用同一份前端与契约）──────────────────────────
+    _php_idx = open(os.path.join(_php_root, "public", "index.php"), encoding="utf-8").read()
+    check("★ PHP 版有 POST /api/execute/install 路由（权限点同为 operate）",
+          bool(re.search(r"#\^/api/execute/install\$#\D{0,40}'operate'", _php_idx)),
+          "PHP 路由缺失 —— 前端在 PHP 版上会 404")
+    _php_ag = open(os.path.join(_php_root, "src", "ApiGcp.php"), encoding="utf-8").read()
+    check("★ PHP installExec 用 InstallPresets::normalize 过滤入参（不直接信任 body）",
+          "InstallPresets::normalize($b['installs']" in _php_ag,
+          "PHP 侧没走 normalize，会接受不存在的 key")
+    check("★ PHP installExec 用 install 归类建任务（与 Python kind 对齐）",
+          "self::submit('install', $payload)" in _php_ag)
+    _php_tr = open(os.path.join(_php_root, "bin", "task-runner.php"), encoding="utf-8").read()
+    check("★ PHP worker 认得 kind=install（否则任务永远卡在 queued）",
+          bool(re.search(r"case 'install':", _php_tr)),
+          "task-runner.php 没有 install 分支")
+    _php_tk = open(os.path.join(_php_root, "src", "Tasks.php"), encoding="utf-8").read()
+    check("★ PHP newTaskId 给 install 映射 inst- 前缀（与 Python 一致）",
+          "$kind === 'install'" in _php_tk and "'inst'" in _php_tk)
+
+    # ── 无密码实例必须被“明确跳过并说明原因”，不能让它跑到 SSH 层报认证失败 ──
+    _tk_py = open(os.path.join(BASE_DIR, "core", "tasks.py"), encoding="utf-8").read()
+    check("★ Python：无 root 密码记录的实例被明确跳过并写明原因（不是笼统的认证失败）",
+          "no_password" in _tk_py and "本工具不保存实例登录私钥" in _tk_py,
+          "缺少无密码实例的明确提示 —— 用户会看到莫名其妙的 SSH 认证失败")
+    check("★ PHP：同一处也要有等价提示（两版行为一致）",
+          "no_password" in _php_tr and "本工具不保存实例登录私钥" in _php_tr)
+
+    # ── 前端：预装确实“搬”过去了，而不是在两处各留一份 ──────────────────────
+    _html2 = _html
+    _create_part = _html2[:_html2.find("<!-- 右栏 -->")] if "<!-- 右栏 -->" in _html2 else _html2
+    check("★ 创建页不再渲染预装选择卡（真的搬走了）",
+          'v-model="installPicked"' not in _create_part,
+          "创建页仍保留预装勾选 —— 会出现两个入口抢同一份状态")
+    _exec_start = _html2.find('tab===\'exec\'')
+    _exec_part = _html2[_exec_start:_exec_start + 9000] if _exec_start > 0 else ""
+    check("★ 命令执行页有预装卡片与勾选（搬到的目的地）",
+          'v-model="installPicked"' in _exec_part and 'runInstall' in _exec_part,
+          "命令执行页没找到预装区块")
+    check("★ 创建流程显式发 installs: [] —— 别把命令执行页勾的项带进新建机器",
+          re.search(r"note:\s*this\.instNote,\s*\n\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*installs:\s*\[\]",
+                    _html2) is not None,
+          "submitCreate 仍在发 this.installPicked（串状态：先勾预装再建机就会被动装上）")
+    check("★ 前端「一键预装」打的是 /api/execute/install",
+          "'/api/execute/install'" in _html2 or '"/api/execute/install"' in _html2)
+    check("★ 预装卡片用 label 包住 checkbox（点卡片任意位置可切换，且保留键盘可用性）",
+          re.search(r'<label class="pk"[\s\S]{0,600}?<input type="checkbox"[^>]*v-model="installPicked"',
+                    _exec_part) is not None,
+          "checkbox 被挪到 label 外面了 —— 点卡片不会切换")
+    check("★ 「一键预装」有二次确认（会在 N 台机上以 root 跑安装脚本）",
+          "确认执行预装" in _html2 and "确认执行" in _html2)
+    check("★ 预装按钮在无选择时禁用（避免空提交）",
+          re.search(r'installPicked\.length\s*\|\|\s*installing', _exec_part) is not None)
 
 
 print("\n" + "=" * 76)

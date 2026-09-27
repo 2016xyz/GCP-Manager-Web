@@ -167,6 +167,7 @@ $ROUTES = [
     ['POST',   '#^/api/instances/password$#',    'view',   [ApiGcp::class, 'revealInstancePassword']],
     ['POST',   '#^/api/refresh$#',               'view',   [ApiGcp::class, 'refresh']],
     ['POST',   '#^/api/create$#',                'operate',[ApiGcp::class, 'create']],
+    ['POST',   '#^/api/execute/install$#',       'operate',[ApiGcp::class, 'installExec']],
     ['POST',   '#^/api/execute$#',               'operate',[ApiGcp::class, 'execute']],
     ['POST',   '#^/api/instance_action$#',       'operate',[ApiGcp::class, 'instanceAction']],
     // ---- 任务 / 日志 / 密钥 ----

@@ -212,10 +212,25 @@ final class ApiGcp
         Json::ok(['estimate' => $est]);
     }
 
-    /** GET /api/install_presets → {ok, presets} */
+    /**
+     * GET /api/install_presets → {ok, presets}
+     * 带 ?keys=docker,3x-ui 时额外回 {picked, script}，供前端「预览将执行的脚本」。
+     * 预览与真正执行走**同一个 build_script**，看到的就是要跑的。
+     */
     public static function installPresets(array $p): void
     {
-        Json::ok(['presets' => InstallPresets::preset_payload()]);
+        $out = ['presets' => InstallPresets::preset_payload()];
+        // ★ 用 $_GET 而不是路由参数：路由表只匹配路径，query 需自行读取。
+        //   这里**只**用来拼预览脚本，不参与任何权限判断，也不落库。
+        $keys = isset($_GET['keys']) && is_string($_GET['keys']) ? trim($_GET['keys']) : '';
+        if ($keys !== '') {
+            $picked = InstallPresets::normalize($keys);
+            if ($picked !== []) {
+                $out['picked'] = $picked;
+                $out['script'] = InstallPresets::build_script($picked);
+            }
+        }
+        Json::ok($out);
     }
 
     // ══ 项目级只读查询 ═════════════════════════════════════════════════════
@@ -1112,6 +1127,74 @@ final class ApiGcp
             Json::out(['ok' => false, 'error' => '命令为空'], 200);
         }
         self::submit('execute', $b);
+    }
+
+    /**
+     * POST /api/execute/install
+     * body: {installs:[...], targets?:[...], all?:bool, concurrency?, command_timeout?,
+     *        idle_timeout?, verify?} → {ok, task_id}
+     *
+     * 在**已有实例**上执行预装脚本。原先预装只能在「创建实例」时勾选，
+     * 实例建好之后就再也装不了；这里把同一批预设搬到「命令执行」页随时可跑。
+     *
+     * SSH 密码由 worker 从 vm_passwords 表自动取（与 kind=execute 完全同一条
+     * 路径），前端不接触 root 密码。
+     */
+    public static function installExec(array $p): void
+    {
+        $b = Http::jsonBody();
+
+        // ★ 与 Python 的 InstallRequest 对齐：
+        //   installs/targets 必须是数组，all/verify 必须是 bool，超时必须是整数。
+        //   Python 侧由 Pydantic 在 handler 之前挡掉类型错误（422），
+        //   PHP 没有这层，必须自己判，否则会静默接受垃圾入参。
+        if (array_key_exists('installs', $b) && $b['installs'] !== null && !is_array($b['installs'])) {
+            Json::err('installs 必须是数组', 400);
+        }
+        if (array_key_exists('targets', $b) && $b['targets'] !== null && !is_array($b['targets'])) {
+            Json::err('targets 必须是数组', 400);
+        }
+        foreach (['all', 'verify'] as $k) {
+            if (array_key_exists($k, $b) && $b[$k] !== null && !is_bool($b[$k])) {
+                Json::err($k . ' 必须是布尔值', 400);
+            }
+        }
+        foreach (['concurrency', 'command_timeout', 'idle_timeout'] as $k) {
+            if (array_key_exists($k, $b) && $b[$k] !== null
+                && !is_int($b[$k]) && !(is_string($b[$k]) && preg_match('/^-?\d+$/', $b[$k]))) {
+                Json::err($k . ' 必须是整数', 400);
+            }
+        }
+
+        // ★ 用 InstallPresets::normalize 而不是直接信任入参：过滤不存在的 key、
+        //   去重、按固定顺序排序（保证安装顺序稳定）。
+        $installs = InstallPresets::normalize($b['installs'] ?? null);
+        if ($installs === []) {
+            Json::err('请至少选择一个预装项（installs 为空或全是不认识的 key）', 400);
+        }
+
+        $script = InstallPresets::build_script($installs);
+        $verify = array_key_exists('verify', $b) ? (bool) ($b['verify'] ?? true) : true;
+        if ($verify) {
+            $v = InstallPresets::verify_command($installs);
+            if ($v !== '') {
+                $script .= "\n\n# ── 安装结果自检 ──\n" . $v;
+            }
+        }
+
+        $payload = $b;
+        $payload['command'] = $script;
+        $payload['installs'] = $installs;
+
+        $targets = is_array($b['targets'] ?? null) ? $b['targets'] : [];
+        Users::addAudit(
+            self::uname(), Http::clientIp(), 'install_presets',
+            implode(',', array_slice(array_map('strval', $targets), 0, 10)),
+            '预装：' . implode(',', $installs) . (!empty($b['all']) ? '（全部实例）' : ''),
+            true
+        );
+
+        self::submit('install', $payload);
     }
 
     /** POST /api/instance_action  body: {action, targets[]} → {ok, task_id} */

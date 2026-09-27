@@ -163,6 +163,9 @@ function runTask(array $task, callable $log): void
         }
         switch ($kind) {
             case 'execute':
+            case 'install':
+                // 预装脚本与手输命令走**同一个执行器** —— 凭据来源、并发、
+                // 超时、取消、结果结构全部一致，区别只在任务归类。
                 executeCommandTask($id, $payload, $log);
                 break;
             case 'create':
@@ -280,6 +283,19 @@ function executeCommandTask(string $taskId, array $payload, callable $log): bool
             continue;
         }
         $pwd = (string) $tgt['password'];
+        // ★ 既没有密码、也没有显式传入私钥 = 这台机器是「SSH 密钥模式」创建的，
+        //   而 vm_passwords 表**只存密码、不存实例登录私钥**（key_path 走的是
+        //   payload 显式传入，用于 GCP 服务账号场景，常规 UI 流程不会带）。
+        //   此时用空密码去连，paramiko/phpseclib 只会抛"认证失败"，用户完全
+        //   猜不到真正原因是"这台机器压根没有密码可自动获取"。直接给结论。
+        if ($pwd === '' && ($keyPath === null || $keyPath === '')) {
+            $msg = '跳过：该实例没有 root 密码记录 —— 创建时用的是「SSH 密钥模式」，'
+                 . '本工具不保存实例登录私钥，无法自动登录。需要自动化请重建为「Root 密码模式」。';
+            $log('[' . $tgt['name'] . '] ' . $msg, 'warn', $taskId);
+            $results[] = ['name' => $tgt['name'], 'ip' => $ip, 'ok' => false,
+                          'output' => $msg, 'reason' => 'no_password'];
+            continue;
+        }
         // 用户选择：显式覆盖 > key 模式默认 root > 密码模式 root > 镜像默认 ubuntu
         if ($userOverride !== null && $userOverride !== '') {
             $user = $userOverride;

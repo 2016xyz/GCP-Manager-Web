@@ -408,6 +408,7 @@ final class Tasks
         $prefix = match (true) {
             $kind === 'create'                 => 'create',
             $kind === 'execute'                => 'exec',
+            $kind === 'install'                => 'inst',
             $kind === 'refresh'                => 'refresh',
             str_starts_with($kind, 'instance_') => 'act',
             default                            => 't',

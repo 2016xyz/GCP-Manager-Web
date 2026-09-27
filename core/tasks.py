@@ -629,7 +629,13 @@ class TaskManager:
     # ------------------------------------------------------------------
     # 对已有实例批量执行命令
     # ------------------------------------------------------------------
-    def submit_execute(self, payload):
+    def submit_execute(self, payload, kind="execute"):
+        """kind: "execute"（手输命令）| "install"（预装脚本）
+
+        两者走**完全相同**的执行路径与凭据来源 —— 都从库里取实例的
+        root 密码，密码不下发前端。区别只是任务归类，方便日志与任务列表
+        区分「谁在跑预装」。
+        """
         payload = dict(payload or {})
         command = (payload.get("command") or "").strip()
         if not command:
@@ -645,9 +651,10 @@ class TaskManager:
         timeout = int(payload.get("command_timeout") or 600)
         idle = int(payload.get("idle_timeout") or 120)
 
-        task_id = self.new_task_id("exec")
-        self.store.create_task(task_id, "execute", payload)
-        self._track_api_task(task_id, "execute", payload)
+        prefix = "exec" if kind == "execute" else ("inst" if kind == "install" else kind[:4])
+        task_id = self.new_task_id(prefix)
+        self.store.create_task(task_id, kind, payload)
+        self._track_api_task(task_id, kind, payload)
         t = threading.Thread(target=self._run_execute,
                              args=(task_id, command, targets, all_instances, concurrency, timeout, idle),
                              daemon=True)
@@ -732,6 +739,19 @@ class TaskManager:
                 return {"name": tgt["name"], "ok": False, "output": "缺少 IP"}
             pwd = tgt.get("password") or ""
             user = "root" if pwd else "ubuntu"
+            # ★ 库里没有密码 = 这台机器是「SSH 密钥模式」创建的，而本工具的
+            #   vm_passwords 表**只存密码、不存实例私钥**（key_path 是 GCP
+            #   服务账号的，不是登录用的）。此时用空密码去连，paramiko 会抛
+            #   AuthenticationException，用户看到的是"认证失败"，
+            #   完全猜不到真正原因是"这台机器压根没有密码可自动获取"。
+            #   所以这里直接给出可执行的结论，不要让它跑到 SSH 层再报错。
+            if not pwd:
+                msg = ("跳过：该实例没有 root 密码记录 —— 创建时用的是「SSH 密钥模式」，"
+                       "本工具不保存实例登录私钥，无法自动登录。"
+                       "需要自动化请重建为「Root 密码模式」。")
+                self.log(f"[{tgt['name']}] {msg}", task_id, "warn")
+                return {"name": tgt["name"], "ip": ip, "ok": False,
+                        "output": msg, "reason": "no_password"}
             ok, out = ssh_mod.run_ssh_command(
                 ip, user, pwd, command, connect_timeout=15,
                 idle_timeout=idle, total_timeout=timeout,

@@ -977,25 +977,12 @@ pre.log.big{max-height:520px}
                   <span class="hint">留空则不写。备注只存在本机数据库，不写入 GCP 资源。</span>
                 </label>
                 <div class="f">
-                  <span>创建后自动安装（可多选，SSH 就绪后按顺序执行）</span>
-                  <div class="pk-grid">
-                    <label class="pk" v-for="p in installPresets" :key="p.key"
-                           :class="{on:installPicked.includes(p.key)}"
-                           :title="p.note || ''">
-                      <span class="nm">
-                        <span class="ck">{{ installPicked.includes(p.key) ? '✓' : '' }}</span>
-                        {{ p.label }}
-                      </span>
-                      <span class="de">{{ p.desc }}</span>
-                      <span class="vf" v-if="p.version">{{ p.version }}</span>
-                      <input type="checkbox" :value="p.key" v-model="installPicked">
-                    </label>
+                  <span>创建后自动安装</span>
+                  <div class="hint" style="margin-top:7px;line-height:1.7">
+                    ⤴ 已移至 <b>「命令执行」</b> 页的「预装脚本」区块。<br>
+                    那里对<b>任意已存在的实例</b>都能随时装，不必在建机这一次性选完；
+                    也不用担心某个安装项卡住创建流程。
                   </div>
-                  <span class="hint" v-if="!installPresets.length">预设加载中…</span>
-                  <span class="hint" v-else-if="installPicked.length">
-                    已选 {{ installPicked.length }} 项。安装脚本会追加到下方「安装命令」之后执行；
-                    单项失败只记警告，不影响实例创建。
-                  </span>
                 </div>
               </div>
 
@@ -1636,6 +1623,57 @@ pre.log.big{max-height:520px}
             <span class="hint" v-if="!can('operate')">当前角色为只读，无法执行命令</span>
           </div>
         </div>
+
+        <!-- ═══════════ 预装脚本（原先挂在「创建实例」页，建完就再也装不了）═══════════ -->
+        <div class="card">
+          <h2>预装脚本 <small>SSH 密码自动获取 · 对已有实例随时可跑</small></h2>
+          <div class="hint" style="margin-bottom:10px;line-height:1.75">
+            勾选要装的项，点「一键预装」即可 —— <b>SSH 密码由服务端从库里自动取</b>，
+            不需要你去「实例列表」逐台出示密码再手动登录。<br>
+            执行范围与上方命令一致：<b>{{ execForm.scope==='all'
+              ? '全部实例（'+instances.length+' 台）' : '仅勾选实例（'+checkedInst.length+' 台）' }}</b>。
+            预装要跑 apt 与下载安装包，比普通命令慢，已给到 30 分钟超时。
+          </div>
+          <div class="pk-grid">
+            <!-- ★ input 必须放在 <label class="pk"> **内部**：靠 label 的原生行为
+                 实现「点卡片任意位置即切换」，样式再用 .pk input{opacity:0} 藏起来。
+                 放到 label 外面就得自己写点击处理，且会丢掉键盘可访问性。 -->
+            <label class="pk" v-for="p in installPresets" :key="'ex-'+p.key"
+                   :class="{on:installPicked.includes(p.key)}"
+                   :title="(p.note||'') + (p.docs ? '  ·  依据：'+p.docs : '')">
+              <span class="nm">
+                <span class="ck">{{ installPicked.includes(p.key) ? '✓' : '' }}</span>
+                {{ p.label }}
+              </span>
+              <span class="de">{{ p.desc }}</span>
+              <span class="vf" v-if="p.version">{{ p.version }}</span>
+              <input type="checkbox" :value="p.key" v-model="installPicked">
+            </label>
+          </div>
+          <span class="hint" v-if="!installPresets.length">预设加载中…（拿不到不影响手动命令执行）</span>
+          <span class="hint" v-else-if="installPicked.length">
+            已选 {{ installPicked.length }} 项：
+            <b>{{ installPicked.map(k=>(installPresets.find(p=>p.key===k)||{}).label||k).join(' + ') }}</b>。
+            按固定顺序执行，单项失败只记警告不阻断后续项；无密码记录的实例会被明确跳过并说明原因。
+          </span>
+          <div class="row" style="margin-top:13px">
+            <button class="p" :disabled="!can('operate') || !installPicked.length || installing"
+                    @click="runInstall">
+              <span v-if="installing" class="inline-spin"></span>{{ installing?'提交中…':'⚡ 一键预装' }}</button>
+            <span class="br"></span>
+            <button @click="previewInstall" :disabled="!installPicked.length">👁 预览将执行的脚本</button>
+            <button class="gh" @click="installPicked=[]">清空选择</button>
+            <span class="br"></span>
+            <button @click="loadPresets">↻ 重载预设</button>
+            <span class="hint" v-if="!can('operate')">当前角色为只读，无法执行预装</span>
+          </div>
+          <div v-if="installPreview" style="margin-top:11px">
+            <div class="hint" style="margin-bottom:5px">
+              以下脚本会在每台目标机上以 <b>root</b> 执行（前 40 行为预览）：
+            </div>
+            <pre class="out" style="max-height:320px;overflow:auto">{{ installPreview }}</pre>
+          </div>
+        </div>
         <div class="card">
           <h2>执行输出</h2>
           <pre class="log big">{{ execOut || '（尚无输出）' }}</pre>
@@ -2063,8 +2101,10 @@ const __APP_REF__ = createApp({
     postCommand:'', verifyCommand:'',
     /* ── 本轮新增 ── */
     instNote:'',                 // 创建页：机器备注
-    installPresets:[],           // 创建页：可选安装预设
-    installPicked:[],            // 创建页：已勾选的预设 key
+    installPresets:[],           // 预装预设清单（从 /api/install_presets 拉）
+    installPicked:[],            // 已勾选的预设 key（命令执行页的「预装脚本」用）
+    installing:false,            // 预装任务提交中
+    installPreview:'',           // 预览的脚本内容
     revealedPwd:{},              // 实例列表：已出示的 root 密码（仅内存，不落库）
     pwdShownAt:{},               // 实例列表：出示时间，用于自动隐藏
     editingNote:null,            // 正在编辑备注的实例名
@@ -2855,7 +2895,11 @@ const __APP_REF__ = createApp({
         ssh_public_key: root ? '' : this.sshPubKey,
         root_password: (root && this.pwdMode==='custom') ? this.rootPassword : '',
         note: this.instNote,
-        installs: this.installPicked,
+        // ★ 创建流程**不再**带预装项：预装已搬到「命令执行」页。
+        //   这里必须显式发空数组，而不是沿用 this.installPicked ——
+        //   后者现在是「命令执行」页的选择状态，用户先在那页勾了 docker
+        //   再回来建机，就会把这台新机器也一起装上，属于典型的串状态 bug。
+        installs: [],
         post_command: this.postCommand, verify_command: this.verifyCommand,
         concurrency: this.opts.concurrency, account_workers: this.opts.account_workers,
         retry_count: this.opts.retry_count, ssh_timeout: this.opts.ssh_timeout,
@@ -2975,6 +3019,58 @@ const __APP_REF__ = createApp({
         command_timeout: this.execForm.command_timeout, idle_timeout: this.execForm.idle_timeout});
       if(r.ok){ this.toast('执行任务已提交：'+r.task_id,'g'); setTimeout(()=>this.viewTask(r.task_id, true), 2500); }
       else this.fail(r);
+    },
+
+    /* ───────── 预装脚本（SSH 密码由服务端自动获取）───────── */
+    /* 目标范围与上方「批量 SSH 命令执行」共用 execForm.scope 与 checkedInst，
+       这样用户在页面上只需要选一次目标，命令与预装都打在同一个范围上。 */
+    installTargets(){
+      if(this.execForm.scope==='selected'){
+        const t = [...this.checkedInst];
+        return {targets: t, all: false};
+      }
+      return {targets: null, all: true};
+    },
+    async previewInstall(){
+      if(!this.installPicked.length) return this.toast('请先选择要安装的项目','a');
+      const r = await this.api('/api/install_presets?keys='
+        + encodeURIComponent(this.installPicked.join(',')));
+      if(r && r.ok && r.script){
+        const lines = r.script.split('\n');
+        this.installPreview = lines.slice(0, 40).join('\n')
+          + (lines.length > 40 ? `\n\n…（共 ${lines.length} 行，此处只预览前 40 行）` : '');
+      } else this.fail(r);
+    },
+    async runInstall(){
+      if(!this.can('operate')) return;
+      if(!this.installPicked.length) return this.toast('请先选择要安装的项目','a');
+      const {targets, all} = this.installTargets();
+      if(!all && (!targets || !targets.length))
+        return this.toast('未勾选任何实例 —— 请在上方「目标实例」里勾选','a');
+      // ★ 二次确认：这会在 N 台机器上以 root 跑安装脚本，且要动 apt 源与系统服务。
+      //   用系统 modal（而不是 window.confirm）保持与控制台其它危险操作一致。
+      const scopeTxt = all ? `全部实例（${this.instances.length} 台）` : `勾选的 ${targets.length} 台`;
+      const names = this.installPicked
+        .map(k=>(this.installPresets.find(p=>p.key===k)||{}).label||k).join(' + ');
+      this.modal = {
+        title:'确认执行预装',
+        sub:`将在 ${scopeTxt} 上执行：\n  ${names}\n\n`
+          + '脚本以 root 身份运行，会修改 apt 源、安装系统服务。\n'
+          + 'SSH 密码由服务端自动获取，无需你手动输入。',
+        okText:'确认执行',
+        onOk: async ()=>{
+          this.modal = null;
+          this.installing = true;
+          const r = await this.post('/api/execute/install', {
+            installs: this.installPicked, targets, all,
+            concurrency: this.execForm.concurrency,
+            command_timeout: 1800, idle_timeout: 300, verify: true});
+          this.installing = false;
+          if(r && r.ok){
+            this.toast('预装任务已提交：'+r.task_id,'g');
+            setTimeout(()=>this.viewTask(r.task_id, true), 2500);
+          } else this.fail(r);
+        }};
     },
 
     /* ───────── 任务 / 日志 ───────── */

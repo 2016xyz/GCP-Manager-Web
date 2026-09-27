@@ -1,6 +1,6 @@
 # GCP Manager Web — 使用说明
 
-![版本](https://img.shields.io/badge/version-1.3.6-1a73e8)
+![版本](https://img.shields.io/badge/version-1.4.0-1a73e8)
 ![许可](https://img.shields.io/badge/license-MIT-10b981)
 ![仓库](https://img.shields.io/badge/github-2016xyz%2FGCP--Manager--Web-0f172a)
 
@@ -958,9 +958,33 @@ GET /api/inspect?account_id=&sections=&region=&zone=&fresh=1&quick=1
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| `GET` | `/api/install_presets` | view | 可选安装预设清单（含版本与依据） |
+| `GET` | `/api/install_presets` | view | 可选安装预设清单（含版本与依据）。带 `?keys=docker,3x-ui` 时额外回 `{picked, script}` 供前端预览 —— 预览与执行走**同一个 `build_script`** |
+| `POST` | `/api/execute/install` | operate | **在已有实例上执行预装脚本**（详见下方） |
 | `PATCH` | `/api/instances/note` | operate | 改实例备注（上限 200 字） |
 | `POST` | `/api/instances/password` | view + **重新验登录密码** | 二次验证后返回 root 密码；错误计入登录限速 |
+
+### 预装脚本：从「创建实例」搬到「命令执行」
+
+原先预装只能在**创建实例时**勾选，实例建好之后就再也装不了；而且某个安装项
+卡住会拖住整个创建流程。现在搬到「命令执行」页，对**任意已存在的实例**随时可跑：
+
+```
+POST /api/execute/install
+{ "installs": ["docker","3x-ui"], "targets": ["vm-1","vm-2"], "all": false,
+  "concurrency": 10, "command_timeout": 1800, "idle_timeout": 300, "verify": true }
+→ { "ok": true, "task_id": "inst-1750000000-a1b2c3d4e5f6" }
+```
+
+- **SSH 密码自动获取**：worker 从 `vm_passwords` 表取 root 密码，与 `/api/execute`
+  完全同一条路径。密码**不下发前端** —— 所以本接口不需要二次验证登录密码
+  （那是 `/api/instances/password`「把明文密码显示给用户看」才需要的控制）。
+- **任务归类 `kind=install`**，id 前缀 `inst-`，与手输命令（`execute` / `exec-`）区分。
+- **无密码记录的实例会被明确跳过并写明原因**，而不是用空密码去连、最后报个
+  「认证失败」让用户去猜。本工具**不保存实例登录私钥**（`accounts.key_path` 是
+  GCP 服务账号的，不是登录用的），因此 `ssh_key` 模式创建的实例无法自动化——
+  要自动化请用「Root 密码模式」重建。
+- 入参经 `InstallPresets::normalize` / `presets.normalize` 过滤：不存在的 key
+  被丢弃、去重、按固定顺序排序；过滤后为空则 **400**，不会静默跑个空脚本。
 
 变更：
 

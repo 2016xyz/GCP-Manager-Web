@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.3.6"
+VERSION = "1.4.0"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,39 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.4.0",
+        "date": "2026-09-27",
+        "notes": [
+            "【功能】预装脚本从「创建实例」页搬到「命令执行」页 —— 对**任意已存在的实例**"
+            "随时可装。原先只能在建机时一次性勾选，机器建好之后就再也装不了；"
+            "而且某个安装项卡住会拖住整个创建流程",
+            "【关键】SSH 密码**由服务端自动获取**：worker 从 vm_passwords 表取 root 密码，"
+            "与 /api/execute 完全同一条路径。用户不再需要先到「实例列表」逐台出示密码、"
+            "再手动 SSH 登录去装东西。密码不下发前端，因此本接口不需要二次验证登录密码 ——"
+            "那是 /api/instances/password（把明文密码显示给用户看）才需要的控制",
+            "【新增接口】POST /api/execute/install {installs, targets?, all?, concurrency?, "
+            "command_timeout?, idle_timeout?, verify?} → {ok, task_id}。"
+            "两版共用同一契约：Python 用 InstallRequest 模型，PHP 手工校验类型对齐",
+            "【新增】任务归类 kind=install / id 前缀 inst-，与手输命令（execute / exec-）区分；"
+            "任务列表里一眼能看出哪些是预装任务",
+            "【新增】GET /api/install_presets?keys=docker,3x-ui 返回拼好的脚本供前端预览。"
+            "预览与真正执行走**同一个 build_script**，不会出现「预览一套、执行另一套」",
+            "【修复·易踩坑】无密码记录的实例（创建时用「SSH 密钥模式」）现在会被**明确跳过"
+            "并写明原因**，而不是拿空密码去连、最后抛个「认证失败」让用户猜。"
+            "本工具不保存实例登录私钥（accounts.key_path 是 GCP 服务账号的，不是登录用的），"
+            "所以 ssh_key 模式的实例无法自动化 —— 这一限制现在会直接讲清楚",
+            "【修复·串状态】创建流程显式发 installs: []。预装选择状态现在是「命令执行」页的，"
+            "若沿用 this.installPicked，用户先在那页勾了 docker 再回来建机，"
+            "新机器会被动装上 —— 典型的跨页串状态 bug",
+            "【交互】预装卡片沿用 label 包 checkbox 的写法，点卡片任意位置即可切换"
+            "（checkbox 挪到 label 外会失效，且丢失键盘可达性）；"
+            "「一键预装」带二次确认，弹窗写明目标范围与将执行的项",
+            "【测试】新增 25 条断言（719 通过 / 0 失败）：接口契约、kind 归类、"
+            "脚本预览与执行一致性、入参校验四态、PHP 侧路由与 worker 分支、"
+            "无密码实例的明确提示、以及「预装确实搬走了而不是两处各留一份」的结构断言",
+        ],
+    },
     {
         "version": "1.3.6",
         "date": "2026-09-27",
