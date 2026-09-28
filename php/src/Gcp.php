@@ -1479,7 +1479,7 @@ final class Gcp
             . '/zones/' . self::seg($z) . '/instances/' . self::seg($name);
         $url = $verb !== '' ? ($base . '/' . $verb) : $base;
         try {
-            $op = $this->rest($method, $url, null, $method === 'POST' ? new stdClass() : null, 90, 20);
+            $op = $this->rest($method, $url, null, $method === 'POST' ? [] : null, 90, 20);
             if (is_array($op) && isset($op['name'])) {
                 $this->wait_operation($op);
             }
