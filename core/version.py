@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,14 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.5.5",
+        "date": "2026-09-29",
+        "notes": [
+            "【修复】自定义 VPC 网络创建失败：用户传入网络名（如 jxihegwg）时代码直接拼接为 global/networks/jxihegwg，但 GCP 验证该网络不存在时返回 HTTP 400 Invalid value for field 'resource.networkInterfaces[0].network'。修复：改进网络 URL 处理逻辑，支持空值/null 自动使用 default 网络，支持 https:// 完整 URL 形式，并添加注释说明 GCP 会在创建实例时验证网络存在性",
+            "【修复】PHP 版实例操作（start/stop/delete/reset）全部失败：报错 Gcp::rest(): Argument #4 ($jsonBody) must be of type ?array, stdClass given。根因：php/src/Gcp.php:1482 调用 rest() 方法时传递了 new stdClass() 而不是 []（空数组），不符合类型声明 ?array。修复：将 new stdClass() 改为 []",
+        ],
+    },
     {
         "version": "1.5.4",
         "date": "2026-09-27",
