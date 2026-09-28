@@ -129,7 +129,9 @@ class Store:
             self.conn.commit()
 
     def update_account(self, acc_id, **kw):
-        fields = [k for k in ("email", "project_id", "key_path", "proxy", "proxy_type", "label") if k in kw]
+        # ★ key_path 不在可写白名单里：密钥路径只能经 POST /api/accounts（带内容校验）写入。
+        # 允许 PATCH 改 key_path 会绕开「必须真的是服务账号 JSON」的校验。
+        fields = [k for k in ("email", "project_id", "proxy", "proxy_type", "label") if k in kw]
         if not fields:
             return
         sql = "UPDATE accounts SET " + ",".join(f"{f}=?" for f in fields) + " WHERE id=?"

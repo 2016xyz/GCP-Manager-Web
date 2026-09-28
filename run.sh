@@ -9,7 +9,7 @@ set -e
 cd "$(dirname "$0")"
 
 PORT="${PORT:-8000}"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 
 # 优先复用 install.sh 建的虚拟环境
 if [ -x ".venv/bin/python" ]; then

@@ -244,7 +244,7 @@ final class Http
             . "style-src 'self' 'unsafe-inline'; "
             . "img-src 'self' data:; "
             . "font-src 'self' data:; "
-            . "connect-src 'self' ws: wss:; "
+            . "connect-src 'self'; "
             . "object-src 'none'; "
             . "base-uri 'self'; "
             . "form-action 'self'; "

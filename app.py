@@ -112,9 +112,8 @@ def bootstrap_admin():
     print("\n" + "=" * 66)
     print("  [初始化] 已创建管理员账号（首次启动）")
     print(f"  用户名: admin")
-    print(f"  密码:   {pw}")
-    print(f"  已写入: {path}")
-    print("  请立即登录并修改密码。")
+    print(f"  密码已写入: {path}")
+    print("  请查看该文件获取初始密码，并立即登录修改。")
     print("=" * 66 + "\n")
 
 
@@ -313,7 +312,7 @@ async def security_headers(request: Request, call_next):
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "font-src 'self' data:; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self'; "
         "object-src 'none'; "
         "base-uri 'self'; "
         "form-action 'self'; "
@@ -567,6 +566,15 @@ def api_change_password(req: ChangePasswordRequest, request: Request):
         request.headers.get("user-agent", ""))
     users_store.audit(sess["username"], client_ip(request), "change_password",
                       detail=f"强度={label}")
+    # ★ 改密成功后删除 INITIAL_ADMIN.txt（如果存在）。
+    # 该文件在首次启动时生成，含初始管理员密码明文。改密后它就该消失，
+    # 否则任何有文件系统访问权的人都能读到原始密码。
+    _init_pw_file = os.path.join(DATA_DIR, "INITIAL_ADMIN.txt")
+    try:
+        if os.path.exists(_init_pw_file):
+            os.remove(_init_pw_file)
+    except OSError:
+        pass
     resp = JSONResponse({"ok": True,
                          "message": "密码已修改，其它设备的登录已失效"})
     resp.set_cookie(COOKIE_NAME, new_token, httponly=True, samesite="lax",
@@ -697,22 +705,26 @@ def api_sessions(request: Request):
     require(request, "user")
     items = users_store.list_sessions()
     cur = request.state.token
+    import hashlib as _hl
     for s in items:
         s["current"] = (s["token"] == cur)
+        # ★ 用 token 的 SHA-256 前 16 位作为外部引用标识（与 PHP 版对齐），
+        # 而不是 token 明文的前 12 位。前 12 位在高并发场景有碰撞风险，
+        # 且 token_ref 被回显给 admin，用 hash 能多一层间接保护。
         if not s["current"]:
-            s["token_ref"] = s["token"][:12]
+            s["token_ref"] = _hl.sha256(s["token"].encode()).hexdigest()[:16]
         s.pop("token", None)
-    # 不回传当前会话的完整 token：它等价于一份可直接复用的登录凭据。
-    # 前端只需要知道「哪条是自己」——由 current 布尔字段表达即可。
     return {"ok": True, "sessions": items}
 
 
 @app.delete("/api/sessions/{token_ref}")
 def api_kill_session(token_ref: str, request: Request):
     require(request, "user")
+    import hashlib as _hl
     target = None
     for s in users_store.list_sessions():
-        if s["token"] == token_ref or s["token"][:12] == token_ref:
+        ref = _hl.sha256(s["token"].encode()).hexdigest()[:16]
+        if ref == token_ref:
             target = s["token"]
             break
     if not target:
@@ -1881,6 +1893,18 @@ def api_read_sshkey(req: SSHKeyReadRequest, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
+    # ★ Origin 校验：WebSocket 握手不受同源策略限制，浏览器会自动携带 Cookie。
+    # 恶意网站可发起跨域 WS 连接窃取日志（含 SSH 命令回显等敏感输出）。
+    # 校验 Origin 头与 Host 头一致，阻止跨站 WebSocket 劫持。
+    origin = (ws.headers.get("origin") or "").strip().rstrip("/")
+    ws_host = (ws.headers.get("host") or "").strip()
+    if origin:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin)
+        origin_host = parsed.netloc or parsed.path
+        if origin_host != ws_host:
+            await ws.close(code=4403)
+            return
     token = ws.cookies.get(COOKIE_NAME)
     sess = users_store.get_session(token) if token else None
     if not sess:

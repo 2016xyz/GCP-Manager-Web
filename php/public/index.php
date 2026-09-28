@@ -131,7 +131,11 @@ $ROUTES = [
     ['GET',    '#^/api/update/check$#',          'view',   [ApiAuth::class, 'updateCheck']],
     // ---- 认证（需登录）----
     ['GET',    '#^/api/auth/me$#',               'public', [ApiAuth::class, 'me']],
-    ['POST',   '#^/api/auth/change_password$#',  'user',   [ApiAuth::class, 'changePassword']],
+    // ★ 改密必须对所有已登录用户开放（view 权限），而不是 admin-only（user 权限）。
+    // 原来写的 'user' 导致 operator/viewer 改不了密码；首次登录 must_change 的非 admin
+    // 账号会被永久锁在「请先改密」与「无权操作」之间。Python 版 api_change_password 没有
+    // 额外权限检查（只要过了中间件的登录态即可），这里用 'view' 对齐。
+    ['POST',   '#^/api/auth/change_password$#',  'view',   [ApiAuth::class, 'changePassword']],
     // ---- 用户 / 会话 / 审计（admin）----
     ['GET',    '#^/api/users$#',                 'user',   [ApiAuth::class, 'listUsers']],
     ['POST',   '#^/api/users$#',                 'user',   [ApiAuth::class, 'createUser']],

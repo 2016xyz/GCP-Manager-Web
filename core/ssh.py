@@ -246,7 +246,7 @@ export DEBIAN_FRONTEND=noninteractive
 #   任何能读该文件的进程/人都能拿到 root 密码。这不是理论问题：
 #   startup-script 的日志同时也是串口输出，会进 GCP 的串口日志缓冲区。
 set +x
-echo 'root:{password}' | chpasswd
+echo root:{password} | chpasswd
 set -x
 passwd -u root || true
 if [ -f /etc/ssh/sshd_config ]; then
@@ -277,5 +277,14 @@ touch /root/.gcp_root_mode_ok
 
 
 def build_root_startup_script(root_password):
-    safe = (root_password or "").replace("'", "'\"'\"'")
-    return ROOT_STARTUP_SCRIPT_TEMPLATE.format(password=safe)
+    # ★ 用 shlex.quote 做完整的 shell 转义，而不是只替换单引号。
+    # 原来的 replace("'", "'\"'\"'") 只防了单引号场景；密码含 $、`、\n、{、} 等
+    # 字符时仍可能导致命令注入或 .format() 的 KeyError/格式注入。
+    # shlex.quote 会把整个字符串包在单引号里并正确转义内部的单引号。
+    import shlex
+    pw = root_password or ""
+    # 密码里不应该有换行符/控制字符（chpasswd 不支持），主动剥掉
+    pw = pw.replace("\n", "").replace("\r", "").replace("\0", "")
+    safe_pw = shlex.quote(pw)
+    # 用字符串拼接而非 .format()，避免密码中的 { } 被当成格式占位符
+    return ROOT_STARTUP_SCRIPT_TEMPLATE.replace("{password}", safe_pw)
