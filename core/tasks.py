@@ -42,6 +42,13 @@ from .gcp import GCPService, build_instance_spec
 _TASK_SECRET_KEYS = ("root_password",)
 
 
+def _is_name_conflict(msg):
+    """判断创建失败是否属于「实例名已存在」（HTTP 409）—— 换新名字重试即可，换区无用。
+    GCP 返回形如 "The resource '...instances/vm-xxx' already exists"。"""
+    m = (msg or "").lower()
+    return "already exists" in m or "http 409" in m or "alreadyexists" in m
+
+
 def sanitize_task_for_client(task):
     """
     返回可安全下发给客户端的任务副本：剥掉凭据类字段，只留存在性标记。
@@ -467,7 +474,14 @@ class TaskManager:
             reserved, candidates = reserve()
             if not reserved:
                 return {"ok": False, "error": "所有可用区域配额已满（每区上限 %d）" % max_per_region}
-            name = f"vm-{acc['id']}-{int(time.time()) % 100000}-{idx}-{random.randint(1000, 9999)}"
+            # ★ 实例名用「账号id + 秒级时间戳 + idx + 4字节随机十六进制」，大幅降低碰撞概率。
+            #   旧格式随机部分只有 9000 种（randint(1000,9999)），同一秒批量创建时
+            #   （生日悖论）很容易撞名，导致 HTTP 409 already exists。改用 secrets.token_hex(4)
+            #   提供 32 位熵。GCP 实例名需符合 RFC1035（小写字母/数字/连字符，≤63），十六进制满足。
+            import secrets as _secrets
+            def _mk_name():
+                return f"vm-{acc['id']}-{int(time.time()) % 100000}-{idx}-{_secrets.token_hex(4)}"
+            name = _mk_name()
             root_password = ""
             startup_script = ""
             if login_mode == "root_password":
@@ -495,6 +509,14 @@ class TaskManager:
                         break
                     last_err = str(out)
                     tried.add(zone)
+                    # ★ 名字冲突（HTTP 409 already exists）：换个新名字在同一可用区再试。
+                    #   409 通常是「上次请求其实建成功了但客户端超时重试」或「同名残留」，
+                    #   换区无用、换名有效。重新生成名字后继续（不 break、不计入 tried）。
+                    if _is_name_conflict(last_err):
+                        name = _mk_name()
+                        self.log(f"[{label}] 实例名冲突(409)，改用新名字 {name} 重试", task_id, "warn")
+                        tried.discard(zone)
+                        continue
                     if last_err != "资源耗尽":
                         break
                 if res:
@@ -514,6 +536,9 @@ class TaskManager:
                     z2 = random.choice(self.zones_for_region(r2, gcp))
                     a_spec = dict(spec)
                     a_spec["region"] = r2
+                    # ★ 换区重试统一换新名字：上一轮的失败可能其实在 GCP 端已建成功
+                    #   （超时/网络抖动导致误判失败），沿用旧名字换区会撞 409。
+                    name = _mk_name()
                     self.log(f"[{label}] {name} 重试 {attempt + 1}/{retries} → {z2}：{last_err}", task_id, "warn")
                     ok, out = gcp.create_instance(z2, name, startup_script=startup_script, spec=a_spec)
                     if ok:

@@ -1826,6 +1826,15 @@ final class Gcp
             || strpos($msg, '资源耗尽') !== false;
     }
 
+    /** 判断创建失败是否属于「实例名已存在」（HTTP 409）—— 换新名字重试即可，
+     *  换区无用。GCP 返回形如 "The resource '...instances/vm-xxx' already exists"。 */
+    private static function is_name_conflict(string $msg): bool
+    {
+        return stripos($msg, 'already exists') !== false
+            || stripos($msg, 'HTTP 409') !== false
+            || stripos($msg, 'alreadyExists') !== false;
+    }
+
     /**
      * dry-run 预览 —— 对应 Python _plan_preview。
      * 只做**只读**清点（list_instances），不创建任何资源、不产生费用。
@@ -2115,7 +2124,15 @@ final class Gcp
             return ['ok' => false, 'error' => sprintf('所有可用区域配额已满（每区上限 %d）', $maxPerRegion)];
         }
 
-        $name = sprintf('vm-%s-%d-%d-%d', (string) $acc['id'], time() % 100000, $idx, random_int(1000, 9999));
+        // ★ 实例名用「账号id + 秒级时间戳 + idx + 4字节随机十六进制」，大幅降低碰撞概率。
+        //   旧格式 vm-{acc}-{ts%100000}-{idx}-{rand(1000,9999)} 只有 9000 种随机值，
+        //   同一秒批量创建时（生日悖论）很容易撞名，导致 HTTP 409 already exists。
+        //   注意：GCP 实例名需符合 RFC1035（小写字母/数字/连字符，≤63 字符），十六进制满足。
+        $mkName = static fn(): string => sprintf(
+            'vm-%s-%d-%d-%s',
+            (string) $acc['id'], time() % 100000, $idx, bin2hex(random_bytes(4))
+        );
+        $name = $mkName();
 
         $rootPassword = '';
         $startupScript = '';
@@ -2157,6 +2174,15 @@ final class Gcp
                 }
                 $lastErr = is_string($out) ? $out : (string) json_encode($out, JSON_UNESCAPED_UNICODE);
                 $tried[$zone] = true;
+                // ★ 名字冲突（HTTP 409 already exists）：换个新名字在同一可用区再试一次。
+                //   409 通常是「上一次请求其实建成功了但客户端超时重试」或「同名残留」，
+                //   换区无用、换名有效。重新生成名字后继续（不 break、不计入 tried）。
+                if (self::is_name_conflict($lastErr)) {
+                    $name = $mkName();
+                    $log(sprintf('[%s] 实例名冲突(409)，改用新名字 %s 重试', $label, $name), 'warn', $taskId);
+                    unset($tried[$zone]);
+                    continue;
+                }
                 if (!self::is_resource_exhausted($lastErr)) {
                     break;   // 非「资源耗尽」类错误换区也没用（配额/权限/参数错）
                 }
@@ -2183,6 +2209,9 @@ final class Gcp
                 $z2 = self::pick(self::zones_for_region($gcp, (string) $r2));
                 $aSpec = $spec;
                 $aSpec['region'] = (string) $r2;
+                // ★ 换区重试统一换新名字：上一轮的失败可能其实在 GCP 端已建成功
+                //   （超时/网络抖动导致误判失败），沿用旧名字换区会撞 409。
+                $name = $mkName();
                 $log(sprintf('[%s] %s 重试 %d/%d → %s：%s', $label, $name, $attempt + 1, $retries,
                     (string) $z2, $lastErr), 'warn', $taskId);
                 if ($z2 === null) {

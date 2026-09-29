@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.5.5"
+VERSION = "1.5.6"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,14 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.5.6",
+        "date": "2026-09-29",
+        "notes": [
+            "【修复】批量创建实例报 HTTP 409 already exists（实例名冲突）：旧命名格式 vm-{账号}-{时间戳%100000}-{idx}-{rand(1000,9999)} 随机部分只有 9000 种取值，同一秒批量创建时（生日悖论）极易撞名。改用 secrets.token_hex(4)（PHP 版 bin2hex(random_bytes(4))）提供 32 位熵，碰撞概率降到可忽略",
+            "【修复·根因】重试时沿用同一个实例名导致 409：原逻辑名字在所有重试路径中固定不变。当创建请求实际在 GCP 端成功、但客户端因超时/网络抖动误判失败并重试时，用同名重试必撞 409。现在：① 首轮循环检测到 409 时换新名字在同区再试；② 换区重试每次都生成新名字。新增 _is_name_conflict() 辅助函数识别 409/already exists",
+        ],
+    },
     {
         "version": "1.5.5",
         "date": "2026-09-29",

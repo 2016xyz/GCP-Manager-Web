@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.5.5';
+    public const VERSION = '1.5.6';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,14 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.5.6',
+                'date'    => '2026-09-29',
+                'notes'   => [
+                    '【修复】批量创建实例报 HTTP 409 already exists（实例名冲突）：旧命名格式随机部分只有 9000 种取值（random_int(1000,9999)），同一秒批量创建时（生日悖论）极易撞名。改用 bin2hex(random_bytes(4)) 提供 32 位熵，碰撞概率降到可忽略',
+                    '【修复·根因】重试时沿用同一个实例名导致 409：原逻辑名字在所有重试路径中固定不变。当创建请求实际在 GCP 端成功、但客户端因超时/网络抖动误判失败并重试时，用同名重试必撞 409。现在：① 首轮循环检测到 409 时换新名字在同区再试；② 换区重试每次都生成新名字。新增 is_name_conflict() 辅助函数识别 409/already exists',
+                ],
+            ],
             [
                 'version' => '1.5.5',
                 'date'    => '2026-09-29',
