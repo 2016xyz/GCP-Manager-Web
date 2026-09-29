@@ -904,7 +904,15 @@ class GCPService:
                 # 同时阻止控制台默认开启 Ops Agent 的注入
                 meta.append(compute_v1.Items(key="google-ops-agent-enabled", value="false"))
             if startup_script:
-                meta.append(compute_v1.Items(key="startup-script", value=startup_script))
+                # ★ Windows 与 Linux 用不同的元数据键：
+                #   Linux: startup-script（bash）
+                #   Windows: windows-startup-script-ps1（PowerShell）—— Windows 实例
+                #   根本不执行 bash startup-script，用错键脚本静默不运行、密码永远设不上。
+                if spec.get("image_os") == "windows":
+                    meta.append(compute_v1.Items(key="windows-startup-script-ps1",
+                                                 value=startup_script))
+                else:
+                    meta.append(compute_v1.Items(key="startup-script", value=startup_script))
             if meta:
                 instance.metadata = compute_v1.Metadata(items=meta)
 

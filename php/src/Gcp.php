@@ -1376,7 +1376,14 @@ final class Gcp
             $metaItems[] = ['key' => 'google-monitoring-enabled', 'value' => 'false'];
         }
         if ($startupScript !== '') {
-            $metaItems[] = ['key' => 'startup-script', 'value' => $startupScript];
+            // ★ Windows 与 Linux 用不同的元数据键：
+            //   Linux: startup-script（bash）
+            //   Windows: windows-startup-script-ps1（PowerShell）—— Windows 实例
+            //   根本不执行 bash startup-script，用错键脚本静默不运行、密码永远设不上。
+            $scriptKey = (($spec['image_os'] ?? 'linux') === 'windows')
+                ? 'windows-startup-script-ps1'
+                : 'startup-script';
+            $metaItems[] = ['key' => $scriptKey, 'value' => $startupScript];
         }
         if ($metaItems) {
             $inst['metadata'] = ['items' => $metaItems];
@@ -1964,10 +1971,19 @@ final class Gcp
             }
         }
 
-        if (($spec['image_os'] ?? 'linux') === 'windows' && $loginMode === 'root_password') {
-            // 文案沿用 Python 原文；但行为同样是「照旧生成 root 密码 + startup-script」
-            // （Python 这里也只有告警，并未真的改走密钥模式）—— 保持两版一致。
-            $log('[警告] 镜像为 Windows，startup-script 不会执行 bash，Root 密码模式无效，已按 SSH 密钥模式处理', 'warn', $taskId);
+        // ★ Windows 支持：密码模式对 Windows 走 PowerShell 启动脚本设置 Administrator
+        //   密码并启用 RDP（而不是像以前那样只警告不处理）。SSH 密钥模式对 Windows
+        //   无意义（Windows 不用 SSH 登录），若选了密钥模式则自动回落到密码模式。
+        if (($spec['image_os'] ?? 'linux') === 'windows') {
+            if ($loginMode === 'ssh_key') {
+                $loginMode = 'root_password';
+                $log('[提示] 镜像为 Windows，不支持 SSH 密钥登录，已自动切换为「密码模式」'
+                    . '（设置 Administrator 密码 + 启用 RDP）', 'warn', $taskId);
+            } else {
+                $log('[提示] 镜像为 Windows，将通过 PowerShell 启动脚本设置 Administrator '
+                    . '密码并启用 RDP（3389）。创建后请用「Administrator + 该密码」经 RDP 登录，'
+                    . '首次生效可能需要等待 1-3 分钟（GCPAgent 执行启动脚本）', 'info', $taskId);
+            }
         }
 
         $started = microtime(true);
@@ -2134,12 +2150,18 @@ final class Gcp
         );
         $name = $mkName();
 
+        $isWindows = (($spec['image_os'] ?? 'linux') === 'windows');
         $rootPassword = '';
         $startupScript = '';
         if ($loginMode === 'root_password') {
             // 用户填了就用用户的，否则随机生成（Python：root_password_in or _rand_password()）
             $rootPassword = $rootPasswordIn !== '' ? $rootPasswordIn : Ssh::randPassword(16);
-            $startupScript = Ssh::buildRootStartupScript($rootPassword);
+            // ★ 按操作系统选择启动脚本：
+            //   Windows → PowerShell（设 Administrator 密码 + 启用 RDP）
+            //   Linux   → bash（设 root 密码 + 开放 SSH）
+            $startupScript = $isWindows
+                ? Ssh::buildWindowsStartupScript($rootPassword)
+                : Ssh::buildRootStartupScript($rootPassword);
         }
 
         // 2) 首轮：预留区优先，其余可用区按池顺序兜底
@@ -2269,12 +2291,21 @@ final class Gcp
         //    POST /api/instances/password 那道「重新输入登录密码」的二次验证彻底绕过。
         //    密码本身已由上面的 Store::saveVm 落库，前端点「显示密码」走二次验证查看。
         //    （Python 侧 core/tasks.py 已同步改为不打印明文，两版一致。）
+        $credLabel = $isWindows ? 'Administrator密码' : 'Root密码';
+        $loginHint = $isWindows ? '（RDP 登录：Administrator + 显示密码）' : '';
         $log(sprintf('[%s] ✅ %s 创建成功 | %s(%s) | IP %s | %s | %s%s',
             $label, $name, $actualRegion, $zone, $ip, $spec['machine_type'], $spec['image_label'],
-            $rootPassword !== '' ? ' | Root密码已记录（在实例列表点「显示密码」查看，需二次验证）' : ''),
+            $rootPassword !== '' ? sprintf(' | %s已记录（在实例列表点「显示密码」查看，需二次验证）%s', $credLabel, $loginHint) : ''),
             'success', $taskId);
 
         // 5) 创建后 SSH 阶段 —— 对应 Python 的 post_command / verify_command 段
+        // ★ Windows 不走 SSH（用 RDP/WinRM），跳过创建后的 SSH 命令阶段。
+        //   Windows 的初始化已在 PowerShell 启动脚本里完成，bash 命令对它无意义。
+        if ($isWindows && ($postCommand !== '' || $verifyCommand !== '')) {
+            $log(sprintf('[%s] %s 为 Windows 实例，跳过创建后 SSH 命令阶段'
+                . '（Windows 用 RDP/WinRM，不支持 SSH bash 命令）', $label, $name), 'warn', $taskId);
+            return $item;
+        }
         if ($postCommand === '' && $verifyCommand === '') {
             return $item;
         }

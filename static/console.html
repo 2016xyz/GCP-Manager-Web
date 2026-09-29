@@ -898,8 +898,10 @@ pre.log.big{max-height:520px}
               <h2><span class="n">3</span>登录方式与创建后动作</h2>
               <div class="row">
                 <label class="sw" :class="{on:loginMode==='root_password'}">
-                  <input type="radio" value="root_password" v-model="loginMode"> Root 密码模式（自动改密并放开 Root SSH）</label>
-                <label class="sw" :class="{on:loginMode==='ssh_key'}">
+                  <input type="radio" value="root_password" v-model="loginMode">
+                  <template v-if="isWindowsImage">Administrator 密码模式（设置密码并启用 RDP）</template>
+                  <template v-else>Root 密码模式（自动改密并放开 Root SSH）</template></label>
+                <label class="sw" :class="{on:loginMode==='ssh_key'}" v-if="!isWindowsImage">
                   <input type="radio" value="ssh_key" v-model="loginMode"> SSH 密钥模式</label>
               </div>
 
@@ -910,11 +912,15 @@ pre.log.big{max-height:520px}
                   <label class="sw" :class="{on:pwdMode==='custom'}">
                     <input type="radio" value="custom" v-model="pwdMode"> 自定义密码</label>
                   <input v-model="rootPassword" :disabled="pwdMode!=='custom'" type="text"
-                         class="mono" placeholder="自定义 Root 密码" style="max-width:250px">
+                         class="mono" :placeholder="isWindowsImage?'自定义 Administrator 密码':'自定义 Root 密码'" style="max-width:250px">
                   <button class="sm" v-if="pwdMode==='custom'" @click="genPwd">生成强密码</button>
                 </div>
                 <div class="hint" style="margin-top:7px">
-                  随机密码会写入实例列表「Root密码」列，双击即可复制。密码仅存于本机数据库。
+                  <template v-if="isWindowsImage">随机密码会写入实例列表「密码」列，双击即可复制。用「Administrator + 该密码」经 RDP（3389）登录，首次生效需等 1-3 分钟。密码仅存于本机数据库。</template>
+                  <template v-else>随机密码会写入实例列表「Root密码」列，双击即可复制。密码仅存于本机数据库。</template>
+                </div>
+                <div v-if="isWindowsImage && pwdMode==='custom'" class="hint" style="margin-top:5px;color:#c60">
+                  提示：Windows 密码需满足复杂度（≥8位，含大写、小写、数字中至少三类），否则实例上设置会失败。
                 </div>
               </div>
 
@@ -930,8 +936,8 @@ pre.log.big{max-height:520px}
                 </div>
               </div>
 
-              <div class="sep"></div>
-              <div class="grid g2">
+              <div class="sep" v-if="!isWindowsImage"></div>
+              <div class="grid g2" v-if="!isWindowsImage">
                 <label class="f">创建后执行的安装命令（SSH 就绪后自动执行）
                   <textarea v-model="postCommand" placeholder="例如：curl -fsSL https://example.com/install.sh | bash"></textarea>
                 </label>
@@ -939,8 +945,11 @@ pre.log.big{max-height:520px}
                   <textarea v-model="verifyCommand" placeholder="例如：docker ps | head -5"></textarea>
                 </label>
               </div>
-              <div v-if="activeImage&&activeImage.os==='windows'" class="alert e on" style="margin:11px 0 0">
-                <span>⚠</span><span>所选镜像为 Windows：不会执行 bash startup-script，Root 密码模式无效，请改用 SSH 密钥模式。</span>
+              <div v-if="isWindowsImage" class="alert on" style="margin:11px 0 0;background:#eef6ff;border-color:#8bf">
+                <span>ℹ</span><span>所选镜像为 <b>Windows</b>：将通过 PowerShell 启动脚本设置 Administrator 密码并启用 RDP（3389）。
+                创建后用「Administrator + 密码」经远程桌面登录（首次生效需等 1-3 分钟）。
+                Windows 不支持 SSH bash 命令，故不提供「创建后执行命令」。
+                <b>请确保防火墙放行 3389 端口</b>（可在下方勾选「放开全开放防火墙」，或到 GCP 控制台单独放行 RDP）。</span>
               </div>
             </div>
 
@@ -1084,7 +1093,7 @@ pre.log.big{max-height:520px}
                 <b>防火墙</b><span>{{ spec.auto_open_firewall ? '全开放（入站+出站 0.0.0.0/0）' : '不自动放开' }}</span>
                 <b>省钱</b><span>{{ savings.enabled }}/{{ savings.total }} 项已启用{{ spec.disable_ops_agent?' · 无 Ops Agent':'' }}{{ spec.no_backup?' · 无备份':'' }}{{ !spec.deletion_protection?' · 可随时回收':'' }}</span>
                 <b>标签</b><span>{{ spec.tags.length?spec.tags.join(', '):'（无）' }}</span>
-                <b>登录</b><span>{{ loginMode==='root_password'?(pwdMode==='random'?'Root 密码（随机）':'Root 密码（自定义）'):'SSH 密钥' }}</span>
+                <b>登录</b><span>{{ loginMode==='root_password'?((isWindowsImage?'Administrator 密码':'Root 密码')+(pwdMode==='random'?'（随机）':'（自定义）'))+(isWindowsImage?' · RDP 3389':''):'SSH 密钥' }}</span>
                 <b>规模</b><span>{{ checkedAccountIds.length }} 账号 × {{ opts.count }} 台，实例并发 {{ opts.concurrency }}</span>
                 <b>备注</b><span>{{ instNote || '（未填）' }}</span>
                 <b>创建后</b><span>{{ (postCommand?'安装命令 ✓':'无') + (verifyCommand?' · 验证 ✓':'')
@@ -1279,7 +1288,7 @@ pre.log.big{max-height:520px}
           <div class="tw" v-if="instances.length">
             <table class="resp">
               <thead><tr><th style="width:36px"></th><th>实例名称 / 备注</th><th>公网 IP / 所在地</th>
-                <th>状态</th><th>机型</th><th>镜像</th><th>磁盘</th><th>Root 密码</th>
+                <th>状态</th><th>机型</th><th>镜像</th><th>磁盘</th><th>登录密码</th>
                 <th>费用（每小时 / 每天 / 已用）</th><th>账号</th>
                 <th v-if="can('operate')">操作</th></tr></thead>
               <tbody>
@@ -2307,6 +2316,7 @@ const __APP_REF__ = createApp({
       return (this.catalog.machine_types||[]).find(m=>m.name===this.activeMachineName) || null;
     },
     activeImage(){ return (this.catalog.images||[]).find(i=>i.key===this.spec.image_key) || null; },
+    isWindowsImage(){ return !!(this.activeImage && this.activeImage.os==='windows'); },
     activeDisk(){ return (this.catalog.disk_types||[]).find(d=>d.name===this.spec.disk_type) || {}; },
     primaryRegion(){
       if(this.spec.region_mode==='single') return this.spec.region;
@@ -3059,6 +3069,8 @@ const __APP_REF__ = createApp({
     /* ───────── 创建 ───────── */
     buildPayload(dry){
       const root = this.loginMode==='root_password';
+      // ★ Windows 不走 SSH bash 命令，创建后命令一律清空（前端也隐藏了这两个输入框）。
+      const win = this.isWindowsImage;
       return {
         account_ids: this.checkedAccountIds, count: this.opts.count,
         spec: this.buildSpec(),
@@ -3071,7 +3083,7 @@ const __APP_REF__ = createApp({
         //   后者现在是「命令执行」页的选择状态，用户先在那页勾了 docker
         //   再回来建机，就会把这台新机器也一起装上，属于典型的串状态 bug。
         installs: [],
-        post_command: this.postCommand, verify_command: this.verifyCommand,
+        post_command: win ? '' : this.postCommand, verify_command: win ? '' : this.verifyCommand,
         concurrency: this.opts.concurrency, account_workers: this.opts.account_workers,
         retry_count: this.opts.retry_count, ssh_timeout: this.opts.ssh_timeout,
         idle_timeout: this.opts.idle_timeout, command_timeout: this.opts.command_timeout,
@@ -3448,6 +3460,9 @@ const __APP_REF__ = createApp({
     },
     'opts.count'(){ this.recalc(); },
     primaryRegion(){ this.loadCatalog(); },
+    // ★ 选中 Windows 镜像时，SSH 密钥模式无意义（Windows 用 RDP），自动切到密码模式。
+    //   后端也会做同样的回落，这里前端先切好，避免用户看到已隐藏的密钥模式仍被选中。
+    isWindowsImage(win){ if(win && this.loginMode==='ssh_key'){ this.loginMode='root_password'; } },
   },
 
   mounted(){ this.boot(); },

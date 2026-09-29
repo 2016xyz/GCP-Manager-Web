@@ -519,6 +519,45 @@ BASH;
         return str_replace('__PWD__', $safe, $tpl);
     }
 
+    /**
+     * 生成 Windows(PowerShell) 启动脚本：设置 Administrator 密码 + 启用 RDP。
+     * 与 Python 版 build_windows_startup_script 对拍。
+     *
+     * GCP Windows 实例**不执行** bash startup-script，改用元数据键
+     * windows-startup-script-ps1（PowerShell）。脚本在首次启动时设置
+     * Administrator 密码、启用账户、开启 RDP 并放行防火墙。
+     *
+     * PowerShell 单引号字符串转义规则：内部单引号翻倍（' → ''）。
+     */
+    public static function buildWindowsStartupScript(string $adminPassword): string
+    {
+        $tpl = <<<'PS1'
+#ps1_sysnative
+$ErrorActionPreference = 'Stop'
+try {
+    $pw = '__PWD__'
+    $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+    $admin = Get-LocalUser -Name 'Administrator' -ErrorAction SilentlyContinue
+    if ($admin) {
+        Set-LocalUser -Name 'Administrator' -Password $sec -PasswordNeverExpires $true
+        Enable-LocalUser -Name 'Administrator'
+    } else {
+        net user Administrator $pw /active:yes | Out-Null
+    }
+    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -ErrorAction SilentlyContinue
+    Write-Output 'gcp windows password mode setup finished'
+} catch {
+    Write-Output ('gcp windows setup error: ' + $_.Exception.Message)
+}
+PS1;
+        // 换行/回车/NUL 剥掉，单引号翻倍转义（PowerShell 单引号字符串规则）
+        $pw = str_replace(["\n", "\r", "\0"], '', $adminPassword);
+        $safe = str_replace("'", "''", $pw);
+        return str_replace('__PWD__', $safe, $tpl);
+    }
+
     /** 生成一段随机 root 密码（字母数字 + 少量符号，与 Python _rand_password 同构） */
     public static function randPassword(int $length = 16): string
     {

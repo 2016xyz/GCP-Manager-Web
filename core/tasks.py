@@ -366,8 +366,18 @@ class TaskManager:
             post_command = (payload.get("post_command") or "").strip()
             verify_command = (payload.get("verify_command") or "").strip()
 
-            if spec.get("image_os") == "windows" and login_mode == "root_password":
-                self.log("[警告] 镜像为 Windows，startup-script 不会执行 bash，Root 密码模式无效，已按 SSH 密钥模式处理", task_id, "warn")
+            # ★ Windows 支持：密码模式对 Windows 走 PowerShell 启动脚本设置 Administrator
+            #   密码并启用 RDP（而不是像以前那样只警告不处理）。SSH 密钥模式对 Windows
+            #   无意义（Windows 不用 SSH 登录），若选了密钥模式则自动回落到密码模式。
+            if spec.get("image_os") == "windows":
+                if login_mode == "ssh_key":
+                    login_mode = "root_password"
+                    self.log("[提示] 镜像为 Windows，不支持 SSH 密钥登录，已自动切换为「密码模式」"
+                             "（设置 Administrator 密码 + 启用 RDP）", task_id, "warn")
+                else:
+                    self.log("[提示] 镜像为 Windows，将通过 PowerShell 启动脚本设置 Administrator "
+                             "密码并启用 RDP（3389）。创建后请用「Administrator + 该密码」经 RDP 登录，"
+                             "首次生效可能需要等待 1-3 分钟（GCPAgent 执行启动脚本）", task_id)
 
             def handle_account(acc):
                 if self._is_cancelled(task_id):
@@ -484,9 +494,16 @@ class TaskManager:
             name = _mk_name()
             root_password = ""
             startup_script = ""
+            is_windows = spec.get("image_os") == "windows"
             if login_mode == "root_password":
                 root_password = root_password_in or self._rand_password()
-                startup_script = ssh_mod.build_root_startup_script(root_password)
+                # ★ 按操作系统选择启动脚本：
+                #   Windows → PowerShell（设 Administrator 密码 + 启用 RDP）
+                #   Linux   → bash（设 root 密码 + 开放 SSH）
+                if is_windows:
+                    startup_script = ssh_mod.build_windows_startup_script(root_password)
+                else:
+                    startup_script = ssh_mod.build_root_startup_script(root_password)
 
             tried = set()
             ordered_regions = [reserved] + [r for r in candidates if r != reserved]
@@ -580,14 +597,21 @@ class TaskManager:
             #    的 root 密码，把 POST /api/instances/password 那道
             #    「重新输入自己的登录密码」的二次验证彻底绕过。
             #    实测过：viewer 调 /api/logs 能直接读到密码明文。
+            _cred_label = "Administrator密码" if is_windows else "Root密码"
+            _login_hint = "（RDP 登录：Administrator + 显示密码）" if is_windows else ""
             self.log(f"[{label}] ✅ {name} 创建成功 | {actual_region}({zone}) | IP {ip} | "
                      f"{spec['machine_type']} | {spec['image_label']}"
-                     + (" | Root密码已记录（在实例列表点「显示密码」查看，需二次验证）"
+                     + (f" | {_cred_label}已记录（在实例列表点「显示密码」查看，需二次验证）{_login_hint}"
                         if root_password else ""),
                      task_id, "success")
 
             # ---------- 创建后 SSH 阶段 ----------
-            if post_command or verify_command:
+            # ★ Windows 不走 SSH（用 RDP/WinRM），跳过创建后的 SSH 命令阶段。
+            #   Windows 的初始化已在 PowerShell 启动脚本里完成，这里的 bash 命令对它无意义。
+            if is_windows and (post_command or verify_command):
+                self.log(f"[{label}] {name} 为 Windows 实例，跳过创建后 SSH 命令阶段"
+                         f"（Windows 用 RDP/WinRM，不支持 SSH bash 命令）", task_id, "warn")
+            elif post_command or verify_command:
                 user = "root" if login_mode == "root_password" else spec.get("image_user", "ubuntu")
                 pwd = root_password
                 ssh_timeout = int(payload.get("ssh_timeout") or 300)

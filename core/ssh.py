@@ -288,3 +288,60 @@ def build_root_startup_script(root_password):
     safe_pw = shlex.quote(pw)
     # 用字符串拼接而非 .format()，避免密码中的 { } 被当成格式占位符
     return ROOT_STARTUP_SCRIPT_TEMPLATE.replace("{password}", safe_pw)
+
+
+# ---------------------------------------------------------------------------
+# Windows 启动脚本（PowerShell）
+# ---------------------------------------------------------------------------
+# GCP Windows 实例**不执行** bash startup-script，改用元数据键
+# `windows-startup-script-ps1`（PowerShell）。这里生成一段脚本，在实例首次
+# 启动时：① 设置 Administrator 密码为指定值；② 启用 RDP 并放行防火墙；
+# ③ 启用管理员账户（避免默认禁用）。这样用户就能用「Administrator + 该密码」
+# 通过 RDP（3389）登录，无需走 GCP 的「重置 Windows 密码」流程。
+#
+# ★ 安全说明：脚本会被写进实例元数据，任何能读元数据的进程都能看到明文密码。
+#   这是 Windows 在 GCP 上设置已知密码的固有权衡（与 Linux 的 startup-script
+#   同理）。生产环境如需更安全，应改走「GCP 重置密码 + RSA 加密回传」机制，
+#   但那要求非对称密钥交换，且拿到的是随机密码而非用户指定密码。
+#
+# PowerShell 单引号字符串里，单引号自身通过「翻倍」转义（'' 表示一个 '）。
+WINDOWS_STARTUP_SCRIPT_TEMPLATE = """#ps1_sysnative
+$ErrorActionPreference = 'Stop'
+try {{
+    $pw = '{password}'
+    $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+    # 设置 Administrator 密码并确保账户启用、密码永不过期
+    $admin = Get-LocalUser -Name 'Administrator' -ErrorAction SilentlyContinue
+    if ($admin) {{
+        Set-LocalUser -Name 'Administrator' -Password $sec -PasswordNeverExpires $true
+        Enable-LocalUser -Name 'Administrator'
+    }} else {{
+        # 某些镜像默认管理员不叫 Administrator；用 net user 兜底设置
+        net user Administrator $pw /active:yes | Out-Null
+    }}
+    # 启用 RDP
+    Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+    # 放行 RDP 防火墙规则组
+    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+    # 启用 NLA（网络级认证），更安全
+    Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -ErrorAction SilentlyContinue
+    Write-Output 'gcp windows password mode setup finished'
+}} catch {{
+    Write-Output ('gcp windows setup error: ' + $_.Exception.Message)
+}}
+"""
+
+
+def build_windows_startup_script(admin_password):
+    """生成 Windows(PowerShell) 启动脚本：设置 Administrator 密码 + 启用 RDP。
+
+    与 build_root_startup_script 对称，供 Windows 镜像的「密码模式」使用。
+    PowerShell 单引号字符串转义规则：内部单引号翻倍（' → ''）。
+    """
+    pw = admin_password or ""
+    # 换行/回车/NUL 在 PowerShell 单引号里没有意义且会破坏脚本，剥掉
+    pw = pw.replace("\n", "").replace("\r", "").replace("\0", "")
+    # 单引号翻倍转义
+    safe_pw = pw.replace("'", "''")
+    # 模板用了 {{ }} 转义花括号，这里用 format 注入 password
+    return WINDOWS_STARTUP_SCRIPT_TEMPLATE.format(password=safe_pw)

@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,17 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.5.7",
+        "date": "2026-09-29",
+        "notes": [
+            "【新增】支持创建 Windows 实例并自动配置密码：选择 Windows 镜像（Server 2022/2019）后，密码模式会通过 PowerShell 启动脚本（windows-startup-script-ps1）自动设置 Administrator 密码、启用账户、开启 RDP（3389）并放行防火墙。创建后用「Administrator + 密码」经远程桌面登录，首次生效需等 1-3 分钟（GCPAgent 执行启动脚本）",
+            "【自适应】创建流程按镜像操作系统自动分流：Linux 走 bash startup-script（设 root 密码 + 开放 SSH），Windows 走 PowerShell（设 Administrator 密码 + 启用 RDP）。用错元数据键会导致脚本静默不执行、密码永远设不上，这是本次修复的关键点",
+            "【自适应】Windows 不支持 SSH：① 选 Windows 镜像时前端自动隐藏「SSH 密钥模式」并切到密码模式；② 后端对 Windows 跳过创建后的 SSH 命令阶段（Windows 用 RDP/WinRM，bash 命令对它无意义）；③ 实例列表密码列、创建摘要、成功日志均按 OS 显示 Root密码/Administrator密码",
+            "【安全】Windows 密码转义采用 PowerShell 单引号规则（内部单引号翻倍 ' → ''），与 Linux 的 shlex 转义对称，防止密码含特殊字符时脚本注入或语法破坏",
+            "【提示】Windows 镜像含 Windows 授权费、且不适用 Always Free 额度；前端提示需放行 3389 端口、密码需满足复杂度要求（≥8位，含大小写数字至少三类）",
+        ],
+    },
     {
         "version": "1.5.6",
         "date": "2026-09-29",

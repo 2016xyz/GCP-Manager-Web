@@ -145,7 +145,7 @@ IMAGES = {
     "centos-stream-9":       {"label": "CentOS Stream 9",                "project": "centos-cloud",        "family": "centos-stream-9",         "os": "linux", "default_user": "centos"},
     "cos-stable":            {"label": "Container-Optimized OS (Docker)", "project": "cos-cloud",           "family": "cos-stable",              "os": "linux", "default_user": "root", "note": "容器优化系统，自带 Docker，SSH 用户为 root"},
     "freebsd-14":            {"label": "FreeBSD 14",                     "project": "freebsd-org-cloud-dev", "family": "freebsd-14-0",          "os": "linux", "default_user": "freebsd"},
-    "windows-2022":          {"label": "Windows Server 2022 Datacenter", "project": "windows-cloud",       "family": "windows-2022",            "os": "windows", "default_user": "Administrator", "note": "Windows 镜像不支持 startup-script 的 bash 脚本，Root 密码模式不可用"},
+    "windows-2022":          {"label": "Windows Server 2022 Datacenter", "project": "windows-cloud",       "family": "windows-2022",            "os": "windows", "default_user": "Administrator", "note": "密码模式经 PowerShell 启动脚本设置 Administrator 密码并启用 RDP（3389）；不支持 SSH bash 命令。含 Windows 授权费"},
     "windows-2019":          {"label": "Windows Server 2019 Datacenter", "project": "windows-cloud",       "family": "windows-2019",            "os": "windows", "default_user": "Administrator", "note": "同上"},
 }
 

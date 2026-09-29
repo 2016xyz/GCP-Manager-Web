@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.5.6';
+    public const VERSION = '1.5.7';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,17 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.5.7',
+                'date'    => '2026-09-29',
+                'notes'   => [
+                    '【新增】支持创建 Windows 实例并自动配置密码：选择 Windows 镜像（Server 2022/2019）后，密码模式会通过 PowerShell 启动脚本（windows-startup-script-ps1）自动设置 Administrator 密码、启用账户、开启 RDP（3389）并放行防火墙。创建后用「Administrator + 密码」经远程桌面登录，首次生效需等 1-3 分钟',
+                    '【自适应】创建流程按镜像操作系统自动分流：Linux 走 bash startup-script，Windows 走 PowerShell。用错元数据键会导致脚本静默不执行、密码永远设不上',
+                    '【自适应】Windows 不支持 SSH：前端隐藏 SSH 密钥模式并切到密码模式；后端跳过创建后 SSH 命令阶段；密码列/摘要/日志按 OS 显示 Root密码/Administrator密码',
+                    '【安全】Windows 密码转义采用 PowerShell 单引号规则（单引号翻倍 \' → \'\'），与 Linux shlex 转义对称，防止注入',
+                    '【提示】Windows 镜像含授权费、不适用 Always Free；需放行 3389 端口、密码需满足复杂度要求',
+                ],
+            ],
             [
                 'version' => '1.5.6',
                 'date'    => '2026-09-29',
