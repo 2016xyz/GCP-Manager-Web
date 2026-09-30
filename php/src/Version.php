@@ -11,7 +11,7 @@ declare(strict_types=1);
 
 final class Version
 {
-    public const VERSION = '1.5.7';
+    public const VERSION = '1.5.8';
     public const APP_NAME = 'GCP Manager Web';
     public const APP_NAME_CN = 'GCP 批量管理控制台';
     public const REPO_URL = 'https://github.com/2016xyz/GCP-Manager-Web';
@@ -44,6 +44,20 @@ final class Version
     public static function changelog(): array
     {
         return [
+            [
+                'version' => '1.5.8',
+                'date'    => '2026-09-30',
+                'notes'   => [
+                    '【加固】随机密码生成器保证四类字符（大写/小写/数字/符号）各至少一个：旧实现纯随机极小概率缺某一类，而 Windows 复杂度策略要求四类至少三类，缺类会导致 Set-LocalUser 静默失败',
+                    '【加固】Windows 自填密码复杂度校验：不满足（≥8位且含大小写数字符号至少三类）则自动回落为合规随机密码并告警',
+                    '【加固】HTTP 409 换名重试增加次数上限（5 次），防止持续 409 时无限换名死循环',
+                    '【安全】WebSocket 服务器（ws-server.php）新增 Origin 校验，防跨站 WebSocket 劫持（CSWSH）窃取日志',
+                    '【修复】WebSocket Origin 校验只比较主机名（不含端口），避免 TLS 终止型反代下误伤合法连接；兼容 IPv6 字面量',
+                    '【加固】Windows PowerShell 脚本：net user 密码加双引号（防空格解析失败）；成功/失败落地标记文件便于排查',
+                    '【健壮】网络短名先 trim 空白再拼接，补齐空值回落默认网络与 https:// 前缀识别',
+                    '【清理】删除死变量 $netShort；修正 CSP 注释',
+                ],
+            ],
             [
                 'version' => '1.5.7',
                 'date'    => '2026-09-29',

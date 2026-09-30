@@ -287,6 +287,32 @@ function tryHandshake(array &$clients, int $cid): bool
         return false;
     }
 
+    // ★ Origin 校验（防跨站 WebSocket 劫持 CSWSH）：与 Python 版 ws_logs 对齐。
+    //   WebSocket 握手不受同源策略限制，浏览器会自动带上 Cookie。恶意网站可发起
+    //   跨域 WS 连接窃取日志（含 SSH 命令回显等敏感输出）。校验 Origin 的主机与
+    //   Host 头一致；无 Origin 头（非浏览器客户端，如自建脚本）时放行，由后续
+    //   Cookie 会话校验兜底（那类客户端本就不受 CSWSH 影响）。
+    $origin = trim($headers['origin'] ?? '');
+    if ($origin !== '') {
+        // 只比较主机名（不含端口）：TLS 终止型反代下 Origin 常无端口而 Host 可能带端口，
+        // 比整串会误伤合法连接。与 Python 版 ws_logs 口径一致。
+        $originHost = parse_url($origin, PHP_URL_HOST);
+        $hostHeader = trim($headers['host'] ?? '');
+        // 去掉 Host 头端口，兼容 IPv6 字面量 [::1]:port
+        if ($hostHeader !== '' && $hostHeader[0] === '[') {
+            $hostName = substr($hostHeader, 1, (strpos($hostHeader, ']') ?: 1) - 1);
+        } else {
+            $hostName = (strpos($hostHeader, ':') !== false)
+                ? substr($hostHeader, 0, strpos($hostHeader, ':'))
+                : $hostHeader;
+        }
+        if (!is_string($originHost) || $originHost === '' || strcasecmp($originHost, $hostName) !== 0) {
+            closeWith($clients[$cid]['sock'], 4403, '跨站来源被拒绝');
+            dropClient($clients, $cid);
+            return false;
+        }
+    }
+
     // 回 101
     $accept = base64_encode(sha1($key . WS_GUID, true));
     $resp = "HTTP/1.1 101 Switching Protocols\r\n"

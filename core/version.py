@@ -10,7 +10,7 @@
   · PATCH 向后兼容的问题修复
 """
 
-VERSION = "1.5.7"
+VERSION = "1.5.8"
 
 REPO_URL = "https://github.com/2016xyz/GCP-Manager-Web"
 REPO_NAME = "2016xyz/GCP-Manager-Web"
@@ -23,6 +23,20 @@ APP_NAME_CN = "GCP 批量管理控制台"
 
 # 更新日志：新版本往上追加
 CHANGELOG = [
+    {
+        "version": "1.5.8",
+        "date": "2026-09-30",
+        "notes": [
+            "【加固】随机密码生成器保证四类字符（大写/小写/数字/符号）各至少一个：旧实现纯随机，极小概率缺某一类，而 Windows 密码复杂度策略要求四类至少三类，缺类会导致 Set-LocalUser 静默失败、密码根本没设上。Python 与 PHP 双版本同步修复",
+            "【加固】Windows 自填密码复杂度校验：用户填的密码若不满足复杂度（≥8位且含大小写数字符号至少三类），自动回落为合规随机密码并告警，避免「报创建成功但 RDP 连不上且无从排查」",
+            "【加固】HTTP 409 换名重试增加次数上限（5 次）：防止 GCP 持续返回 409 时在同一可用区无限换名死循环",
+            "【安全】PHP WebSocket 服务器（ws-server.php）新增 Origin 校验，与 Python 版对齐，防跨站 WebSocket 劫持（CSWSH）窃取日志",
+            "【修复】WebSocket Origin 校验改为只比较主机名（不含端口）：TLS 终止型反向代理下 Origin 常无端口而 Host 带端口，比整串会误伤合法连接。兼容 IPv6 字面量。Python 与 PHP 双版本一致",
+            "【加固】Windows PowerShell 脚本：net user 兜底分支密码加双引号（防含空格解析失败）；成功/失败各落地标记文件（C:\\gcp_win_pwd_ok.txt / gcp_win_pwd_error.txt）便于运维排查",
+            "【健壮】网络短名先 strip 空白再拼接，避免 \" my-vpc\" 生成非法路径；PHP 版补齐空值回落默认网络与 https:// 前缀识别，与 Python 对齐",
+            "【清理】删除 PHP 死变量 $netShort；修正 CSP 注释与实际值（connect-src 'self' 已涵盖同源 ws/wss）",
+        ],
+    },
     {
         "version": "1.5.7",
         "date": "2026-09-29",

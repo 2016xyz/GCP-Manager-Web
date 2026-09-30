@@ -542,13 +542,18 @@ try {
         Set-LocalUser -Name 'Administrator' -Password $sec -PasswordNeverExpires $true
         Enable-LocalUser -Name 'Administrator'
     } else {
-        net user Administrator $pw /active:yes | Out-Null
+        # 密码用双引号包裹，避免含空格时被 net user 当成额外参数
+        net user Administrator "$pw" /active:yes | Out-Null
     }
     Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
     Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
     Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -ErrorAction SilentlyContinue
+    # 成功标记文件，便于运维在实例上确认脚本真的跑完（类比 Linux 的 .gcp_root_mode_ok）
+    'ok' | Out-File -FilePath 'C:\gcp_win_pwd_ok.txt' -Encoding ascii -Force
     Write-Output 'gcp windows password mode setup finished'
 } catch {
+    # 失败也落地一个标记，写明原因，避免「报了成功但 RDP 连不上」时无从排查
+    ('error: ' + $_.Exception.Message) | Out-File -FilePath 'C:\gcp_win_pwd_error.txt' -Encoding ascii -Force
     Write-Output ('gcp windows setup error: ' + $_.Exception.Message)
 }
 PS1;
@@ -558,16 +563,34 @@ PS1;
         return str_replace('__PWD__', $safe, $tpl);
     }
 
-    /** 生成一段随机 root 密码（字母数字 + 少量符号，与 Python _rand_password 同构） */
+    /**
+     * 生成一段随机密码，与 Python _rand_password 同构。
+     * ★ 保证四类字符各至少一个（小写/大写/数字/符号）：否则随机串可能恰好缺某一类，
+     *   而 Windows 密码复杂度策略要求四类里至少三类，缺类会导致 Set-LocalUser 静默失败、
+     *   Administrator 密码根本没设上（Linux 侧无此要求，但统一处理无副作用且强度稳定达标）。
+     */
     public static function randPassword(int $length = 16): string
     {
-        $alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^*-_';
-        $max = strlen($alphabet) - 1;
-        $out = '';
-        for ($i = 0; $i < $length; $i++) {
-            $out .= $alphabet[random_int(0, $max)];   // S8：用 random_int
+        if ($length < 4) {
+            $length = 4;
         }
-        return $out;
+        $lowers  = 'abcdefghijklmnopqrstuvwxyz';
+        $uppers  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $digits  = '0123456789';
+        $symbols = '!@#%^*-_';
+        $pick = static fn(string $s): string => $s[random_int(0, strlen($s) - 1)];
+        // 先每类各取一个，保证复杂度
+        $chars = [$pick($lowers), $pick($uppers), $pick($digits), $pick($symbols)];
+        $all = $lowers . $uppers . $digits . $symbols;
+        for ($i = count($chars); $i < $length; $i++) {
+            $chars[] = $pick($all);
+        }
+        // 打乱，避免「前四位固定各类」的可预测结构（Fisher-Yates，用 random_int 满足 S8）
+        for ($i = count($chars) - 1; $i > 0; $i--) {
+            $j = random_int(0, $i);
+            [$chars[$i], $chars[$j]] = [$chars[$j], $chars[$i]];
+        }
+        return implode('', $chars);
     }
 
     // ==================================================================

@@ -500,18 +500,20 @@ def build_instance_spec(user_spec):
     else:
         spec["machine_type_source"] = "catalog"
 
-    if spec.get("network") == "default" or not spec.get("network"):
+    # 先 strip 掉首尾空白，避免 " my-vpc" 拼出非法路径 global/networks/ my-vpc
+    _net = str(spec.get("network") or "").strip()
+    if _net == "default" or not _net:
         # 空值或 "default" 都用默认网络
         spec["network_url"] = DEFAULT_NETWORK
-    elif str(spec.get("network", "")).startswith(("projects/", "global/", "https://")):
+    elif _net.startswith(("projects/", "global/", "https://")):
         # 已经是完整路径或相对路径，直接使用
-        spec["network_url"] = spec["network"]
+        spec["network_url"] = _net
     else:
         # 短名形式（如 "my-vpc"）→ 拼接成 global/networks/短名
         # ★ 注意：GCP 会在创建实例时验证网络是否存在；这里不做预检，
         # 以便支持「先建网络、后建实例」的工作流。若网络不存在，
         # create_instance 会返回明确的 404/400 错误。
-        spec["network_url"] = f"global/networks/{spec.get('network')}"
+        spec["network_url"] = f"global/networks/{_net}"
 
     subnet = str(spec.get("subnet") or "default")
     # 子网 URL 必须与实例所在 region 匹配，否则 API 报

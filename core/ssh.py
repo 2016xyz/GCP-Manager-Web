@@ -317,7 +317,8 @@ try {{
         Enable-LocalUser -Name 'Administrator'
     }} else {{
         # 某些镜像默认管理员不叫 Administrator；用 net user 兜底设置
-        net user Administrator $pw /active:yes | Out-Null
+        # 密码用双引号包裹，避免含空格时被 net user 当成额外参数
+        net user Administrator "$pw" /active:yes | Out-Null
     }}
     # 启用 RDP
     Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0
@@ -325,8 +326,12 @@ try {{
     Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
     # 启用 NLA（网络级认证），更安全
     Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -ErrorAction SilentlyContinue
+    # 成功标记文件，便于运维在实例上确认脚本真的跑完（类比 Linux 的 .gcp_root_mode_ok）
+    'ok' | Out-File -FilePath 'C:\\gcp_win_pwd_ok.txt' -Encoding ascii -Force
     Write-Output 'gcp windows password mode setup finished'
 }} catch {{
+    # 失败也落地一个标记，写明原因，避免「报了成功但 RDP 连不上」时无从排查
+    ('error: ' + $_.Exception.Message) | Out-File -FilePath 'C:\\gcp_win_pwd_error.txt' -Encoding ascii -Force
     Write-Output ('gcp windows setup error: ' + $_.Exception.Message)
 }}
 """

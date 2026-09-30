@@ -49,6 +49,23 @@ def _is_name_conflict(msg):
     return "already exists" in m or "http 409" in m or "alreadyexists" in m
 
 
+def _win_pwd_ok(pw):
+    """Windows 密码复杂度校验：长度≥8，且大写/小写/数字/符号四类里至少含三类。
+    对应 Windows 默认密码策略；不满足会导致 Set-LocalUser 静默失败。"""
+    if not pw or len(pw) < 8:
+        return False
+    cats = 0
+    if any(c.islower() for c in pw):
+        cats += 1
+    if any(c.isupper() for c in pw):
+        cats += 1
+    if any(c.isdigit() for c in pw):
+        cats += 1
+    if any(not c.isalnum() for c in pw):
+        cats += 1
+    return cats >= 3
+
+
 def sanitize_task_for_client(task):
     """
     返回可安全下发给客户端的任务副本：剥掉凭据类字段，只留存在性标记。
@@ -497,6 +514,15 @@ class TaskManager:
             is_windows = spec.get("image_os") == "windows"
             if login_mode == "root_password":
                 root_password = root_password_in or self._rand_password()
+                # ★ Windows 密码复杂度兜底：用户自填密码若不满足 Windows 复杂度策略
+                #   （长度≥8 且含大写/小写/数字/符号四类里至少三类），Set-LocalUser 会
+                #   静默失败、密码根本没设上，而主流程仍报「创建成功」——用户 RDP 连不上
+                #   且无从排查。这里检测到不合规就换成保证合规的随机密码并告警。
+                if is_windows and root_password_in and not _win_pwd_ok(root_password):
+                    root_password = self._rand_password()
+                    self.log(f"[{label}] 自填密码不满足 Windows 复杂度要求"
+                             f"（≥8位且含大写/小写/数字/符号至少三类），已改用随机密码，"
+                             f"请在实例列表点「显示密码」查看", task_id, "warn")
                 # ★ 按操作系统选择启动脚本：
                 #   Windows → PowerShell（设 Administrator 密码 + 启用 RDP）
                 #   Linux   → bash（设 root 密码 + 开放 SSH）
@@ -510,6 +536,11 @@ class TaskManager:
             random.shuffle(ordered_regions[1:])
             last_err = ""
             res = None
+            # ★ 409 换名重试的次数上限：防止 GCP 持续返回 409（例如命名策略问题）时
+            #   在同一可用区无限换名死循环（tried.discard(zone) 让该区永不耗尽）。
+            #   正常场景下 1 次换名即可解决；给到 5 次留足冗余。
+            name_conflict_retries = 0
+            MAX_NAME_CONFLICT_RETRIES = 5
             for region in ordered_regions:
                 zone_list = [z for z in self.zones_for_region(region, gcp) if z not in tried]
                 random.shuffle(zone_list)
@@ -529,11 +560,20 @@ class TaskManager:
                     # ★ 名字冲突（HTTP 409 already exists）：换个新名字在同一可用区再试。
                     #   409 通常是「上次请求其实建成功了但客户端超时重试」或「同名残留」，
                     #   换区无用、换名有效。重新生成名字后继续（不 break、不计入 tried）。
+                    #   有次数上限，避免持续 409 时死循环。
                     if _is_name_conflict(last_err):
-                        name = _mk_name()
-                        self.log(f"[{label}] 实例名冲突(409)，改用新名字 {name} 重试", task_id, "warn")
-                        tried.discard(zone)
-                        continue
+                        if name_conflict_retries < MAX_NAME_CONFLICT_RETRIES:
+                            name_conflict_retries += 1
+                            name = _mk_name()
+                            self.log(f"[{label}] 实例名冲突(409)，改用新名字 {name} 重试"
+                                     f"（{name_conflict_retries}/{MAX_NAME_CONFLICT_RETRIES}）",
+                                     task_id, "warn")
+                            tried.discard(zone)
+                            continue
+                        # 超过上限：不再无限换名，按普通失败处理，交给外层换区重试
+                        self.log(f"[{label}] 实例名冲突(409)重试已达上限 "
+                                 f"{MAX_NAME_CONFLICT_RETRIES} 次，放弃该区", task_id, "warn")
+                        break
                     if last_err != "资源耗尽":
                         break
                 if res:
@@ -678,10 +718,25 @@ class TaskManager:
 
     @staticmethod
     def _rand_password(length=16):
+        # ★ 保证四类字符各至少一个：小写、大写、数字、符号。
+        #   否则随机串可能恰好缺某一类 —— Windows 的密码复杂度策略要求
+        #   「大写/小写/数字/符号」四类里至少三类，缺类会导致 Set-LocalUser
+        #   静默失败、Administrator 密码根本没设上（Linux 侧无此要求，但统一处理
+        #   不会有副作用，且能保证生成的密码强度稳定达标）。
         import string as _s
         import secrets as _se
-        alphabet = _s.ascii_letters + _s.digits + "!@#%^*-_"
-        return "".join(_se.choice(alphabet) for _ in range(length))
+        if length < 4:
+            length = 4
+        lowers, uppers, digits = _s.ascii_lowercase, _s.ascii_uppercase, _s.digits
+        symbols = "!@#%^*-_"
+        pools = [lowers, uppers, digits, symbols]
+        # 先每类各取一个，保证复杂度；其余从全集随机
+        chars = [_se.choice(p) for p in pools]
+        allc = lowers + uppers + digits + symbols
+        chars += [_se.choice(allc) for _ in range(length - len(chars))]
+        # 打乱，避免「前四位固定各类」的可预测结构
+        _se.SystemRandom().shuffle(chars)
+        return "".join(chars)
 
     # ------------------------------------------------------------------
     # 对已有实例批量执行命令

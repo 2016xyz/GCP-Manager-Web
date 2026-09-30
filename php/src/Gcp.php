@@ -746,11 +746,14 @@ final class Gcp
         // 自定义机型：允许直接填 n2-standard-4 这类字符串
         $spec['machine_type_source'] = isset(Catalog::MACHINE_TYPES[$spec['machine_type']]) ? 'catalog' : 'custom';
 
-        $net = $spec['network'] ?? '';
-        if ($net === 'default') {
+        // 先 trim 掉首尾空白，避免 " my-vpc" 拼出非法路径；空值回落默认网络（与 Python 对齐）
+        $net = trim((string) ($spec['network'] ?? ''));
+        if ($net === 'default' || $net === '') {
             $spec['network_url'] = self::DEFAULT_NETWORK;
-        } elseif (strncmp((string) $net, 'projects/', 9) === 0 || strncmp((string) $net, 'global/', 7) === 0) {
-            $spec['network_url'] = (string) $net;
+        } elseif (strncmp($net, 'projects/', 9) === 0
+            || strncmp($net, 'global/', 7) === 0
+            || strncmp($net, 'https://', 8) === 0) {
+            $spec['network_url'] = $net;
         } else {
             $spec['network_url'] = "global/networks/{$net}";
         }
@@ -1433,7 +1436,6 @@ final class Gcp
 
         // 防火墙（按需，绑定实例所在 VPC）
         if (!empty($spec['auto_open_firewall'])) {
-            $netShort = self::network_short_name((string) ($base['network'] ?? '')) ?: 'default';
             [$missing, $why] = $this->firewall_coverage('', (string) ($spec['network_url'] ?? ''));
             if ($why !== '') {
                 $base['firewall'] = ['ok' => false, 'message' => $why];
@@ -1842,6 +1844,21 @@ final class Gcp
             || stripos($msg, 'alreadyExists') !== false;
     }
 
+    /** Windows 密码复杂度校验：长度≥8，且大写/小写/数字/符号四类里至少含三类。
+     *  对应 Windows 默认密码策略；不满足会导致 Set-LocalUser 静默失败。 */
+    private static function win_pwd_ok(string $pw): bool
+    {
+        if (strlen($pw) < 8) {
+            return false;
+        }
+        $cats = 0;
+        if (preg_match('/[a-z]/', $pw)) { $cats++; }
+        if (preg_match('/[A-Z]/', $pw)) { $cats++; }
+        if (preg_match('/[0-9]/', $pw)) { $cats++; }
+        if (preg_match('/[^a-zA-Z0-9]/', $pw)) { $cats++; }
+        return $cats >= 3;
+    }
+
     /**
      * dry-run 预览 —— 对应 Python _plan_preview。
      * 只做**只读**清点（list_instances），不创建任何资源、不产生费用。
@@ -2156,6 +2173,14 @@ final class Gcp
         if ($loginMode === 'root_password') {
             // 用户填了就用用户的，否则随机生成（Python：root_password_in or _rand_password()）
             $rootPassword = $rootPasswordIn !== '' ? $rootPasswordIn : Ssh::randPassword(16);
+            // ★ Windows 密码复杂度兜底：用户自填密码若不满足 Windows 复杂度策略，
+            //   Set-LocalUser 会静默失败、密码没设上，主流程却报「创建成功」，用户 RDP
+            //   连不上且无从排查。检测到不合规就换成保证合规的随机密码并告警。
+            if ($isWindows && $rootPasswordIn !== '' && !self::win_pwd_ok($rootPassword)) {
+                $rootPassword = Ssh::randPassword(16);
+                $log(sprintf('[%s] 自填密码不满足 Windows 复杂度要求（≥8位且含大写/小写/数字/符号至少三类），'
+                    . '已改用随机密码，请在实例列表点「显示密码」查看', $label), 'warn', $taskId);
+            }
             // ★ 按操作系统选择启动脚本：
             //   Windows → PowerShell（设 Administrator 密码 + 启用 RDP）
             //   Linux   → bash（设 root 密码 + 开放 SSH）
@@ -2174,6 +2199,10 @@ final class Gcp
         )));
         $lastErr = '';
         $res = null;
+        // ★ 409 换名重试的次数上限：防止 GCP 持续返回 409 时在同一可用区无限换名死循环
+        //   （unset($tried[$zone]) 让该区永不耗尽）。正常 1 次即可解决，给 5 次冗余。
+        $nameConflictRetries = 0;
+        $maxNameConflictRetries = 5;
         foreach ($ordered as $region) {
             $zoneList = [];
             foreach (self::zones_for_region($gcp, (string) $region) as $z) {
@@ -2200,10 +2229,18 @@ final class Gcp
                 //   409 通常是「上一次请求其实建成功了但客户端超时重试」或「同名残留」，
                 //   换区无用、换名有效。重新生成名字后继续（不 break、不计入 tried）。
                 if (self::is_name_conflict($lastErr)) {
-                    $name = $mkName();
-                    $log(sprintf('[%s] 实例名冲突(409)，改用新名字 %s 重试', $label, $name), 'warn', $taskId);
-                    unset($tried[$zone]);
-                    continue;
+                    if ($nameConflictRetries < $maxNameConflictRetries) {
+                        $nameConflictRetries++;
+                        $name = $mkName();
+                        $log(sprintf('[%s] 实例名冲突(409)，改用新名字 %s 重试（%d/%d）',
+                            $label, $name, $nameConflictRetries, $maxNameConflictRetries), 'warn', $taskId);
+                        unset($tried[$zone]);
+                        continue;
+                    }
+                    // 超过上限：不再无限换名，按普通失败处理，交给外层换区重试
+                    $log(sprintf('[%s] 实例名冲突(409)重试已达上限 %d 次，放弃该区',
+                        $label, $maxNameConflictRetries), 'warn', $taskId);
+                    break;
                 }
                 if (!self::is_resource_exhausted($lastErr)) {
                     break;   // 非「资源耗尽」类错误换区也没用（配额/权限/参数错）

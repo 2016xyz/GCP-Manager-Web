@@ -304,7 +304,8 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     resp.headers.setdefault("Permissions-Policy",
                             "geolocation=(), microphone=(), camera=(), payment=()")
-    # 控制台要连同源 WebSocket（/ws/logs），故 connect-src 放行 ws/wss
+    # 控制台要连同源 WebSocket（/ws/logs）。CSP3 里 connect-src 'self' 已涵盖
+    # 同源 ws/wss，无需再写 ws: wss:（那会放行任意主机的 WebSocket，是安全缺口）。
     resp.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; "
@@ -1893,16 +1894,23 @@ def api_read_sshkey(req: SSHKeyReadRequest, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
-    # ★ Origin 校验：WebSocket 握手不受同源策略限制，浏览器会自动携带 Cookie。
-    # 恶意网站可发起跨域 WS 连接窃取日志（含 SSH 命令回显等敏感输出）。
-    # 校验 Origin 头与 Host 头一致，阻止跨站 WebSocket 劫持。
-    origin = (ws.headers.get("origin") or "").strip().rstrip("/")
-    ws_host = (ws.headers.get("host") or "").strip()
+    # ★ Origin 校验（防跨站 WebSocket 劫持 CSWSH）：WebSocket 握手不受同源策略限制，
+    # 浏览器会自动携带 Cookie。恶意网站可发起跨域 WS 连接窃取日志（含 SSH 命令回显）。
+    # 只比较**主机名**（不含端口）：TLS 终止型反代下 Origin 常是
+    # https://host（无端口）而 Host 可能带端口，比整串会误伤合法连接。
+    # 无 Origin 头（非浏览器客户端，如脚本）时放行，由后续 Cookie 会话校验兜底
+    # （那类客户端本就不受 CSWSH 影响）。
+    origin = (ws.headers.get("origin") or "").strip()
     if origin:
         from urllib.parse import urlparse
-        parsed = urlparse(origin)
-        origin_host = parsed.netloc or parsed.path
-        if origin_host != ws_host:
+        origin_host = (urlparse(origin).hostname or "").lower()
+        ws_host_raw = (ws.headers.get("host") or "").strip()
+        # Host 头去掉端口，只留主机名；兼容 IPv6 字面量 [::1]:port
+        if ws_host_raw.startswith("["):
+            ws_hostname = ws_host_raw.split("]", 1)[0].lstrip("[").lower()
+        else:
+            ws_hostname = ws_host_raw.rsplit(":", 1)[0].lower() if ":" in ws_host_raw else ws_host_raw.lower()
+        if not origin_host or origin_host != ws_hostname:
             await ws.close(code=4403)
             return
     token = ws.cookies.get(COOKIE_NAME)
