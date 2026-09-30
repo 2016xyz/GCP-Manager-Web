@@ -2001,6 +2001,14 @@ final class Gcp
                     . '密码并启用 RDP（3389）。创建后请用「Administrator + 该密码」经 RDP 登录，'
                     . '首次生效可能需要等待 1-3 分钟（GCPAgent 执行启动脚本）', 'info', $taskId);
             }
+            // ★ RDP 可达性提示：PowerShell 脚本只放行 guest 内的 Windows 防火墙，
+            //   而 GCP VPC 防火墙默认不放行 3389 入站。未开 auto_open_firewall 时，
+            //   RDP 全程不可达 —— 必须明确提示，否则用户会「密码对了却连不上」。
+            if (empty($spec['auto_open_firewall'])) {
+                $log('[重要] 未开启「放开全开放防火墙」：GCP VPC 默认不放行 RDP(3389) 入站，'
+                    . '创建后将无法远程桌面连接。请勾选「放开全开放防火墙」，'
+                    . '或到 GCP 控制台为该 VPC 手动放行 tcp:3389 入站规则', 'warn', $taskId);
+            }
         }
 
         $started = microtime(true);

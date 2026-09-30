@@ -514,8 +514,11 @@ sleep 2
 echo "[INFO] root password mode setup finished"
 touch /root/.gcp_root_mode_ok
 BASH;
+        // ★ 先剥离换行/回车/NUL（与 Python 版及 Windows 版对齐）：内嵌换行会破坏
+        //   `echo 'root:...' | chpasswd` 这一行，甚至可能注入额外命令。
+        $pw = str_replace(["\n", "\r", "\0"], '', $rootPassword);
         // 单引号转义，等价于 Python 版的 replace("'", "'\"'\"'")
-        $safe = str_replace("'", "'\"'\"'", $rootPassword);
+        $safe = str_replace("'", "'\"'\"'", $pw);
         return str_replace('__PWD__', $safe, $tpl);
     }
 
